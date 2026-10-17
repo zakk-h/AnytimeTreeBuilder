@@ -1,0 +1,25 @@
+# Build output and dependency installations
+/bin/
+/build/
+node_modules/
+dist/
+.vite/
+.toolchain/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.so
+*.pyd
+*.dylib
+.nfs*
+
+# Local configuration and editor files
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.idea/
+.vscode/

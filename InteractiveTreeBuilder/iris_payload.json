@@ -1,0 +1,951 @@
+{
+  "graph": {
+    "root_trie_id": 0,
+    "trie_nodes": [
+      {
+        "id": 0,
+        "budget": 7,
+        "min_objective": 7,
+        "subproblem_size": 150,
+        "leaf_ids": [],
+        "split_ids": [
+          0,
+          1,
+          2
+        ]
+      },
+      {
+        "id": 1,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 50,
+        "leaf_ids": [
+          30
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 2,
+        "budget": 6,
+        "min_objective": 6,
+        "subproblem_size": 100,
+        "leaf_ids": [],
+        "split_ids": [
+          17,
+          18
+        ]
+      },
+      {
+        "id": 3,
+        "budget": 4,
+        "min_objective": 4,
+        "subproblem_size": 104,
+        "leaf_ids": [],
+        "split_ids": [
+          7,
+          8,
+          9
+        ]
+      },
+      {
+        "id": 4,
+        "budget": 3,
+        "min_objective": 3,
+        "subproblem_size": 46,
+        "leaf_ids": [
+          7
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 5,
+        "budget": 4,
+        "min_objective": 4,
+        "subproblem_size": 102,
+        "leaf_ids": [],
+        "split_ids": [
+          3,
+          4
+        ]
+      },
+      {
+        "id": 6,
+        "budget": 3,
+        "min_objective": 3,
+        "subproblem_size": 48,
+        "leaf_ids": [
+          0
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 7,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 50,
+        "leaf_ids": [
+          6
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 8,
+        "budget": 3,
+        "min_objective": 3,
+        "subproblem_size": 52,
+        "leaf_ids": [],
+        "split_ids": [
+          6
+        ]
+      },
+      {
+        "id": 9,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 97,
+        "leaf_ids": [],
+        "split_ids": [
+          5
+        ]
+      },
+      {
+        "id": 10,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 5,
+        "leaf_ids": [
+          1
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 11,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 50,
+        "leaf_ids": [
+          3
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 12,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 47,
+        "leaf_ids": [
+          2
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 13,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 47,
+        "leaf_ids": [
+          5
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 14,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 5,
+        "leaf_ids": [
+          4
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 15,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 50,
+        "leaf_ids": [
+          23
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 16,
+        "budget": 3,
+        "min_objective": 3,
+        "subproblem_size": 54,
+        "leaf_ids": [],
+        "split_ids": [
+          16
+        ]
+      },
+      {
+        "id": 17,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 95,
+        "leaf_ids": [],
+        "split_ids": [
+          15
+        ]
+      },
+      {
+        "id": 18,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 9,
+        "leaf_ids": [],
+        "split_ids": [
+          13,
+          14
+        ]
+      },
+      {
+        "id": 19,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 97,
+        "leaf_ids": [],
+        "split_ids": [
+          12
+        ]
+      },
+      {
+        "id": 20,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 7,
+        "leaf_ids": [
+          8
+        ],
+        "split_ids": [
+          10,
+          11
+        ]
+      },
+      {
+        "id": 21,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 6,
+        "leaf_ids": [
+          12
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 22,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 1,
+        "leaf_ids": [
+          11
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 23,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 6,
+        "leaf_ids": [
+          10
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 24,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 1,
+        "leaf_ids": [
+          9
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 25,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 50,
+        "leaf_ids": [
+          14
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 26,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 47,
+        "leaf_ids": [
+          13
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 27,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 6,
+        "leaf_ids": [
+          18
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 28,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 3,
+        "leaf_ids": [
+          17
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 29,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 6,
+        "leaf_ids": [
+          16
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 30,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 3,
+        "leaf_ids": [
+          15
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 31,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 50,
+        "leaf_ids": [
+          20
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 32,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 45,
+        "leaf_ids": [
+          19
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 33,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 47,
+        "leaf_ids": [
+          22
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 34,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 7,
+        "leaf_ids": [
+          21
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 35,
+        "budget": 3,
+        "min_objective": 3,
+        "subproblem_size": 54,
+        "leaf_ids": [],
+        "split_ids": [
+          20
+        ]
+      },
+      {
+        "id": 36,
+        "budget": 3,
+        "min_objective": 3,
+        "subproblem_size": 46,
+        "leaf_ids": [
+          27
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 37,
+        "budget": 3,
+        "min_objective": 3,
+        "subproblem_size": 52,
+        "leaf_ids": [],
+        "split_ids": [
+          19
+        ]
+      },
+      {
+        "id": 38,
+        "budget": 3,
+        "min_objective": 3,
+        "subproblem_size": 48,
+        "leaf_ids": [
+          24
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 39,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 47,
+        "leaf_ids": [
+          26
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 40,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 5,
+        "leaf_ids": [
+          25
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 41,
+        "budget": 1,
+        "min_objective": 1,
+        "subproblem_size": 47,
+        "leaf_ids": [
+          29
+        ],
+        "split_ids": []
+      },
+      {
+        "id": 42,
+        "budget": 2,
+        "min_objective": 2,
+        "subproblem_size": 7,
+        "leaf_ids": [
+          28
+        ],
+        "split_ids": []
+      }
+    ],
+    "split_nodes": [
+      {
+        "id": 0,
+        "parent_trie_id": 0,
+        "feature": 16,
+        "left_trie_id": 1,
+        "right_trie_id": 2,
+        "min_objective": 7
+      },
+      {
+        "id": 1,
+        "parent_trie_id": 0,
+        "feature": 21,
+        "left_trie_id": 3,
+        "right_trie_id": 4,
+        "min_objective": 7
+      },
+      {
+        "id": 2,
+        "parent_trie_id": 0,
+        "feature": 28,
+        "left_trie_id": 5,
+        "right_trie_id": 6,
+        "min_objective": 7
+      },
+      {
+        "id": 3,
+        "parent_trie_id": 5,
+        "feature": 16,
+        "left_trie_id": 7,
+        "right_trie_id": 8,
+        "min_objective": 4
+      },
+      {
+        "id": 4,
+        "parent_trie_id": 5,
+        "feature": 21,
+        "left_trie_id": 9,
+        "right_trie_id": 10,
+        "min_objective": 4
+      },
+      {
+        "id": 5,
+        "parent_trie_id": 9,
+        "feature": 16,
+        "left_trie_id": 11,
+        "right_trie_id": 12,
+        "min_objective": 2
+      },
+      {
+        "id": 6,
+        "parent_trie_id": 8,
+        "feature": 21,
+        "left_trie_id": 13,
+        "right_trie_id": 14,
+        "min_objective": 3
+      },
+      {
+        "id": 7,
+        "parent_trie_id": 3,
+        "feature": 16,
+        "left_trie_id": 15,
+        "right_trie_id": 16,
+        "min_objective": 4
+      },
+      {
+        "id": 8,
+        "parent_trie_id": 3,
+        "feature": 27,
+        "left_trie_id": 17,
+        "right_trie_id": 18,
+        "min_objective": 4
+      },
+      {
+        "id": 9,
+        "parent_trie_id": 3,
+        "feature": 28,
+        "left_trie_id": 19,
+        "right_trie_id": 20,
+        "min_objective": 4
+      },
+      {
+        "id": 10,
+        "parent_trie_id": 20,
+        "feature": 12,
+        "left_trie_id": 21,
+        "right_trie_id": 22,
+        "min_objective": 2
+      },
+      {
+        "id": 11,
+        "parent_trie_id": 20,
+        "feature": 13,
+        "left_trie_id": 23,
+        "right_trie_id": 24,
+        "min_objective": 2
+      },
+      {
+        "id": 12,
+        "parent_trie_id": 19,
+        "feature": 16,
+        "left_trie_id": 25,
+        "right_trie_id": 26,
+        "min_objective": 2
+      },
+      {
+        "id": 13,
+        "parent_trie_id": 18,
+        "feature": 12,
+        "left_trie_id": 27,
+        "right_trie_id": 28,
+        "min_objective": 2
+      },
+      {
+        "id": 14,
+        "parent_trie_id": 18,
+        "feature": 13,
+        "left_trie_id": 29,
+        "right_trie_id": 30,
+        "min_objective": 2
+      },
+      {
+        "id": 15,
+        "parent_trie_id": 17,
+        "feature": 16,
+        "left_trie_id": 31,
+        "right_trie_id": 32,
+        "min_objective": 2
+      },
+      {
+        "id": 16,
+        "parent_trie_id": 16,
+        "feature": 28,
+        "left_trie_id": 33,
+        "right_trie_id": 34,
+        "min_objective": 3
+      },
+      {
+        "id": 17,
+        "parent_trie_id": 2,
+        "feature": 21,
+        "left_trie_id": 35,
+        "right_trie_id": 36,
+        "min_objective": 6
+      },
+      {
+        "id": 18,
+        "parent_trie_id": 2,
+        "feature": 28,
+        "left_trie_id": 37,
+        "right_trie_id": 38,
+        "min_objective": 6
+      },
+      {
+        "id": 19,
+        "parent_trie_id": 37,
+        "feature": 21,
+        "left_trie_id": 39,
+        "right_trie_id": 40,
+        "min_objective": 3
+      },
+      {
+        "id": 20,
+        "parent_trie_id": 35,
+        "feature": 28,
+        "left_trie_id": 41,
+        "right_trie_id": 42,
+        "min_objective": 3
+      }
+    ],
+    "leaf_nodes": [
+      {
+        "id": 0,
+        "parent_trie_id": 6,
+        "prediction": 2,
+        "loss": 3,
+        "subproblem_size": 48
+      },
+      {
+        "id": 1,
+        "parent_trie_id": 10,
+        "prediction": 2,
+        "loss": 2,
+        "subproblem_size": 5
+      },
+      {
+        "id": 2,
+        "parent_trie_id": 12,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 47
+      },
+      {
+        "id": 3,
+        "parent_trie_id": 11,
+        "prediction": 0,
+        "loss": 1,
+        "subproblem_size": 50
+      },
+      {
+        "id": 4,
+        "parent_trie_id": 14,
+        "prediction": 2,
+        "loss": 2,
+        "subproblem_size": 5
+      },
+      {
+        "id": 5,
+        "parent_trie_id": 13,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 47
+      },
+      {
+        "id": 6,
+        "parent_trie_id": 7,
+        "prediction": 0,
+        "loss": 1,
+        "subproblem_size": 50
+      },
+      {
+        "id": 7,
+        "parent_trie_id": 4,
+        "prediction": 2,
+        "loss": 3,
+        "subproblem_size": 46
+      },
+      {
+        "id": 8,
+        "parent_trie_id": 20,
+        "prediction": 2,
+        "loss": 2,
+        "subproblem_size": 7
+      },
+      {
+        "id": 9,
+        "parent_trie_id": 24,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 1
+      },
+      {
+        "id": 10,
+        "parent_trie_id": 23,
+        "prediction": 2,
+        "loss": 1,
+        "subproblem_size": 6
+      },
+      {
+        "id": 11,
+        "parent_trie_id": 22,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 1
+      },
+      {
+        "id": 12,
+        "parent_trie_id": 21,
+        "prediction": 2,
+        "loss": 1,
+        "subproblem_size": 6
+      },
+      {
+        "id": 13,
+        "parent_trie_id": 26,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 47
+      },
+      {
+        "id": 14,
+        "parent_trie_id": 25,
+        "prediction": 0,
+        "loss": 1,
+        "subproblem_size": 50
+      },
+      {
+        "id": 15,
+        "parent_trie_id": 30,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 3
+      },
+      {
+        "id": 16,
+        "parent_trie_id": 29,
+        "prediction": 2,
+        "loss": 1,
+        "subproblem_size": 6
+      },
+      {
+        "id": 17,
+        "parent_trie_id": 28,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 3
+      },
+      {
+        "id": 18,
+        "parent_trie_id": 27,
+        "prediction": 2,
+        "loss": 1,
+        "subproblem_size": 6
+      },
+      {
+        "id": 19,
+        "parent_trie_id": 32,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 45
+      },
+      {
+        "id": 20,
+        "parent_trie_id": 31,
+        "prediction": 0,
+        "loss": 1,
+        "subproblem_size": 50
+      },
+      {
+        "id": 21,
+        "parent_trie_id": 34,
+        "prediction": 2,
+        "loss": 2,
+        "subproblem_size": 7
+      },
+      {
+        "id": 22,
+        "parent_trie_id": 33,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 47
+      },
+      {
+        "id": 23,
+        "parent_trie_id": 15,
+        "prediction": 0,
+        "loss": 1,
+        "subproblem_size": 50
+      },
+      {
+        "id": 24,
+        "parent_trie_id": 38,
+        "prediction": 2,
+        "loss": 3,
+        "subproblem_size": 48
+      },
+      {
+        "id": 25,
+        "parent_trie_id": 40,
+        "prediction": 2,
+        "loss": 2,
+        "subproblem_size": 5
+      },
+      {
+        "id": 26,
+        "parent_trie_id": 39,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 47
+      },
+      {
+        "id": 27,
+        "parent_trie_id": 36,
+        "prediction": 2,
+        "loss": 3,
+        "subproblem_size": 46
+      },
+      {
+        "id": 28,
+        "parent_trie_id": 42,
+        "prediction": 2,
+        "loss": 2,
+        "subproblem_size": 7
+      },
+      {
+        "id": 29,
+        "parent_trie_id": 41,
+        "prediction": 1,
+        "loss": 1,
+        "subproblem_size": 47
+      },
+      {
+        "id": 30,
+        "parent_trie_id": 1,
+        "prediction": 0,
+        "loss": 1,
+        "subproblem_size": 50
+      }
+    ]
+  },
+  "meta": {
+    "featureNames": [
+      "x0 <= 4.950000047683716",
+      "x0 <= 5.25",
+      "x0 <= 5.450000047683716",
+      "x0 <= 5.8500001430511475",
+      "x0 <= 5.950000047683716",
+      "x0 <= 6.049999952316284",
+      "x0 <= 6.3500001430511475",
+      "x0 <= 6.6499998569488525",
+      "x0 <= 7.099999904632568",
+      "x1 <= 2.25",
+      "x1 <= 2.350000023841858",
+      "x1 <= 2.850000023841858",
+      "x1 <= 3.049999952316284",
+      "x1 <= 3.149999976158142",
+      "x1 <= 3.25",
+      "x2 <= 1.6500000357627869",
+      "x2 <= 2.449999988079071",
+      "x2 <= 3.899999976158142",
+      "x2 <= 4.650000095367432",
+      "x2 <= 4.75",
+      "x2 <= 4.8500001430511475",
+      "x2 <= 4.950000047683716",
+      "x2 <= 5.0",
+      "x2 <= 5.1499998569488525",
+      "x2 <= 5.25",
+      "x2 <= 5.349999904632568",
+      "x3 <= 1.350000023841858",
+      "x3 <= 1.550000011920929",
+      "x3 <= 1.6500000357627869",
+      "x3 <= 1.75",
+      "x3 <= 1.8499999642372131"
+    ],
+    "continuousGroups": {
+      "sepal length (cm)": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "sepal width (cm)": [
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "petal length (cm)": [
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25
+      ],
+      "petal width (cm)": [
+        26,
+        27,
+        28,
+        29,
+        30
+      ]
+    },
+    "thresholds": {
+      "0": 4.950000047683716,
+      "1": 5.25,
+      "2": 5.450000047683716,
+      "3": 5.8500001430511475,
+      "4": 5.950000047683716,
+      "5": 6.049999952316284,
+      "6": 6.3500001430511475,
+      "7": 6.6499998569488525,
+      "8": 7.099999904632568,
+      "9": 2.25,
+      "10": 2.350000023841858,
+      "11": 2.850000023841858,
+      "12": 3.049999952316284,
+      "13": 3.149999976158142,
+      "14": 3.25,
+      "15": 1.6500000357627869,
+      "16": 2.449999988079071,
+      "17": 3.899999976158142,
+      "18": 4.650000095367432,
+      "19": 4.75,
+      "20": 4.8500001430511475,
+      "21": 4.950000047683716,
+      "22": 5.0,
+      "23": 5.1499998569488525,
+      "24": 5.25,
+      "25": 5.349999904632568,
+      "26": 1.350000023841858,
+      "27": 1.550000011920929,
+      "28": 1.6500000357627869,
+      "29": 1.75,
+      "30": 1.8499999642372131
+    },
+    "gamma": 1,
+    "lambda_reg": 0.005,
+    "root_n": 150,
+    "depth_budget": 3,
+    "rashomon_mult": 0.05,
+    "lookahead_k": 1
+  }
+}

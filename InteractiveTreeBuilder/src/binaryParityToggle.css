@@ -1,0 +1,58 @@
+.settings-row .mini-button[title^="Currently displaying"] {
+  position: relative;
+  width: 46px;
+  min-width: 46px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #e2e8f0;
+  color: transparent;
+  font-size: 0;
+  line-height: 0;
+  overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
+  transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.settings-row .mini-button[title^="Currently displaying"]::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.28);
+  transition: transform 0.16s ease;
+}
+
+.settings-row .mini-button[title*="natural true/false branches"] {
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+.settings-row .mini-button[title*="natural true/false branches"]::after {
+  transform: translateX(20px);
+}
+
+.settings-row .mini-button[title*="raw threshold parity"]::after {
+  transform: translateX(0);
+}
+
+.settings-row .mini-button[title^="Currently displaying"]:hover {
+  background: #cbd5e1;
+  border-color: #94a3b8;
+}
+
+.settings-row .mini-button[title*="natural true/false branches"]:hover {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+
+.settings-row .mini-button[title^="Currently displaying"]:focus-visible {
+  outline: 3px solid rgba(59, 130, 246, 0.24);
+  outline-offset: 2px;
+}

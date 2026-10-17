@@ -1,0 +1,159 @@
+.starred-gallery-head-copy b {
+  font-size: 23px !important;
+  line-height: 1.15 !important;
+}
+
+.starred-gallery-head-copy span {
+  font-size: 14px !important;
+  line-height: 1.45 !important;
+}
+
+.starred-gallery-head {
+  padding: 20px 22px 18px !important;
+}
+
+.starred-gallery-grid {
+  gap: 16px !important;
+  padding: 20px 22px 24px !important;
+}
+
+.starred-tree-visual {
+  height: 128px !important;
+}
+
+.starred-tree-card-body {
+  gap: 11px !important;
+  padding: 14px !important;
+}
+
+.starred-tree-name {
+  font-size: 16px !important;
+  line-height: 1.25 !important;
+  padding: 7px 8px !important;
+  margin: -7px -8px 0 !important;
+}
+
+.starred-tree-status {
+  font-size: 11px !important;
+  padding: 5px 9px !important;
+}
+
+.starred-tree-time {
+  font-size: 11px !important;
+}
+
+.starred-tree-summary {
+  font-size: 13px !important;
+  line-height: 1.45 !important;
+}
+
+.starred-tree-rules {
+  gap: 6px !important;
+  min-height: 62px !important;
+  padding-top: 10px !important;
+}
+
+.starred-tree-rules-title {
+  font-size: 11px !important;
+  letter-spacing: 0.07em !important;
+}
+
+.starred-tree-rule {
+  font-size: 14px !important;
+  line-height: 1.35 !important;
+  font-weight: 800 !important;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+}
+
+.starred-tree-rule-more {
+  font-size: 11px !important;
+  line-height: 1.35 !important;
+}
+
+.starred-tree-open-card,
+.starred-tree-delete {
+  min-height: 36px !important;
+  font-size: 12px !important;
+}
+
+.starred-tree-delete {
+  font-size: 18px !important;
+}
+
+.starred-tree-number,
+.starred-tree-current-badge {
+  font-size: 10px !important;
+  padding: 5px 8px !important;
+}
+
+.starred-gallery-close {
+  font-size: 22px !important;
+}
+
+/* Keep all six header controls on one shared 3-column grid. */
+.header-actions {
+  width: 480px !important;
+  max-width: 42% !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  align-items: stretch !important;
+}
+
+#arborenum-header-tree-actions {
+  display: contents !important;
+}
+
+.header-actions > .settings-wrap,
+.header-actions > .upload-button,
+.header-actions > .status,
+#arborenum-header-tree-actions > .ghost-button {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+.header-actions > .settings-wrap > .ghost-button {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+.header-actions .ghost-button,
+.header-actions .status {
+  min-height: 38px;
+}
+
+.header-actions .status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+}
+
+#arborenum-header-tree-actions > .ghost-button {
+  white-space: nowrap;
+}
+
+/* The injected buttons begin empty; give them first-paint labels until JS syncs state. */
+.favorite-star-button:empty::before {
+  content: '☆ Star';
+}
+
+.favorite-open-button:empty::before {
+  content: '★ Favorites';
+}
+
+.favorite-open-button:empty::after {
+  content: '0';
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff4cf;
+  color: #8b5d00;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+}

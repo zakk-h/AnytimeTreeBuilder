@@ -1,0 +1,121 @@
+name: Build and publish wheels
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build_wheels:
+    name: ${{ matrix.os }} / CPython ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - windows-2022
+          - macos-15-intel
+          - macos-15
+
+        python:
+          - "39"
+          - "310"
+          - "311"
+          - "312"
+          - "313"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up workflow Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cibuildwheel
+        run: python -m pip install --upgrade pip cibuildwheel
+
+      - name: Build and test wheel
+        env:
+          CIBW_BUILD: "cp${{ matrix.python }}-*"
+          CIBW_SKIP: "*-musllinux_*"
+
+          CIBW_ARCHS_WINDOWS: "AMD64"
+          CIBW_ARCHS_MACOS: "auto"
+
+          CIBW_BUILD_VERBOSITY: "3"
+          CIBW_TEST_ENVIRONMENT: "PYTHONUNBUFFERED=1"
+
+          CIBW_TEST_COMMAND: >-
+            python -u -X faulthandler {project}/tests/wheel_smoke_test.py
+
+        run: python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-cp${{ matrix.python }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build source distribution
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --sdist
+
+      - name: Upload source distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish_pypi:
+    name: Publish to PyPI
+    needs:
+      - build_wheels
+      - build_sdist
+
+    runs-on: ubuntu-22.04
+
+    environment:
+      name: pypi
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+
+      - name: Collect distributions
+        run: |
+          mkdir dist
+          find dist-artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) \
+            -exec cp {} dist/ \;
+          ls -lh dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

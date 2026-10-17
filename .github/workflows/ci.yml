@@ -1,0 +1,27 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-builder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: InteractiveTreeBuilder/package-lock.json
+      - name: Build and run native and frontend checks
+        run: ./build.sh
+      - name: Exercise the native HTTP API
+        run: >-
+          python3 ArborEnum/native/tests/test_live_api.py
+          bin/arborenum-builder InteractiveTreeBuilder/dist/index.html
