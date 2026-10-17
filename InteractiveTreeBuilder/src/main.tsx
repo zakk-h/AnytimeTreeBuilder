@@ -16,6 +16,7 @@ import {
   Position,
   type Edge,
   type Node,
+  type NodeChange,
   MarkerType,
   useReactFlow,
   ReactFlowProvider,
@@ -33,7 +34,8 @@ import {
   SlidersHorizontal,
   Sparkles,
   Undo2,
-  Upload,
+  Network,
+  ChevronRight,
 } from 'lucide-react';
 
 import type {
@@ -75,6 +77,7 @@ import {
 import { layoutTree } from './layout';
 import './style.css';
 import { LiveEnumerationPanel } from './LiveEnumerationPanel';
+import { UploadMenu } from './UploadMenu';
 import { NativeGraphAdapter, nativeApi, type NativeNodeView, type NativeCompletion, type NativeConstraint } from './nativeGraph';
 import type { ArborEnumBuilderMeta } from './arborenumPayload';
 import { normalizeArborEnumPayload, rememberCurrentPayload } from './arborenumPayload';
@@ -146,12 +149,12 @@ type ChoiceGroupEntry = {
 
 const DEFAULT_COLORS: BuilderColors = {
   splitNode: '#ffffff',
-  leafNode: '#f0fdf4',
+  leafNode: '#eaf2e9',
   leafNodesByClass: {
     '-1': '#D1D5DB',
   },
-  edge: '#8da2b8',
-  background: '#fbfdff',
+  edge: '#9caeaa',
+  background: '#f6f5f0',
 };
 
 const BINARY_GROUP_LABEL = 'Binary features';
@@ -367,11 +370,6 @@ function stripZeros(x: string): string {
   return x.replace(/\.?0+$/, '');
 }
 
-function compactFeatureName(name: string, maxLen = 19): string {
-  if (name.length <= maxLen) return name;
-  return `${name.slice(0, maxLen).trimEnd()}…`;
-}
-
 function formatThresholdValue(value: unknown, decimals = 3): string {
   const num = Number(value);
 
@@ -399,7 +397,7 @@ function prettySplitLabel(
   const group = groupName(feature, meta);
 
   if (group) {
-    return `${compactFeatureName(customGroupName(group, ui))} ≤ ${prettyThresholdLabel(
+    return `${customGroupName(group, ui)} ≤ ${prettyThresholdLabel(
       feature,
       meta,
       thresholdDecimals,
@@ -407,7 +405,7 @@ function prettySplitLabel(
   }
 
   if (binaryFeatureIsFlipped(feature, meta, ui)) {
-    return compactFeatureName(naturalBinaryFeatureName(feature, meta, ui), 28);
+    return naturalBinaryFeatureName(feature, meta, ui);
   }
 
   const raw = customFeatureName(feature, meta, ui);
@@ -417,7 +415,7 @@ function prettySplitLabel(
     (_match, op, value) => `${op} ${formatThresholdValue(value, thresholdDecimals)}`,
   );
 
-  return compactFeatureName(formatted, 28);
+  return formatted;
 }
 
 function fullSplitLabel(
@@ -716,6 +714,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
       <div className="node-icon">{icon}</div>
 
       <div className="node-copy">
+        <div className="node-eyebrow">{b.kind === 'split' ? 'Split rule' : b.kind === 'leaf' ? 'Prediction' : 'Decision point'}<span>#{b.uid}</span></div>
         <div
           className="node-title"
           title={b.kind === 'split' ? fullSplitLabel(b.feature, meta, thresholdDecimals, ui) : title}
@@ -809,7 +808,9 @@ function SplitButton({
           feasible ? '' : 'choice-card-disabled'
         }`}
         onClick={clickCard}
+        onKeyDown={event => { if (feasible && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onClick(); } }}
         role="button"
+        aria-disabled={!feasible}
         tabIndex={feasible ? 0 : -1}
         title={disabledTitle}
       >
@@ -841,7 +842,9 @@ function SplitButton({
         feasible ? '' : 'choice-card-disabled'
       }`}
       onClick={clickCard}
+      onKeyDown={event => { if (feasible && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onClick(); } }}
       role="button"
+      aria-disabled={!feasible}
       tabIndex={feasible ? 0 : -1}
       title={disabledTitle}
     >
@@ -1067,8 +1070,8 @@ function SidePanel({
           <Sparkles size={19} />
         </div>
         <div>
-          <div className="brand-title">Interactive Tree Builder</div>
-          <div className="brand-subtitle">Guaranteed Rashomon membership</div>
+          <div className="brand-title">Tree overview</div>
+          <div className="brand-subtitle">Every choice stays within your budget.</div>
         </div>
       </div>
 
@@ -1380,7 +1383,7 @@ function SidePanel({
                     </div>
 
                     <div className="feature-summary-hint">
-                      Click to choose threshold for {entry.name}
+                      View available thresholds →
                     </div>
                   </button>
                 </motion.div>
@@ -1791,10 +1794,20 @@ function FlowView({
   pushHistory: () => void;
 }) {
   const rf = useReactFlow();
+  const container = useRef<HTMLDivElement>(null);
+  const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({});
+  const measureNodes = (changes: NodeChange[]) => setNodeHeights(previous => {
+    let next = previous;
+    for (const change of changes) if (change.type === 'dimensions' && change.dimensions && previous[change.id] !== change.dimensions.height) {
+      if (next === previous) next = { ...previous };
+      next[change.id] = change.dimensions.height;
+    }
+    return next;
+  });
 
   const { nodes: laidNodes, edges: laidEdges } = useMemo(
-    () => layoutTree(displayTreeForUi(snapshot.root, meta, ui)),
-    [snapshot.root, meta, ui.binaryFeatureFlips],
+    () => layoutTree(displayTreeForUi(snapshot.root, meta, ui), nodeHeights),
+    [snapshot.root, meta, ui.binaryFeatureFlips, nodeHeights],
   );
 
   const nodes: Node<NodeData>[] = useMemo(
@@ -1834,38 +1847,46 @@ function FlowView({
         type: 'straight',
         animated: false,
         markerEnd: { type: MarkerType.ArrowClosed, color: ui.colors.edge },
-        labelBgPadding: [16, 11] as [number, number],
+        labelBgPadding: [9, 5] as [number, number],
         labelBgBorderRadius: 999,
         style: {
-          strokeWidth: 4.0,
+          strokeWidth: 2,
           stroke: ui.colors.edge,
         },
         labelStyle: {
-          fontWeight: 950,
-          fontSize: 34,
+          fontWeight: 650,
+          fontSize: 14,
         },
       })),
     [laidEdges, ui.colors.edge],
   );
 
   useEffect(() => {
-    const t = window.setTimeout(() => {
-      rf.fitView({ padding: 0.22, duration: 450 });
-    }, 40);
-
-    return () => window.clearTimeout(t);
-  }, [nodes.length, rf]);
+    let timer: number;
+    const fit = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        rf.fitView({ padding: 0.22, duration: 450, maxZoom: 1.15 });
+      }, 40);
+    };
+    const observer = new ResizeObserver(fit);
+    if (container.current) observer.observe(container.current);
+    fit();
+    return () => { observer.disconnect(); window.clearTimeout(timer); };
+  }, [nodes.length, nodeHeights, rf]);
 
   return (
+    <div className="flow-stage" ref={container}>
     <ReactFlow
       nodes={nodes}
+      onNodesChange={measureNodes}
       edges={edges}
       nodeTypes={nodeTypes}
       nodeOrigin={[0.5, 0]}
       minZoom={0.12}
       maxZoom={2.2}
       fitView
-      fitViewOptions={{ padding: 0.22 }}
+      fitViewOptions={{ padding: 0.22, maxZoom: 1.15 }}
       onNodeClick={(_, node) => {
         const b = (node.data as NodeData).b;
 
@@ -1877,8 +1898,9 @@ function FlowView({
         }
       }}
     >
-      <Controls />
+      <Controls fitViewOptions={{ padding: 0.22, maxZoom: 1.15 }} />
     </ReactFlow>
+    </div>
   );
 }
 
@@ -1895,7 +1917,7 @@ function App() {
   const [graph, setGraph] = useState<AndOrGraph>(initialGraph);
   const [meta, setMeta] = useState<FeatureMeta & Record<string, unknown>>(initialMeta);
   const [graphGeneration, setGraphGeneration] = useState(0);
-  const [payloadName, setPayloadName] = useState<string>('embedded Rashomon graph');
+  const [payloadName, setPayloadName] = useState<string>('Example workspace');
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [thresholdDecimals, setThresholdDecimals] = useState(3);
   const [ui, setUi] = useState<BuilderUi>(() => makeDefaultUi());
@@ -1911,6 +1933,8 @@ function App() {
   const [nativeBusy, setNativeBusy] = useState(false);
   const [nativeRefresh, setNativeRefresh] = useState(0);
   const [datasetPending, setDatasetPending] = useState(false);
+  const [enumerationOpen, setEnumerationOpen] = useState(false);
+  const [liveAvailable, setLiveAvailable] = useState(false);
   const nativeRequest = useRef(0);
   const nativeSelection = useRef(snapshot); nativeSelection.current = snapshot;
   const nativeQueriedSelection = useRef<HistorySnapshot | null>(null);
@@ -2045,15 +2069,14 @@ function App() {
 
   return (
     <div className="app-shell" style={themeStyle}>
-      <div className="canvas-card">
-        <div className="canvas-header">
+      <header className="canvas-header">
           <div>
-            <h1>Interactive Tree Builder</h1>
-            <p>
-              Choose from splits that preserve near-optimality.
-            </p>
-            <p className="payload-name">{datasetPending ? 'Waiting for a new dataset tree…' : `Loaded ${payloadName}`}</p>
+            <div className="workspace-brand"><span className="workspace-mark"><Network size={22} /></span><div><div className="workspace-eyebrow">ANYTIME TREE BUILDER</div><h1>Your tree. Every possibility.</h1></div></div>
+            <p className="payload-name">{datasetPending ? 'Waiting for a new dataset tree…' : payloadName.startsWith('native ArborEnum') ? 'Live enumeration workspace' : `Loaded ${payloadName}`}</p>
             <LiveEnumerationPanel
+              open={enumerationOpen}
+              onClose={() => setEnumerationOpen(false)}
+              onAvailable={setLiveAvailable}
               onConnect={connectNative}
               onPrepare={prepareNative}
               onReady={readyNative}
@@ -2075,39 +2098,20 @@ function App() {
               setThresholdDecimals={setThresholdDecimals}
             />}
 
-            <label className="ghost-button upload-button">
-              <Upload size={15} /> Upload
-              <input
-                type="file"
-                accept=".json,application/json"
-                hidden
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  e.currentTarget.value = '';
-
-                  if (!file) return;
-
-                  try {
-                    const raw = await readJsonFile(file);
-                    loadPayload(raw, file.name);
-                  } catch (err) {
-                    setUploadError(
-                      err instanceof Error
-                        ? err.message
-                        : 'Could not load payload JSON.',
-                    );
-                  }
-                }}
-              />
-            </label>
+            <UploadMenu liveAvailable={liveAvailable} onDataset={() => setEnumerationOpen(true)} onGraph={async file => {
+              try { loadPayload(await readJsonFile(file), file.name); }
+              catch (error) { setUploadError(error instanceof Error ? error.message : 'Could not load graph JSON.'); }
+            }} />
 
             <div className={`status ${!datasetPending && isComplete(snapshot.root) ? 'done' : ''}`}>
               {datasetPending ? 'waiting' : isComplete(snapshot.root) ? 'complete' : 'building'}
             </div>
           </div>
-        </div>
+      </header>
 
-        {datasetPending ? <div className="flow-wrap dataset-waiting" role="status">The new tree will appear here once a feasible completion is available.</div> : <ReactFlowProvider key={graphGeneration}>
+      <div className="canvas-card">
+        <div className="canvas-context"><span><Network size={14} /> DECISION CANVAS</span><span>{datasetPending ? 'Awaiting your first tree' : 'Select a node to explore'}<ChevronRight size={13} /></span></div>
+        {datasetPending ? <div className="flow-wrap dataset-waiting" role="status"><Network size={38} strokeWidth={1} /><h2>Waiting for your first tree</h2><p>Your new tree will appear here as soon as its first completion is ready.</p></div> : <ReactFlowProvider key={graphGeneration}>
           <div className="flow-wrap">
             <FlowView
               graph={graph}
@@ -2122,7 +2126,7 @@ function App() {
         </ReactFlowProvider>}
       </div>
 
-      {datasetPending ? <aside className="panel dataset-waiting" aria-label="Waiting for dataset options">Options will appear with the new tree.</aside> : <SidePanel
+      {datasetPending ? <aside className="panel dataset-waiting" aria-label="Waiting for dataset options"><CircleDot size={28} strokeWidth={1} /><h3>A fresh start</h3><p>Your split options and objective budget will appear with the new tree.</p></aside> : <SidePanel
         graph={graph}
         meta={meta}
         snapshot={snapshot}

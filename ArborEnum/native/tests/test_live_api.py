@@ -3,6 +3,7 @@ Usage: python3 test_live_api.py BINARY BUILDER_HTML
 """
 import concurrent.futures
 import json
+import http.cookiejar
 from pathlib import Path
 import socket
 import subprocess
@@ -17,11 +18,12 @@ def main():
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
+    client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
     process = subprocess.Popen([binary, '--ui', html, '--port', str(port)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     def call(path, body=None, headers=None):
         request = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers={'Content-Type': 'application/json', **(headers or {})})
         try:
-            with urllib.request.urlopen(request, timeout=65) as response:
+            with client.open(request, timeout=65) as response:
                 data = response.read()
                 return response.status, json.loads(data) if data else None
         except urllib.error.HTTPError as error:

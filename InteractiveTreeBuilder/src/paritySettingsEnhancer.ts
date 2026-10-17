@@ -48,7 +48,7 @@ style.textContent = `
     gap: 10px;
     align-items: center;
     margin: -2px 0 5px;
-    color: #64748b;
+    color: #879180;
     font-size: 10px;
     font-weight: 850;
     letter-spacing: .08em;

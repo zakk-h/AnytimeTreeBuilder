@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { parseCsv, toDataset } from '../src/liveDataset';
 import { NativeGraphAdapter, type NativeNodeView } from '../src/nativeGraph';
 import { applySplit, autoExpandSingletons, makeRoot } from '../src/graphUtils';
+import { layoutTree } from '../src/layout';
 import type { AndOrGraph } from '../src/types';
 const graph: AndOrGraph = {
   root_trie_id: 0,
@@ -64,4 +65,12 @@ test('native view contains only one node options and immediate child summaries',
   assert.equal(nextFragment.split_nodes.length, 1, 'Only the selected root split is retained');
   const normalized = adapter.normalize(chosen);
   assert.equal(normalized.root.left?.graphTrieId, leftId);
+});
+
+test('tree layout reserves the measured height of long wrapped feature names', () => {
+  const tree = { uid: 0, graphTrieId: 0, kind: 'split' as const, left: { uid: 1, graphTrieId: 1, kind: 'choice' as const }, right: { uid: 2, graphTrieId: 2, kind: 'choice' as const } };
+  const layout = layoutTree(tree, { '0': 600, '1': 130, '2': 300 });
+  const root = layout.nodes.find(n => n.uid === 0)!;
+  for (const child of layout.nodes.filter(n => n.uid !== 0)) assert.ok(child.y >= root.y + 600 + 72);
+  assert.ok(Math.abs(layout.nodes[1].x - layout.nodes[2].x) >= 420 + 44);
 });

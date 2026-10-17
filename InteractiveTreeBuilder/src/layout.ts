@@ -165,7 +165,7 @@ function layoutSubtree(node: BuildNode): SubtreeLayout {
   };
 }
 
-export function layoutTree(root: BuildNode): {
+export function layoutTree(root: BuildNode, heights: Readonly<Record<string, number>> = {}): {
   nodes: LayoutNode[];
   edges: LayoutEdge[];
 } {
@@ -173,6 +173,15 @@ export function layoutTree(root: BuildNode): {
   const edges: LayoutEdge[] = [];
   const layout = layoutSubtree(root);
   const yGap = verticalGapFor(root);
+  // All nodes on a level share a baseline. Reserve room for the tallest
+  // measured card, so fully wrapped feature names never overlap their children.
+  const levelHeights: number[] = [];
+  for (const [uid, position] of layout.positions) {
+    levelHeights[position.depth] = Math.max(levelHeights[position.depth] ?? 128, heights[String(uid)] ?? 128);
+  }
+  const levelY = [0];
+  for (let depth = 1; depth < levelHeights.length; ++depth)
+    levelY[depth] = levelY[depth - 1] + Math.max(yGap, levelHeights[depth - 1] + 72);
 
   function collect(node: BuildNode, depth: number): void {
     const p = layout.positions.get(node.uid);
@@ -181,7 +190,7 @@ export function layoutTree(root: BuildNode): {
     nodes.push({
       ...node,
       x: p.centerX - NODE_WIDTH / 2,
-      y: p.depth * yGap,
+      y: levelY[p.depth],
     });
 
     if (node.left) {

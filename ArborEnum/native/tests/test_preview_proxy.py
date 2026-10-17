@@ -44,7 +44,8 @@ with sync_playwright() as p:
         base = f'http://localhost:{proxy.server_port}'
         try:
             page.goto(base)
-            page.get_by_role('button', name='New enumeration', exact=True).click()
+            page.get_by_role('button', name='Upload', exact=True).click()
+            page.get_by_role('menuitem', name='Upload dataset').click()
             csv = 'x,z,label\n' + ''.join(f'{i},{i%3},{i%2}\n' for i in range(24))
             page.locator('.live-file input').set_input_files({'name': 'proxy.csv', 'mimeType': 'text/csv', 'buffer': csv.encode()})
             page.get_by_label('Maximum depth', exact=True).fill('2')

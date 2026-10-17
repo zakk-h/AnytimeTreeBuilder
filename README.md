@@ -15,7 +15,7 @@ cd AnytimeTreeBuilder
 ./launch.sh
 ```
 
-Open **http://127.0.0.1:8765**, choose **New enumeration**, upload a CSV, select the classification target and start enumeration. Features may contain numbers, booleans or text categories; labels may be strings. Empty cells and numeric overflow are rejected. Try `ArborEnum/examples/bike_processed.csv` for an example dataset.
+Open **http://127.0.0.1:8765**, choose **Upload → Upload dataset**, upload a CSV, select the classification target and start enumeration. Features may contain numbers, booleans or text categories; labels may be strings. Empty cells and numeric overflow are rejected. Try `ArborEnum/examples/bike_processed.csv` for an example dataset.
 
 Use `./launch.sh --port 8766` to select another port. Launching without build outputs runs `build.sh` automatically. `BUILD_JOBS=1 ./build.sh` limits native compilation parallelism on machines with less memory.
 

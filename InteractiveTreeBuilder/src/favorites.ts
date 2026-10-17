@@ -553,11 +553,11 @@ function injectStyles() {
     .arborenum-hidden-control { display: none !important; }
 
     .header-actions {
-      display: grid !important;
-      grid-template-columns: auto auto auto;
+      display: flex;
+      flex-wrap: wrap;
       align-items: center;
       justify-content: end;
-      gap: 7px 9px !important;
+      gap: 7px 9px;
     }
 
     #${HEADER_ROW_ID} {
@@ -695,7 +695,7 @@ function injectStyles() {
     .starred-export-action,
     .starred-export-cancel {
       min-height: 34px;
-      border: 1px solid #dbe4ee;
+      border: 1px solid #e0e5d7;
       border-radius: 10px;
       background: #f7f9fc;
       color: #40546a;
@@ -734,7 +734,7 @@ function injectStyles() {
 
     .starred-export-count {
       margin-right: auto;
-      color: #64748b;
+      color: #879180;
       font-size: 12px;
       font-weight: 750;
     }

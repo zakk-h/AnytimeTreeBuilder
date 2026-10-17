@@ -43,7 +43,8 @@ def main():
                 assert page.locator('.choice-panel').count() == 0
                 assert page.evaluate('window.ARBORENUM_CURRENT_BUILDER_PAYLOAD.graph.trie_nodes.length') == 0
             page.goto(base)
-            page.get_by_role('button', name='New enumeration', exact=True).click()
+            page.get_by_role('button', name='Upload', exact=True).click()
+            page.get_by_role('menuitem', name='Upload dataset').click()
             select_csv('old_feature,label\n1,no\n2,yes\n3,no\n4,yes\n')
             blank()
             page.get_by_label('Maximum depth', exact=True).fill('2')
@@ -68,7 +69,8 @@ def main():
             }""")
             page.get_by_role('button', name='Update options', exact=True).click()
             page.wait_for_function('window.pendingOld')
-            page.get_by_role('button', name='New enumeration', exact=True).click()
+            page.get_by_role('button', name='Upload', exact=True).click()
+            page.get_by_role('menuitem', name='Upload dataset').click()
             mixed = 'score,MaxDelq2PublicRecLast12M_-9,segment,label\n66,FALSE,alpha,no\n59,TRUE,β,yes\n73,true,unknown!,yes\n10,false,alpha,no\n'
             select_csv(mixed)
             blank()
@@ -87,7 +89,8 @@ def main():
             assert uploads[-1]['X'] == [[66, 0, 1, 0, 0], [59, 1, 0, 0, 1], [73, 1, 0, 1, 0], [10, 0, 1, 0, 0]]
             names = page.evaluate('window.ARBORENUM_CURRENT_BUILDER_PAYLOAD.meta.featureRegistry.map(f => f.originalName)')
             assert 'old_feature' not in names and 'MaxDelq2PublicRecLast12M_-9' in names, names
-            page.get_by_role('button', name='New enumeration', exact=True).click()
+            page.get_by_role('button', name='Upload', exact=True).click()
+            page.get_by_role('menuitem', name='Upload dataset').click()
             select_csv('broken,label\n1,yes,extra\n')
             page.get_by_role('alert').filter(has_text='different numbers').first.wait_for()
             blank()

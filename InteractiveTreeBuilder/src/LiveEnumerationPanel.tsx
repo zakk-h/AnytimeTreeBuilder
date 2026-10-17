@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Play, RefreshCw, Square, X } from 'lucide-react';
+import { Play, RefreshCw, Square, X, Table2 } from 'lucide-react';
 import type { ArborEnumBuilderMeta } from './arborenumPayload';
 import './liveEnumeration.css';
 import { parseCsv, toDataset } from './liveDataset';
@@ -18,17 +18,19 @@ async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promi
   return result;
 }
 
-export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh, querying, canRefresh }: {
+export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh, querying, canRefresh, open, onClose, onAvailable }: {
   onReady: (sessionId: string, meta: ArborEnumBuilderMeta) => void;
   onConnect: (sessionId: string) => void;
   onPrepare: () => void;
   onRefresh: () => void;
   querying: boolean;
   canRefresh: boolean;
+  open: boolean;
+  onClose: () => void;
+  onAvailable: (available: boolean) => void;
 }) {
   const [available, setAvailable] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
-  const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<string[][] | null>(null);
   const [filename, setFilename] = useState('');
   const [target, setTarget] = useState('');
@@ -40,7 +42,15 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   const [proxy, setProxy] = useState('binarized');
   const sessionRef = useRef(''), readyRef = useRef(false);
   const draftRef = useRef(false), fileRead = useRef(0);
-  const callbacks = useRef({ onReady, onConnect }); callbacks.current = { onReady, onConnect };
+  const dialog = useRef<HTMLElement>(null);
+  const callbacks = useRef({ onReady, onConnect, onAvailable }); callbacks.current = { onReady, onConnect, onAvailable };
+
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement;
+    dialog.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
+  }, [open]);
 
   useEffect(() => {
     if (!/^https?:$/.test(location.protocol)) return;
@@ -53,7 +63,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
           const health = await api<{ service: string }>('/api/health', undefined, controller.signal);
           if (health?.service !== 'arborenum-native-builder' || disposed) return;
           discovered = true;
-          setAvailable(true);
+          setAvailable(true); callbacks.current.onAvailable(true);
         }
         const observedSession = sessionRef.current;
         const current = await api<Status>('/api/session', undefined, controller.signal);
@@ -93,14 +103,13 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
       if (current) {
         sessionRef.current = current.session_id; readyRef.current = false;
         draftRef.current = false;
-        setStatus(current); setOpen(false);
+        setStatus(current); onClose();
         callbacks.current.onConnect(current.session_id);
       }
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not launch enumeration.'); }
     finally { setBusy(false); }
   };
   return <div className="live-enumeration">
-    <button className="ghost-button" onClick={() => setOpen(true)}><Play size={15} /> New enumeration</button>
     {status && <>
       <span className="live-progress" role="status">{status.stop_requested && !finished(status) ? 'Stopping…' : status.phase} · {Math.floor(status.elapsed_seconds)}s · {status.ready ? `${status.query_count} native queries` : 'waiting for first feasible tree'}</span>
       <button className="ghost-button" disabled={querying || !status.ready || !canRefresh} onClick={onRefresh}><RefreshCw size={15} className={querying ? 'live-spin' : ''} /> {querying ? 'Updating options…' : 'Update options'}</button>
@@ -110,10 +119,18 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
       }}><Square size={14} /> Stop</button>}
     </>}
     {error && <p className="upload-error live-error" role="alert">{error}</p>}
-    {open && <div className="live-overlay" onClick={() => !busy && setOpen(false)}>
-      <section className="live-dialog" role="dialog" aria-modal="true" aria-labelledby="live-title" onClick={e => e.stopPropagation()}>
-        <button className="ghost-button live-close" aria-label="Close enumeration setup" onClick={() => setOpen(false)}><X size={18}/></button>
-        <h2 id="live-title">Grow a Rashomon set</h2>
+    {open && <div className="live-overlay" onClick={() => !busy && onClose()}>
+      <section ref={dialog} className="live-dialog" role="dialog" aria-modal="true" aria-labelledby="live-title" onClick={e => e.stopPropagation()} onKeyDown={event => {
+        if (event.key === 'Escape' && !busy) { event.stopPropagation(); onClose(); }
+        if (event.key !== 'Tab') return;
+        const items = [...dialog.current!.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled)')];
+        const first = items[0], last = items[items.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }}>
+        <button className="ghost-button live-close" aria-label="Close enumeration setup" disabled={busy} onClick={() => onClose()}><X size={18}/></button>
+        <div className="dialog-eyebrow"><Table2 size={16} /> DATASET IMPORT</div>
+        <h2 id="live-title">Build from your data.</h2>
         <p>Choose a CSV and a classification target. TRUE/FALSE values become 1/0; other text categories become named binary indicators. Numeric columns keep their values. Node options update whenever you choose a split or select a node.</p>
         <label className="live-file">Dataset CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={async e => {
           const file = e.target.files?.[0]; if (!file) return;
@@ -126,7 +143,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
             setRows(parsed); setTarget(parsed[0].includes('label') ? 'label' : parsed[0][parsed[0].length - 1]);
           } catch (e) { if (sequence === fileRead.current) setError(String(e)); }
         }}/></label>
-        {rows && <><p>{filename} · {(rows.length - 1).toLocaleString()} rows · {rows[0].length - 1} features</p><label>Target column<select value={target} onChange={e => setTarget(e.target.value)}>{rows[0].map(name => <option key={name}>{name}</option>)}</select></label></>}
+        {rows && <><p>{filename} · {(rows.length - 1).toLocaleString()} rows · {rows[0].length - 1} features</p><label>Target column<select aria-label="Target column" value={target} onChange={e => setTarget(e.target.value)}>{rows[0].map(name => <option key={name}>{name}</option>)}</select></label></>}
         <div className="live-fields">
           <label>Leaf penalty λ<input aria-label="Leaf penalty" type="number" min="0" step="0.001" value={lambda} onChange={e => setLambda(e.target.valueAsNumber)}/></label>
           <label>Maximum depth<input type="number" min="0" max="20" value={depth} onChange={e => setDepth(e.target.valueAsNumber)}/></label>
@@ -134,7 +151,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
           <label>Expand multiplier to<input type="number" min={multiplier} step="0.005" value={second} onChange={e => setSecond(e.target.valueAsNumber)}/></label>
           <label>Runtime limit (seconds)<input type="number" min="1" value={runtime} onChange={e => setRuntime(e.target.valueAsNumber)}/></label>
           <label>Memory limit (MB)<input type="number" min="1" value={memory} onChange={e => setMemory(e.target.valueAsNumber)}/></label>
-          <label>Proxy mode<select value={proxy} onChange={e => setProxy(e.target.value)}><option value="hybrid">Hybrid</option><option value="continuous">Continuous</option><option value="binarized">Binarized</option></select></label>
+          <label>Proxy mode<select aria-label="Proxy mode" value={proxy} onChange={e => setProxy(e.target.value)}><option value="hybrid">Hybrid</option><option value="continuous">Continuous</option><option value="binarized">Binarized</option></select></label>
         </div>
         {running && <p>Stop the current enumeration before starting another dataset.</p>}
         {error && <p role="alert" className="upload-error">{error}</p>}

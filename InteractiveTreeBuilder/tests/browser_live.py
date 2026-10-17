@@ -16,7 +16,8 @@ def main():
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.on('request', lambda request: requests.append((request.url, request.post_data)))
         page.goto(base)
-        page.get_by_role('button', name='New enumeration', exact=True).click()
+        page.get_by_role('button', name='Upload', exact=True).click()
+        page.get_by_role('menuitem', name='Upload dataset').click()
         page.locator('.live-file input').set_input_files(csv)
         page.get_by_label('Maximum depth', exact=True).fill('3')
         page.get_by_label('Runtime limit (seconds)', exact=True).fill('60')
@@ -92,7 +93,7 @@ def main():
         assert not errors, errors
         print('Path navigation, stale-response protection, native optimal/random/constrained completion, selection/undo/favorites/viewport and zero graph exports passed', flush=True)
         page.reload()
-        page.wait_for_function("document.querySelector('.payload-name')?.textContent.includes('native ArborEnum')", timeout=10000)
+        page.wait_for_function("(sid) => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.graph?.metadata?.session_id === sid", arg=expected_session, timeout=10000)
         assert page.request.get(base + '/api/session').json()['session_id'] == status['session_id']
         stop = page.get_by_role('button', name='Stop', exact=True)
         if stop.count(): stop.click()
