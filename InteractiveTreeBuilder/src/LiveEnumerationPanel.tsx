@@ -37,7 +37,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   const [lambda, setLambda] = useState(0.005), [depth, setDepth] = useState(5);
   const [multiplier, setMultiplier] = useState(0.01), [second, setSecond] = useState(0.01);
   const [runtime, setRuntime] = useState(600), [memory, setMemory] = useState(10000);
-  const [proxy, setProxy] = useState('hybrid');
+  const [proxy, setProxy] = useState('binarized');
   const sessionRef = useRef(''), readyRef = useRef(false);
   const draftRef = useRef(false), fileRead = useRef(0);
   const callbacks = useRef({ onReady, onConnect }); callbacks.current = { onReady, onConnect };

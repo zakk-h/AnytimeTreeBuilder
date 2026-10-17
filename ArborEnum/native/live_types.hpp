@@ -13,7 +13,7 @@ struct Settings {
     double lambda = 0.005, multiplier = 0.01, second_multiplier = 0.01;
     double multiplier_step = 0.0025, runtime = 600, memory = 10000;
     int depth = 5, lookahead = 1, width = 1, proxy_refinement = 2;
-    std::string proxy_mode = "hybrid", key_mode = "hash";
+    std::string proxy_mode = "binarized", key_mode = "hash";
     static Settings parse(const json& j) {
         Settings s;
         const std::set<std::string> allowed = {"lambda_reg", "rashomon_mult", "second_rashomon_mult", "multiplier_step_size", "runtime_limit_seconds", "memory_limit_mb", "depth_budget", "lookahead_k", "refinement_width", "proxy_refinement", "proxy_mode", "key_mode"};
