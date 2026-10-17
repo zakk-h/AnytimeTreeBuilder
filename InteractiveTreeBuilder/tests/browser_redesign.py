@@ -114,6 +114,11 @@ def main():
             page.get_by_role('button', name='Customize', exact=True).click()
             assert page.locator('.settings-popover').evaluate('(e) => e.scrollWidth <= e.clientWidth + 1')
             page.get_by_role('button', name='Done', exact=True).click()
+            upload.click()
+            popover = page.locator('.upload-popover').bounding_box()
+            assert popover['x'] >= 0 and popover['x'] + popover['width'] <= 390
+            page.keyboard.press('Escape')
+            assert page.locator('.metric').nth(2).locator('b').evaluate('(e) => e.scrollWidth <= e.clientWidth + 1')
             if screenshots: page.screenshot(path=str(screenshots / 'ui-redesign-mobile.png'), full_page=True)
             assert not errors, errors
             browser.close()

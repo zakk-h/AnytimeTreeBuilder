@@ -74,10 +74,11 @@ import {
   optimalComplete,
 } from './graphUtils';
 
-import { layoutTree } from './layout';
+import { layoutTree, type NodeSize } from './layout';
 import './style.css';
 import { LiveEnumerationPanel } from './LiveEnumerationPanel';
 import { UploadMenu } from './UploadMenu';
+import { AdaptiveText, useLabelMetrics } from './AdaptiveText';
 import { NativeGraphAdapter, nativeApi, type NativeNodeView, type NativeCompletion, type NativeConstraint } from './nativeGraph';
 import type { ArborEnumBuilderMeta } from './arborenumPayload';
 import { normalizeArborEnumPayload, rememberCurrentPayload } from './arborenumPayload';
@@ -665,11 +666,6 @@ function leafMisclassificationRate(
 function ArborEnumNode({ data }: { data: NodeData }) {
   const { b, active, choices, feasibleChoices, meta, graph, thresholdDecimals, ui } = data;
 
-  const icon =
-    b.kind === 'split' || b.kind === 'leaf' ? null : (
-      <CircleDot size={30} />
-    );
-
   const title =
     b.kind === 'split'
       ? prettySplitLabel(b.feature ?? -1, meta, thresholdDecimals, ui)
@@ -695,14 +691,13 @@ function ArborEnumNode({ data }: { data: NodeData }) {
       ? featureDescription(b.feature, meta, ui)
       : undefined;
 
-  const nodeStyle =
-    b.kind === 'leaf'
-      ? ({
-          '--leaf-node-bg':
-            ui.colors.leafNodesByClass[String(b.prediction)] ||
-            ui.colors.leafNode,
-        } as CSSProperties)
-      : undefined;
+  const label = useLabelMetrics(title, 28, 64, true);
+  const nodeStyle = {
+    width: label.width,
+    ...(b.kind === 'leaf' ? {
+      '--leaf-node-bg': ui.colors.leafNodesByClass[String(b.prediction)] || ui.colors.leafNode,
+    } : {}),
+  } as CSSProperties;
 
   return (
     <div
@@ -711,12 +706,12 @@ function ArborEnumNode({ data }: { data: NodeData }) {
     >
       <Handle type="target" position={Position.Top} className="handle" />
 
-      <div className="node-icon">{icon}</div>
-
       <div className="node-copy">
         <div className="node-eyebrow">{b.kind === 'split' ? 'Split rule' : b.kind === 'leaf' ? 'Prediction' : 'Decision point'}<span>#{b.uid}</span></div>
         <div
           className="node-title"
+          ref={label.ref}
+          style={{ fontSize: label.fontSize }}
           title={b.kind === 'split' ? fullSplitLabel(b.feature, meta, thresholdDecimals, ui) : title}
         >
           {title}
@@ -820,9 +815,7 @@ function SplitButton({
           </div>
         )}
 
-        <div className="choice-card-main">
-          Leaf prediction {predictionLabel(choice.leaf.prediction, ui)}
-        </div>
+        <AdaptiveText className="choice-card-main" text={predictionLabel(choice.leaf.prediction, ui)} />
 
         <div className="choice-card-sub">
           {leafSampleSizeLabel(graph, choice.leaf.id)} ·{' '}
@@ -854,9 +847,7 @@ function SplitButton({
         </div>
       )}
 
-      <div className="choice-card-main split-choice-main">
-        <span>{prettySplitLabel(f, meta, thresholdDecimals, ui)}</span>
-      </div>
+      <AdaptiveText className="choice-card-main split-choice-main" text={prettySplitLabel(f, meta, thresholdDecimals, ui)} />
 
       <div className="choice-card-sub">
         obj {formatObjective(graph, objective)} · feature {f} · split #
@@ -1344,7 +1335,7 @@ function SidePanel({
                             setOpenDescriptionKey((cur) => (cur === desc.key ? null : desc.key));
                           }}
                         >
-                          <span>{entry.name}</span>
+                          <AdaptiveText className="feature-summary-name" text={entry.name} minimum={20} maximum={28} />
                           <span className="choice-group-count">
                             {entry.totalCount} choices
                           </span>
@@ -1414,7 +1405,7 @@ function SidePanel({
                           setOpenDescriptionKey((cur) => (cur === desc.key ? null : desc.key));
                         }}
                       >
-                        <span>{entry.name}</span>
+                        <AdaptiveText className="feature-summary-name" text={entry.name} minimum={20} maximum={28} />
                         {expandedEntry && (
                           <span className="choice-group-count">
                             {entry.totalCount} choices
@@ -1795,19 +1786,19 @@ function FlowView({
 }) {
   const rf = useReactFlow();
   const container = useRef<HTMLDivElement>(null);
-  const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({});
-  const measureNodes = (changes: NodeChange[]) => setNodeHeights(previous => {
+  const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
+  const measureNodes = (changes: NodeChange[]) => setNodeSizes(previous => {
     let next = previous;
-    for (const change of changes) if (change.type === 'dimensions' && change.dimensions && previous[change.id] !== change.dimensions.height) {
+    for (const change of changes) if (change.type === 'dimensions' && change.dimensions && (previous[change.id]?.height !== change.dimensions.height || previous[change.id]?.width !== change.dimensions.width)) {
       if (next === previous) next = { ...previous };
-      next[change.id] = change.dimensions.height;
+      next[change.id] = change.dimensions;
     }
     return next;
   });
 
   const { nodes: laidNodes, edges: laidEdges } = useMemo(
-    () => layoutTree(displayTreeForUi(snapshot.root, meta, ui), nodeHeights),
-    [snapshot.root, meta, ui.binaryFeatureFlips, nodeHeights],
+    () => layoutTree(displayTreeForUi(snapshot.root, meta, ui), nodeSizes),
+    [snapshot.root, meta, ui.binaryFeatureFlips, nodeSizes],
   );
 
   const nodes: Node<NodeData>[] = useMemo(
@@ -1855,7 +1846,7 @@ function FlowView({
         },
         labelStyle: {
           fontWeight: 650,
-          fontSize: 14,
+          fontSize: 20,
         },
       })),
     [laidEdges, ui.colors.edge],
@@ -1866,14 +1857,14 @@ function FlowView({
     const fit = () => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
-        rf.fitView({ padding: 0.22, duration: 450, maxZoom: 1.15 });
+        rf.fitView({ padding: 0.08, duration: 350, maxZoom: 1.25 });
       }, 40);
     };
     const observer = new ResizeObserver(fit);
     if (container.current) observer.observe(container.current);
     fit();
     return () => { observer.disconnect(); window.clearTimeout(timer); };
-  }, [nodes.length, nodeHeights, rf]);
+  }, [nodes.length, nodeSizes, rf]);
 
   return (
     <div className="flow-stage" ref={container}>
@@ -1882,11 +1873,11 @@ function FlowView({
       onNodesChange={measureNodes}
       edges={edges}
       nodeTypes={nodeTypes}
-      nodeOrigin={[0.5, 0]}
+      nodeOrigin={[0, 0]}
       minZoom={0.12}
       maxZoom={2.2}
       fitView
-      fitViewOptions={{ padding: 0.22, maxZoom: 1.15 }}
+      fitViewOptions={{ padding: 0.08, maxZoom: 1.25 }}
       onNodeClick={(_, node) => {
         const b = (node.data as NodeData).b;
 
@@ -1898,7 +1889,7 @@ function FlowView({
         }
       }}
     >
-      <Controls fitViewOptions={{ padding: 0.22, maxZoom: 1.15 }} />
+      <Controls orientation="horizontal" fitViewOptions={{ padding: 0.08, maxZoom: 1.25 }} />
     </ReactFlow>
     </div>
   );

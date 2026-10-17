@@ -12,10 +12,11 @@ export type LayoutEdge = {
   label: string;
 };
 
-const NODE_WIDTH = 420;
-const SHALLOW_NODE_Y_GAP = 220;
-const HORIZONTAL_NODE_GAP = 44;
-const MIN_CENTER_GAP = NODE_WIDTH + HORIZONTAL_NODE_GAP;
+export type NodeSize = { width: number; height: number };
+
+const DEFAULT_NODE_WIDTH = 360;
+const SHALLOW_NODE_Y_GAP = 208;
+const HORIZONTAL_NODE_GAP = 32;
 
 type RelativePosition = {
   centerX: number;
@@ -57,12 +58,13 @@ function shiftedContour(contour: number[], dx: number): number[] {
  * levels that actually overlap. This lets empty space in an asymmetric tree
  * be reused instead of reserving a full rectangular box for every subtree.
  *
- * Because every overlapping contour level is kept at least MIN_CENTER_GAP
- * apart, 420px-wide nodes cannot collide, including across cousin subtrees.
+ * Contours include each card's measured width. Every overlapping level keeps
+ * an actual 32px gap, including across cousin subtrees with different widths.
  */
-function layoutSubtree(node: BuildNode): SubtreeLayout {
-  const left = node.left ? layoutSubtree(node.left) : undefined;
-  const right = node.right ? layoutSubtree(node.right) : undefined;
+function layoutSubtree(node: BuildNode, sizes: Readonly<Record<string, NodeSize>>): SubtreeLayout {
+  const halfWidth = (sizes[String(node.uid)]?.width ?? DEFAULT_NODE_WIDTH) / 2;
+  const left = node.left ? layoutSubtree(node.left, sizes) : undefined;
+  const right = node.right ? layoutSubtree(node.right, sizes) : undefined;
 
   const positions = new Map<number, RelativePosition>();
   positions.set(node.uid, { centerX: 0, depth: 0 });
@@ -70,8 +72,8 @@ function layoutSubtree(node: BuildNode): SubtreeLayout {
   if (!left && !right) {
     return {
       positions,
-      leftContour: [0],
-      rightContour: [0],
+      leftContour: [-halfWidth],
+      rightContour: [halfWidth],
     };
   }
 
@@ -88,8 +90,8 @@ function layoutSubtree(node: BuildNode): SubtreeLayout {
 
     return {
       positions,
-      leftContour: [0, ...onlyChild!.leftContour],
-      rightContour: [0, ...onlyChild!.rightContour],
+      leftContour: [-halfWidth, ...onlyChild!.leftContour],
+      rightContour: [halfWidth, ...onlyChild!.rightContour],
     };
   }
 
@@ -100,11 +102,11 @@ function layoutSubtree(node: BuildNode): SubtreeLayout {
     right.leftContour.length,
   );
 
-  let childSeparation = MIN_CENTER_GAP;
+  let childSeparation = 0;
   for (let d = 0; d < sharedLevels; d += 1) {
     childSeparation = Math.max(
       childSeparation,
-      left.rightContour[d] + MIN_CENTER_GAP - right.leftContour[d],
+      left.rightContour[d] + HORIZONTAL_NODE_GAP - right.leftContour[d],
     );
   }
 
@@ -133,8 +135,8 @@ function layoutSubtree(node: BuildNode): SubtreeLayout {
   const shiftedRightLeft = shiftedContour(right.leftContour, rightShift);
   const shiftedRightRight = shiftedContour(right.rightContour, rightShift);
 
-  const leftContour = [0];
-  const rightContour = [0];
+  const leftContour = [-halfWidth];
+  const rightContour = [halfWidth];
   const childLevels = Math.max(
     left.leftContour.length,
     right.leftContour.length,
@@ -165,23 +167,23 @@ function layoutSubtree(node: BuildNode): SubtreeLayout {
   };
 }
 
-export function layoutTree(root: BuildNode, heights: Readonly<Record<string, number>> = {}): {
+export function layoutTree(root: BuildNode, sizes: Readonly<Record<string, NodeSize>> = {}): {
   nodes: LayoutNode[];
   edges: LayoutEdge[];
 } {
   const nodes: LayoutNode[] = [];
   const edges: LayoutEdge[] = [];
-  const layout = layoutSubtree(root);
+  const layout = layoutSubtree(root, sizes);
   const yGap = verticalGapFor(root);
   // All nodes on a level share a baseline. Reserve room for the tallest
   // measured card, so fully wrapped feature names never overlap their children.
   const levelHeights: number[] = [];
   for (const [uid, position] of layout.positions) {
-    levelHeights[position.depth] = Math.max(levelHeights[position.depth] ?? 128, heights[String(uid)] ?? 128);
+    levelHeights[position.depth] = Math.max(levelHeights[position.depth] ?? 0, sizes[String(uid)]?.height ?? 168);
   }
   const levelY = [0];
   for (let depth = 1; depth < levelHeights.length; ++depth)
-    levelY[depth] = levelY[depth - 1] + Math.max(yGap, levelHeights[depth - 1] + 72);
+    levelY[depth] = levelY[depth - 1] + Math.max(yGap, levelHeights[depth - 1] + 56);
 
   function collect(node: BuildNode, depth: number): void {
     const p = layout.positions.get(node.uid);
@@ -189,7 +191,7 @@ export function layoutTree(root: BuildNode, heights: Readonly<Record<string, num
 
     nodes.push({
       ...node,
-      x: p.centerX - NODE_WIDTH / 2,
+      x: p.centerX - (sizes[String(node.uid)]?.width ?? DEFAULT_NODE_WIDTH) / 2,
       y: levelY[p.depth],
     });
 
@@ -221,7 +223,7 @@ export function layoutTree(root: BuildNode, heights: Readonly<Record<string, num
   // bounds rather than a large artificial subtree rectangle.
   if (nodes.length > 0) {
     const minX = Math.min(...nodes.map((n) => n.x));
-    const maxX = Math.max(...nodes.map((n) => n.x + NODE_WIDTH));
+    const maxX = Math.max(...nodes.map((n) => n.x + (sizes[String(n.uid)]?.width ?? DEFAULT_NODE_WIDTH)));
     const midX = 0.5 * (minX + maxX);
 
     for (const n of nodes) {

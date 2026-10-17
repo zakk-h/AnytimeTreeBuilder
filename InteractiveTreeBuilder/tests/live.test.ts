@@ -4,6 +4,7 @@ import { parseCsv, toDataset } from '../src/liveDataset';
 import { NativeGraphAdapter, type NativeNodeView } from '../src/nativeGraph';
 import { applySplit, autoExpandSingletons, makeRoot } from '../src/graphUtils';
 import { layoutTree } from '../src/layout';
+import { fitLabelFont } from '../src/AdaptiveText';
 import type { AndOrGraph } from '../src/types';
 const graph: AndOrGraph = {
   root_trie_id: 0,
@@ -69,8 +70,33 @@ test('native view contains only one node options and immediate child summaries',
 
 test('tree layout reserves the measured height of long wrapped feature names', () => {
   const tree = { uid: 0, graphTrieId: 0, kind: 'split' as const, left: { uid: 1, graphTrieId: 1, kind: 'choice' as const }, right: { uid: 2, graphTrieId: 2, kind: 'choice' as const } };
-  const layout = layoutTree(tree, { '0': 600, '1': 130, '2': 300 });
+  const layout = layoutTree(tree, { '0': { width: 440, height: 600 }, '1': { width: 280, height: 130 }, '2': { width: 360, height: 300 } });
   const root = layout.nodes.find(n => n.uid === 0)!;
-  for (const child of layout.nodes.filter(n => n.uid !== 0)) assert.ok(child.y >= root.y + 600 + 72);
-  assert.ok(Math.abs(layout.nodes[1].x - layout.nodes[2].x) >= 420 + 44);
+  for (const child of layout.nodes.filter(n => n.uid !== 0)) assert.ok(child.y >= root.y + 600 + 56);
+  assert.ok(layout.nodes[2].x - (layout.nodes[1].x + 280) >= 32);
+});
+
+test('mixed card widths keep cousin subtrees apart and parents centered', () => {
+  const leaf = (uid: number) => ({ uid, graphTrieId: uid, kind: 'leaf' as const });
+  const tree = { uid: 0, graphTrieId: 0, kind: 'split' as const,
+    left: { uid: 1, graphTrieId: 1, kind: 'split' as const, left: leaf(3), right: leaf(4) },
+    right: { uid: 2, graphTrieId: 2, kind: 'split' as const, left: leaf(5), right: leaf(6) } };
+  const sizes = Object.fromEntries([280, 440, 280, 440, 280, 440, 280].map((width, uid) => [uid, { width, height: 168 }]));
+  const { nodes } = layoutTree(tree, sizes);
+  const center = (uid: number) => nodes.find(n => n.uid === uid)!.x + sizes[uid].width / 2;
+  for (const node of nodes) if (node.left && node.right) {
+    assert.ok(Math.abs(center(node.uid) - (center(node.left.uid) + center(node.right.uid)) / 2) < .001);
+  }
+  for (const y of new Set(nodes.map(n => n.y))) {
+    const row = nodes.filter(n => n.y === y).sort((a, b) => a.x - b.x);
+    for (let i = 1; i < row.length; ++i) assert.ok(row[i].x - row[i - 1].x - sizes[row[i - 1].uid].width >= 32);
+  }
+});
+
+test('label fitting uses measured glyph widths and preserves a readable minimum', () => {
+  const measure = (text: string, size: number) => Array.from(text).reduce((width, c) => width + (c === 'W' ? 1 : .3) * size, 0);
+  assert.equal(fitLabelFont('hr ≤ 8.5', 300, measure, 28, 64), 64);
+  assert.ok(fitLabelFont('WWWWWWWWWW', 240, measure, 28, 64) < fitLabelFont('iiiiiiiiii', 240, measure, 28, 64));
+  assert.equal(fitLabelFont('W'.repeat(300), 240, measure, 28, 64), 28);
+  assert.equal(fitLabelFont('a very long label with several words that cannot fit two lines', 100, measure, 28, 64), 28);
 });

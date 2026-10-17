@@ -104,7 +104,7 @@ function simplifyTopMetrics(panel: Element, treeComplete: boolean) {
 
   setText(
     optimalMetric.querySelector('span'),
-    treeComplete ? 'Completed Tree Objective' : 'Optimal Completion of Partial Tree',
+    treeComplete ? 'Tree objective' : 'Best completion',
   );
   setText(boundMetric.querySelector('span'), 'Rashomon Bound');
 
