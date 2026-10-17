@@ -18,11 +18,13 @@ async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promi
   return result;
 }
 
-export function LiveEnumerationPanel({ onReady, onConnect, onRefresh, querying }: {
+export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh, querying, canRefresh }: {
   onReady: (sessionId: string, meta: ArborEnumBuilderMeta) => void;
   onConnect: (sessionId: string) => void;
+  onPrepare: () => void;
   onRefresh: () => void;
   querying: boolean;
+  canRefresh: boolean;
 }) {
   const [available, setAvailable] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
@@ -37,6 +39,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onRefresh, querying }
   const [runtime, setRuntime] = useState(600), [memory, setMemory] = useState(10000);
   const [proxy, setProxy] = useState('hybrid');
   const sessionRef = useRef(''), readyRef = useRef(false);
+  const draftRef = useRef(false), fileRead = useRef(0);
   const callbacks = useRef({ onReady, onConnect }); callbacks.current = { onReady, onConnect };
 
   useEffect(() => {
@@ -56,14 +59,14 @@ export function LiveEnumerationPanel({ onReady, onConnect, onRefresh, querying }
         const current = await api<Status>('/api/session', undefined, controller.signal);
         if (disposed || sessionRef.current !== observedSession) return;
         setStatus(current);
-        if (current) {
+        if (current && !draftRef.current) {
           if (sessionRef.current !== current.session_id) {
             sessionRef.current = current.session_id; readyRef.current = false;
             callbacks.current.onConnect(current.session_id);
           }
           if (current.ready && !readyRef.current) {
             const meta = await api<ArborEnumBuilderMeta>(`/api/meta?session_id=${current.session_id}`, undefined, controller.signal);
-            if (!disposed && meta && sessionRef.current === current.session_id) {
+            if (!disposed && !draftRef.current && meta && sessionRef.current === current.session_id) {
               readyRef.current = true; callbacks.current.onReady(current.session_id, meta);
               setError('');
             }
@@ -84,9 +87,12 @@ export function LiveEnumerationPanel({ onReady, onConnect, onRefresh, querying }
     setBusy(true); setError('');
     try {
       const dataset = toDataset(rows, target);
+      draftRef.current = true;
+      onPrepare();
       const current = await api<Status>('/api/session', { ...dataset, settings: { lambda_reg: lambda, depth_budget: depth, rashomon_mult: multiplier, second_rashomon_mult: second, runtime_limit_seconds: runtime, memory_limit_mb: memory, proxy_mode: proxy } });
       if (current) {
         sessionRef.current = current.session_id; readyRef.current = false;
+        draftRef.current = false;
         setStatus(current); setOpen(false);
         callbacks.current.onConnect(current.session_id);
       }
@@ -97,7 +103,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onRefresh, querying }
     <button className="ghost-button" onClick={() => setOpen(true)}><Play size={15} /> New enumeration</button>
     {status && <>
       <span className="live-progress" role="status">{status.stop_requested && !finished(status) ? 'Stopping…' : status.phase} · {Math.floor(status.elapsed_seconds)}s · {status.ready ? `${status.query_count} native queries` : 'waiting for first feasible tree'}</span>
-      <button className="ghost-button" disabled={querying || !status.ready} onClick={onRefresh}><RefreshCw size={15} className={querying ? 'live-spin' : ''} /> {querying ? 'Updating options…' : 'Update options'}</button>
+      <button className="ghost-button" disabled={querying || !status.ready || !canRefresh} onClick={onRefresh}><RefreshCw size={15} className={querying ? 'live-spin' : ''} /> {querying ? 'Updating options…' : 'Update options'}</button>
       {running && <button className="ghost-button" disabled={status.stop_requested} onClick={async () => {
         try { const current = await api<Status>(`/api/stop?session_id=${status.session_id}`, {}); if (current) setStatus(current); }
         catch (e) { setError(String(e)); }
@@ -108,11 +114,17 @@ export function LiveEnumerationPanel({ onReady, onConnect, onRefresh, querying }
       <section className="live-dialog" role="dialog" aria-modal="true" aria-labelledby="live-title" onClick={e => e.stopPropagation()}>
         <button className="ghost-button live-close" aria-label="Close enumeration setup" onClick={() => setOpen(false)}><X size={18}/></button>
         <h2 id="live-title">Grow a Rashomon set</h2>
-        <p>Choose a numerical CSV and a classification target. Node options update directly from ArborEnum whenever you choose a split or select a node.</p>
-        <label className="live-file">Dataset CSV<input type="file" accept=".csv,text/csv" onChange={async e => {
+        <p>Choose a CSV and a classification target. TRUE/FALSE values become 1/0; other text categories become named binary indicators. Numeric columns keep their values. Node options update whenever you choose a split or select a node.</p>
+        <label className="live-file">Dataset CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={async e => {
           const file = e.target.files?.[0]; if (!file) return;
-          try { const parsed = parseCsv(await file.text()); setRows(parsed); setFilename(file.name); setTarget(parsed[0].includes('label') ? 'label' : parsed[0][parsed[0].length - 1]); setError(''); }
-          catch (e) { setRows(null); setError(String(e)); }
+          const sequence = ++fileRead.current;
+          draftRef.current = true;
+          onPrepare(); setRows(null); setFilename(file.name); setTarget(''); setError('');
+          try {
+            const parsed = parseCsv(await file.text());
+            if (sequence !== fileRead.current) return;
+            setRows(parsed); setTarget(parsed[0].includes('label') ? 'label' : parsed[0][parsed[0].length - 1]);
+          } catch (e) { if (sequence === fileRead.current) setError(String(e)); }
         }}/></label>
         {rows && <><p>{filename} · {(rows.length - 1).toLocaleString()} rows · {rows[0].length - 1} features</p><label>Target column<select value={target} onChange={e => setTarget(e.target.value)}>{rows[0].map(name => <option key={name}>{name}</option>)}</select></label></>}
         <div className="live-fields">

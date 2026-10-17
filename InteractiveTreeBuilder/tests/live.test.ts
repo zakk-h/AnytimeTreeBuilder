@@ -14,9 +14,30 @@ test('CSV handles RFC 4180, BOM, blank lines, CRLF and categorical labels', () =
   assert.deepEqual(toDataset(rows, 'target'), { feature_names: ['feature, one'], class_names: ['a', 'b'], X: [[1], [2]], y: [0, 1] });
   assert.deepEqual(parseCsv('f,label\n1,"a""b\nc"\n')[1], ['1', 'a"b\nc']);
 });
-test('CSV rejects malformed rows, quotes, missing values and non-numeric features', () => {
+test('CSV rejects malformed rows, quotes, missing values and numeric overflow', () => {
   for (const text of ['a,a\n1,2', 'a,b\n1,2,3', 'a,b\n1,"x', 'a,b\n1,"x"z']) assert.throws(() => parseCsv(text));
-  for (const text of ['a,b\n,yes', 'a,b\nNaN,no', 'a,b\nhello,no', 'a,b\n1,']) assert.throws(() => toDataset(parseCsv(text), 'b'));
+  for (const text of ['a,b\n,yes', 'a,b\n1e309,no', 'a,b\n1,']) assert.throws(() => toDataset(parseCsv(text), 'b'));
+});
+test('CSV preserves numbers and handles case-insensitive boolean indicators', () => {
+  const data = toDataset(parseCsv('score,MaxDelq2PublicRecLast12M_-9,mixed,label\n66,FALSE,1,yes\n59,TRUE,false,no\n-9, true ,TRUE,yes\n.5,False,0,no'), 'label');
+  assert.deepEqual(data.feature_names, ['score', 'MaxDelq2PublicRecLast12M_-9', 'mixed']);
+  assert.deepEqual(data.X, [[66, 0, 1], [59, 1, 0], [-9, 1, 1], [.5, 0, 0]]);
+  assert.deepEqual(data.y, [0, 1, 0, 1]);
+});
+test('CSV encodes arbitrary text as deterministic named indicators without numeric ordering', () => {
+  const rows = parseCsv('kind,mixed,label\n"a,b",10,no\n🍃,?,yes\n"<unknown>",10,no\n"a,b",NaN,yes');
+  const data = toDataset(rows, 'label');
+  assert.deepEqual(data.feature_names, ['kind = "<unknown>"', 'kind = "a,b"', 'kind = "🍃"', 'mixed = "10"', 'mixed = "?"', 'mixed = "NaN"']);
+  assert.deepEqual(data.X, [[0, 1, 0, 1, 0, 0], [0, 0, 1, 0, 1, 0], [1, 0, 0, 1, 0, 0], [0, 1, 0, 0, 0, 1]]);
+  const reversed = toDataset([rows[0], ...rows.slice(1).reverse()], 'label');
+  assert.deepEqual(reversed.feature_names, data.feature_names);
+  assert.deepEqual(reversed.X, [...data.X].reverse());
+  assert.deepEqual(toDataset(parseCsv('kind,label\n"__proto__",no\n"constructor",yes'), 'label').X, [[1, 0], [0, 1]]);
+});
+test('generated category names cannot collide with original or other generated feature names', () => {
+  const data = toDataset(parseCsv('color,"color = ""red""",label\nred,4,no\nblue,5,yes'), 'label');
+  assert.deepEqual(data.feature_names, ['color = "blue"', 'color = "red" [2]', 'color = "red"']);
+  assert.deepEqual(data.X, [[0, 1, 4], [1, 0, 5]]);
 });
 test('native view contains only one node options and immediate child summaries', () => {
   const adapter = new NativeGraphAdapter();

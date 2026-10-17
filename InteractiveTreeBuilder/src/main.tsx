@@ -1910,6 +1910,7 @@ function App() {
   const [nativeReady, setNativeReady] = useState(false);
   const [nativeBusy, setNativeBusy] = useState(false);
   const [nativeRefresh, setNativeRefresh] = useState(0);
+  const [datasetPending, setDatasetPending] = useState(false);
   const nativeRequest = useRef(0);
   const nativeSelection = useRef(snapshot); nativeSelection.current = snapshot;
   const nativeQueriedSelection = useRef<HistorySnapshot | null>(null);
@@ -1927,6 +1928,7 @@ function App() {
 
     const nextMeta = coerceMeta(payload);
     liveSession.current = '';
+    setDatasetPending(false);
     setNativeReady(false); setNativeBusy(false);
     ++nativeRequest.current;
 
@@ -1940,12 +1942,23 @@ function App() {
     setUi(makeDefaultUi());
   };
 
-  const connectNative = (id: string) => {
-    liveSession.current = id;
+  const prepareNative = () => {
+    liveSession.current = '';
     nativeAdapter.current = new NativeGraphAdapter();
     nativeQueriedSelection.current = null;
     ++nativeRequest.current;
     setNativeReady(false); setNativeBusy(false);
+    setDatasetPending(true);
+    const empty: AndOrGraph = { root_trie_id: 0, trie_nodes: [], split_nodes: [], leaf_nodes: [], metadata: { native: true } };
+    setGraph(empty); setMeta({}); setSnapshot(makeRoot(empty)); setHistory([]);
+    setGraphGeneration(value => value + 1);
+    setUi(makeDefaultUi()); setUploadError(null);
+    rememberCurrentPayload({ graph: empty, meta: {} });
+    delete window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION;
+  };
+  const connectNative = (id: string) => {
+    prepareNative();
+    liveSession.current = id;
   };
   const readyNative = (id: string, nativeMeta: ArborEnumBuilderMeta) => {
     if (id !== liveSession.current) return;
@@ -1969,6 +1982,7 @@ function App() {
       if (sequence !== nativeRequest.current || session !== liveSession.current || nativeSelection.current !== snapshot) return;
       const fragment = nativeAdapter.current.view(snapshot, response);
       setGraph(fragment);
+      setDatasetPending(false);
       nativeQueriedSelection.current = snapshot;
       nativeQueriedRefresh.current = nativeRefresh;
       rememberCurrentPayload({ graph: fragment, meta });
@@ -2038,26 +2052,28 @@ function App() {
             <p>
               Choose from splits that preserve near-optimality.
             </p>
-            <p className="payload-name">Loaded {payloadName}</p>
+            <p className="payload-name">{datasetPending ? 'Waiting for a new dataset tree…' : `Loaded ${payloadName}`}</p>
             <LiveEnumerationPanel
               onConnect={connectNative}
+              onPrepare={prepareNative}
               onReady={readyNative}
               onRefresh={() => setNativeRefresh(value => value + 1)}
               querying={nativeBusy}
+              canRefresh={nativeReady}
             />
             {nativeBusy && <p className="native-query-status" role="status">Reading options from the native graph…</p>}
             {uploadError && <p className="upload-error">{uploadError}</p>}
           </div>
 
           <div className="header-actions">
-            <BuilderSettingsMenu
+            {!datasetPending && <BuilderSettingsMenu
               graph={graph}
               meta={meta}
               ui={ui}
               setUi={setUi}
               thresholdDecimals={thresholdDecimals}
               setThresholdDecimals={setThresholdDecimals}
-            />
+            />}
 
             <label className="ghost-button upload-button">
               <Upload size={15} /> Upload
@@ -2085,13 +2101,13 @@ function App() {
               />
             </label>
 
-            <div className={`status ${isComplete(snapshot.root) ? 'done' : ''}`}>
-              {isComplete(snapshot.root) ? 'complete' : 'building'}
+            <div className={`status ${!datasetPending && isComplete(snapshot.root) ? 'done' : ''}`}>
+              {datasetPending ? 'waiting' : isComplete(snapshot.root) ? 'complete' : 'building'}
             </div>
           </div>
         </div>
 
-        <ReactFlowProvider key={graphGeneration}>
+        {datasetPending ? <div className="flow-wrap dataset-waiting" role="status">The new tree will appear here once a feasible completion is available.</div> : <ReactFlowProvider key={graphGeneration}>
           <div className="flow-wrap">
             <FlowView
               graph={graph}
@@ -2103,10 +2119,10 @@ function App() {
               pushHistory={pushHistory}
             />
           </div>
-        </ReactFlowProvider>
+        </ReactFlowProvider>}
       </div>
 
-      <SidePanel
+      {datasetPending ? <aside className="panel dataset-waiting" aria-label="Waiting for dataset options">Options will appear with the new tree.</aside> : <SidePanel
         graph={graph}
         meta={meta}
         snapshot={snapshot}
@@ -2142,7 +2158,7 @@ function App() {
           if (!active || (liveSession.current && (nativeBusy || nativeQueriedSelection.current !== snapshot))) return;
           setWithHistory(applySplit(snapshot, graph, active.uid, splitId));
         }}
-      />
+      />}
     </div>
   );
 }

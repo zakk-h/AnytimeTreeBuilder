@@ -1,6 +1,6 @@
 # AnytimeTreeBuilder
 
-Build decision trees interactively while ArborEnum grows a Rashomon set in the background. Start from a numerical CSV, explore splits and their current minimum objectives, and request optimal, random or constrained completions directly from the running C++ graph.
+Build decision trees interactively while ArborEnum grows a Rashomon set in the background. Start from a CSV, explore splits and their current minimum objectives, and request optimal, random or constrained completions directly from the running C++ graph.
 
 This repository contains the integrated ArborEnum engine and InteractiveTreeBuilder GUI. A single clone includes all source needed to build and run it; no submodules or precomputed Rashomon graph are required.
 
@@ -15,11 +15,17 @@ cd AnytimeTreeBuilder
 ./launch.sh
 ```
 
-Open **http://127.0.0.1:8765**, choose **New enumeration**, upload a numerical CSV, select the classification target and start enumeration. Labels may be strings. Missing or non-finite feature values are rejected. Try `ArborEnum/examples/bike_processed.csv` for an example dataset.
+Open **http://127.0.0.1:8765**, choose **New enumeration**, upload a CSV, select the classification target and start enumeration. Features may contain numbers, booleans or text categories; labels may be strings. Empty cells and numeric overflow are rejected. Try `ArborEnum/examples/bike_processed.csv` for an example dataset.
 
 Use `./launch.sh --port 8766` to select another port. Launching without build outputs runs `build.sh` automatically. `BUILD_JOBS=1 ./build.sh` limits native compilation parallelism on machines with less memory.
 
 After building, runtime requires only `bin/arborenum-builder` and `InteractiveTreeBuilder/dist/index.html`. Python and Node.js are not part of the running service.
+
+## CSV feature types
+
+Numeric columns keep their values, including negative values and scientific notation. Case-insensitive `TRUE`/`FALSE` cells map to `1`/`0` and can appear alongside numeric values. Columns containing other text, including mixed numeric/text columns, become one binary indicator per distinct trimmed value, with names such as `segment = "retail"`. Category names are sorted deterministically and generated feature names remain unique. This avoids assigning an arbitrary numeric order to categories. Empty cells remain validation errors rather than silently becoming zero.
+
+Selecting a dataset clears the previous tree, options, history and feature metadata immediately. The view stays empty during parsing, launch and initial loading, until the first node query for the new session succeeds. Late replies from the old session cannot restore its graph. Failed uploads stay empty and can be corrected and retried.
 
 ## Exploring a growing set
 
@@ -51,10 +57,12 @@ python3 ArborEnum/native/tests/test_live_api.py \
   bin/arborenum-builder InteractiveTreeBuilder/dist/index.html
 ```
 
-With Playwright and Chromium installed, verify the actual GUI displays the root before the first enumeration checkpoint:
+With Playwright and Chromium installed, verify early root display and dataset switching (including delayed replies, booleans and categorical text):
 
 ```sh
 python3 ArborEnum/native/tests/test_initial_preview.py \
+  bin/arborenum-builder InteractiveTreeBuilder/dist/index.html
+python3 ArborEnum/native/tests/test_dataset_upload.py \
   bin/arborenum-builder InteractiveTreeBuilder/dist/index.html
 ```
 

@@ -11,5 +11,6 @@
 .live-close { position:absolute; right:16px; top:16px; }
 .live-dialog .primary-button { width:100%; justify-content:center; padding:12px; }
 .live-spin { animation:live-spin 1.2s linear infinite; }
+.dataset-waiting { display:flex; align-items:center; justify-content:center; padding:28px; color:#61716d; text-align:center; }
 @keyframes live-spin { to { transform:rotate(360deg); } }
 @media(max-width:600px) { .live-fields { grid-template-columns:1fr; } .live-dialog { padding:20px; } }
