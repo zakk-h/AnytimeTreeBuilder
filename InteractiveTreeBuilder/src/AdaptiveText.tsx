@@ -89,7 +89,7 @@ export function useLabelMetrics(text: string, minimum: number, maximum: number, 
   return { ref, ...metrics };
 }
 
-export function AdaptiveText({ text, className, minimum = 20, maximum = 28 }: {
+export function AdaptiveText({ text, className, minimum = 18, maximum = 20 }: {
   text: string;
   className: string;
   minimum?: number;

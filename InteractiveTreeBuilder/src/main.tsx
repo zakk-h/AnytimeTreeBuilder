@@ -1335,7 +1335,7 @@ function SidePanel({
                             setOpenDescriptionKey((cur) => (cur === desc.key ? null : desc.key));
                           }}
                         >
-                          <AdaptiveText className="feature-summary-name" text={entry.name} minimum={20} maximum={28} />
+                          <AdaptiveText className="feature-summary-name" text={entry.name} minimum={20} maximum={22} />
                           <span className="choice-group-count">
                             {entry.totalCount} choices
                           </span>
@@ -1405,7 +1405,7 @@ function SidePanel({
                           setOpenDescriptionKey((cur) => (cur === desc.key ? null : desc.key));
                         }}
                       >
-                        <AdaptiveText className="feature-summary-name" text={entry.name} minimum={20} maximum={28} />
+                        <AdaptiveText className="feature-summary-name" text={entry.name} minimum={20} maximum={22} />
                         {expandedEntry && (
                           <span className="choice-group-count">
                             {entry.totalCount} choices

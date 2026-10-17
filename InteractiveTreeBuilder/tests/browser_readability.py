@@ -73,7 +73,8 @@ def main():
             })''')
             assert all(label['font'] >= 56 and label['screenFont'] >= 30 for label in labels), labels
             assert all(not label['overflow'] and label['cardWidth'] < 420 for label in labels), labels
-            assert page.locator('.choice-card-main').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)') >= 24
+            option_font = page.locator('.choice-card-main').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)')
+            assert 18 <= option_font <= 20
             assert page.locator('.choice-card-sub').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)') >= 16
             # Every card must fit within the fitted viewport; every shared level
             # must retain a real gap after all measured widths are applied.
@@ -109,7 +110,7 @@ def main():
             assert page.locator('.arborenum-node-split .node-title').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)') == 64
             assert not errors, errors
             browser.close()
-        print('Short node labels remain at least 30px on screen, options/objectives are enlarged, and mixed-width cards fit without overlap')
+        print('Short node labels remain at least 30px on screen, options use a moderate size and summaries stay readable, and mixed-width cards fit without overlap')
     finally:
         process.terminate()
         assert process.wait(timeout=15) == 0
