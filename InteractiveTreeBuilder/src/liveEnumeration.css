@@ -16,8 +16,8 @@
 .live-file input::file-selector-button { border:1px solid #d3dec5; border-radius:5px; background:#ffffff; padding:8px 12px; color:#5c7847; margin-right:12px; cursor:pointer; }
 .live-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin:24px 0; padding-top:20px; border-top:1px solid #e6ebdd; }
 .live-close { position:absolute; right:20px; top:20px; width:30px; min-height:30px; padding:0; border:0; background:transparent; }
-.primary-button { display:inline-flex; align-items:center; gap:9px; min-height:42px; border:1px solid #127c65; border-radius:7px; background:#127c65; color:#fffef1; font:inherit; font-size:14px; cursor:pointer; }
-.primary-button:hover:not(:disabled) { background:#09634f; }
+.primary-button { display:inline-flex; align-items:center; gap:9px; min-height:42px; border:1px solid var(--accent); border-radius:7px; background:var(--accent); color:#ffffff; font:inherit; font-size:14px; cursor:pointer; }
+.primary-button:hover:not(:disabled) { background:var(--accent-hover); }
 .primary-button:disabled { opacity:.4; cursor:not-allowed; }
 .live-dialog .primary-button { width:100%; justify-content:center; padding:12px; }
 .live-spin { animation:live-spin 1.2s linear infinite; }

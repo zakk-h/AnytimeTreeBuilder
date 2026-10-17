@@ -30,8 +30,8 @@
 }
 
 .settings-row .mini-button[title*="natural true/false branches"] {
-  background: #2563eb;
-  border-color: #2563eb;
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 .settings-row .mini-button[title*="natural true/false branches"]::after {
@@ -48,11 +48,11 @@
 }
 
 .settings-row .mini-button[title*="natural true/false branches"]:hover {
-  background: #1d4ed8;
-  border-color: #1d4ed8;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 .settings-row .mini-button[title^="Currently displaying"]:focus-visible {
-  outline: 3px solid rgba(59, 130, 246, 0.24);
+  outline: 3px solid var(--accent-ring);
   outline-offset: 2px;
 }
