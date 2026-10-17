@@ -2,6 +2,7 @@
 #include "local_origin.hpp"
 #include "vendor/httplib.h"
 #include <csignal>
+#include <cstdlib>
 
 using namespace arborenum::live;
 static std::atomic<bool> shutting_down{false};
@@ -36,13 +37,23 @@ int main(int argc, char** argv) {
         // Desktop preview proxies may expose a different loopback authority.
         // Validate explicit loopback Host/Origin names, independent of the port.
         const std::string authority = "127.0.0.1:" + std::to_string(port);
+        const char* env_host = std::getenv("RENDER_EXTERNAL_HOSTNAME");
+        const std::string public_host = env_host ? env_host : "";
         server.set_pre_routing_handler([&](const httplib::Request& req, httplib::Response& res) {
             res.set_header("Cache-Control", "no-store");
             res.set_header("X-Content-Type-Options", "nosniff");
             res.set_header("Referrer-Policy", "same-origin");
             auto host = req.get_header_value("Host");
             auto origin = req.get_header_value("Origin");
-            if (!is_local_browser_request(host, origin)) { respond(res, {{"error", "Loopback requests only"}}, 403); return httplib::Server::HandlerResponse::Handled; }
+            const bool allowed_public =
+                !public_host.empty() &&
+                host == public_host &&
+                (origin.empty() || origin == "https://" + public_host);
+            
+            if (!is_local_browser_request(host, origin) && !allowed_public) {
+                respond(res, {{"error", "Host/Origin not allowed"}}, 403);
+                return httplib::Server::HandlerResponse::Handled;
+            }
             if (req.method == "POST" && req.get_header_value("Content-Type").find("application/json") != 0) { respond(res, {{"error", "Expected application/json"}}, 415); return httplib::Server::HandlerResponse::Handled; }
             return httplib::Server::HandlerResponse::Unhandled;
         });
@@ -93,7 +104,12 @@ int main(int argc, char** argv) {
         });
         std::signal(SIGINT, signal_stop);
         std::signal(SIGTERM, signal_stop);
-        if (!server.bind_to_port("127.0.0.1", port)) throw std::runtime_error("Cannot bind loopback port " + std::to_string(port));
+
+        const std::string bind_host =
+            public_host.empty() ? "127.0.0.1" : "0.0.0.0";
+        
+        if (!server.bind_to_port(bind_host, port))
+        
         std::jthread shutdown([&](std::stop_token token) {
             while (!token.stop_requested() && !shutting_down.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (shutting_down.load()) { if (auto current = get_session()) current->stop(); server.stop(); }
