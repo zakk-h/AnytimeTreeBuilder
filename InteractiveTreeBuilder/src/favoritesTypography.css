@@ -4,7 +4,7 @@
 }
 
 .starred-gallery-head-copy span {
-  font-size: 16px !important;
+  font-size: 14px !important;
   line-height: 1.45 !important;
 }
 
@@ -27,23 +27,23 @@
 }
 
 .starred-tree-name {
-  font-size: 20px !important;
+  font-size: 18px !important;
   line-height: 1.25 !important;
   padding: 7px 8px !important;
   margin: -7px -8px 0 !important;
 }
 
 .starred-tree-status {
-  font-size: 16px !important;
+  font-size: 14px !important;
   padding: 5px 9px !important;
 }
 
 .starred-tree-time {
-  font-size: 16px !important;
+  font-size: 14px !important;
 }
 
 .starred-tree-summary {
-  font-size: 16px !important;
+  font-size: 14px !important;
   line-height: 1.45 !important;
 }
 
@@ -54,7 +54,7 @@
 }
 
 .starred-tree-rules-title {
-  font-size: 16px !important;
+  font-size: 14px !important;
   letter-spacing: 0.07em !important;
 }
 
@@ -69,14 +69,14 @@
 }
 
 .starred-tree-rule-more {
-  font-size: 16px !important;
+  font-size: 14px !important;
   line-height: 1.35 !important;
 }
 
 .starred-tree-open-card,
 .starred-tree-delete {
-  min-height: 44px !important;
-  font-size: 16px !important;
+  min-height: 36px !important;
+  font-size: 14px !important;
 }
 
 .starred-tree-delete {
@@ -85,7 +85,7 @@
 
 .starred-tree-number,
 .starred-tree-current-badge {
-  font-size: 16px !important;
+  font-size: 14px !important;
   padding: 5px 8px !important;
 }
 

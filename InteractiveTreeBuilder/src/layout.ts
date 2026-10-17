@@ -15,7 +15,7 @@ export type LayoutEdge = {
 export type NodeSize = { width: number; height: number };
 
 const DEFAULT_NODE_WIDTH = 360;
-const SHALLOW_NODE_Y_GAP = 208;
+const SHALLOW_NODE_Y_GAP = 240;
 const HORIZONTAL_NODE_GAP = 32;
 
 type RelativePosition = {
@@ -183,7 +183,7 @@ export function layoutTree(root: BuildNode, sizes: Readonly<Record<string, NodeS
   }
   const levelY = [0];
   for (let depth = 1; depth < levelHeights.length; ++depth)
-    levelY[depth] = levelY[depth - 1] + Math.max(yGap, levelHeights[depth - 1] + 56);
+    levelY[depth] = levelY[depth - 1] + Math.max(yGap, levelHeights[depth - 1] + 88);
 
   function collect(node: BuildNode, depth: number): void {
     const p = layout.positions.get(node.uid);

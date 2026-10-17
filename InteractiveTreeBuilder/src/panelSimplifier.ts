@@ -11,7 +11,7 @@ type TreeCounts = {
 const internalWindow = window as unknown as Window & Record<string, unknown>;
 
 let cachedTrainingSamples: string | null = null;
-let lastPayloadLabel = '';
+let lastPayload: unknown;
 let scheduledFrame: number | null = null;
 
 function setText(element: Element | null | undefined, text: string) {
@@ -169,9 +169,9 @@ function applyPanelSimplifications() {
   const panel = document.querySelector('.panel');
   if (!panel) return;
 
-  const payloadLabel = document.querySelector('.payload-name')?.textContent?.trim() ?? '';
-  if (payloadLabel !== lastPayloadLabel) {
-    lastPayloadLabel = payloadLabel;
+  const payload = internalWindow.ARBORENUM_CURRENT_BUILDER_PAYLOAD;
+  if (payload !== lastPayload) {
+    lastPayload = payload;
     cachedTrainingSamples = null;
   }
 

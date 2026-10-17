@@ -10,7 +10,7 @@ In the combined checkout, run `../launch.sh`, open `http://127.0.0.1:8765`, and 
 
 See `../ArborEnum/native/README.md` for native build instructions, graph identity/ownership design, protocol and tests. Existing embedded graph payloads and JSON uploads remain supported when the builder is opened without the native service.
 
-**Upload → Upload graph** opens an existing JSON graph. Labels use measured text widths: short names grow up to 64px in the tree and 20px in options, while long names wrap without truncation. Cards occupy only the width their label needs (280–440px); the layout accounts for each card’s measured width and height. The canvas uses a tighter fit and refits when its size changes.
+**Upload → Upload graph** opens an existing JSON graph. Labels use measured text widths: short names grow up to 56px in the tree and 18px in options, while long names wrap without truncation. Cards occupy only the width their label needs (280–440px); the layout accounts for each card’s measured width and height. A compact toolbar leaves the canvas at full workspace height. Rounded branch connectors have stronger strokes and more vertical separation; the canvas refits when its size changes.
 
 CSV numbers retain their values, TRUE/FALSE values map to 1/0, and other text columns become named binary category indicators. Empty cells and numeric overflow are reported. Selecting a new CSV clears the previous graph and options until the new session returns a node view; stale replies cannot restore old data.
 

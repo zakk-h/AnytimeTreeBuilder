@@ -55,7 +55,7 @@ def main():
                 page.get_by_role('menuitem', name='Upload graph').click()
             chooser.value.set_files({'name': 'Short feature names.json', 'mimeType': 'application/json',
                                      'buffer': json.dumps(short_name_payload()).encode()})
-            page.wait_for_function("document.querySelector('.payload-name')?.textContent.includes('Short feature')")
+            page.wait_for_function("window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.meta?.featureRegistry?.[0]?.originalName === 'hr ≤ 8.5'")
             # The root's first split, then left branch, then right branch and
             # one deeper split reproduce the size of the user's example tree.
             for uid, count in [(0, 3), (1, 5), (2, 7), (3, 9)]:
@@ -71,11 +71,15 @@ def main():
                         overflow: el.scrollWidth > el.clientWidth + 1,
                         cardWidth: el.closest('.arborenum-node').offsetWidth};
             })''')
-            assert all(label['font'] >= 56 and label['screenFont'] >= 30 for label in labels), labels
+            assert all(label['font'] >= 48 and label['screenFont'] >= 28 for label in labels), labels
             assert all(not label['overflow'] and label['cardWidth'] < 420 for label in labels), labels
             option_font = page.locator('.choice-card-main').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)')
-            assert 18 <= option_font <= 20
-            assert page.locator('.choice-card-sub').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)') >= 16
+            assert 16 <= option_font <= 18
+            assert page.locator('.choice-card-sub').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)') >= 13
+            assert page.locator('.payload-name, .canvas-context').count() == 0
+            stage = page.locator('.flow-stage').bounding_box()
+            assert stage['y'] <= 64 and stage['height'] >= 1000 - 64, stage
+            assert page.locator('.react-flow__edge-path').first.evaluate('el => parseFloat(getComputedStyle(el).strokeWidth)') >= 3.5
             # Every card must fit within the fitted viewport; every shared level
             # must retain a real gap after all measured widths are applied.
             boxes = page.locator('.arborenum-node').evaluate_all('items => items.map(el => { const r=el.getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; })')
@@ -107,10 +111,10 @@ def main():
             name_input.fill('')
             page.get_by_role('button', name='Done', exact=True).click()
             page.wait_for_timeout(800)
-            assert page.locator('.arborenum-node-split .node-title').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)') == 64
+            assert page.locator('.arborenum-node-split .node-title').first.evaluate('el => parseFloat(getComputedStyle(el).fontSize)') == 56
             assert not errors, errors
             browser.close()
-        print('Short node labels remain at least 30px on screen, options use a moderate size and summaries stay readable, and mixed-width cards fit without overlap')
+        print('Compact header and full-height canvas, stronger branches, balanced typography, live renaming and nonoverlapping cards passed')
     finally:
         process.terminate()
         assert process.wait(timeout=15) == 0

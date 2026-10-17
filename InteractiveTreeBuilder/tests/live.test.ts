@@ -72,7 +72,7 @@ test('tree layout reserves the measured height of long wrapped feature names', (
   const tree = { uid: 0, graphTrieId: 0, kind: 'split' as const, left: { uid: 1, graphTrieId: 1, kind: 'choice' as const }, right: { uid: 2, graphTrieId: 2, kind: 'choice' as const } };
   const layout = layoutTree(tree, { '0': { width: 440, height: 600 }, '1': { width: 280, height: 130 }, '2': { width: 360, height: 300 } });
   const root = layout.nodes.find(n => n.uid === 0)!;
-  for (const child of layout.nodes.filter(n => n.uid !== 0)) assert.ok(child.y >= root.y + 600 + 56);
+  for (const child of layout.nodes.filter(n => n.uid !== 0)) assert.ok(child.y >= root.y + 600 + 88);
   assert.ok(layout.nodes[2].x - (layout.nodes[1].x + 280) >= 32);
 });
 

@@ -69,7 +69,7 @@ def main():
             with page.expect_file_chooser() as chooser:
                 page.get_by_role('menuitem', name='Upload graph').click()
             chooser.value.set_files({'name': 'Credit portfolio.graph.json', 'mimeType': 'application/json', 'buffer': json.dumps(payload).encode()})
-            page.wait_for_function("document.querySelector('.payload-name')?.textContent.includes('Credit portfolio')")
+            page.wait_for_function("(name) => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.meta?.featureRegistry?.[0]?.originalName === name", arg=spaced)
             for name in (spaced, unbroken):
                 card = page.locator('.split-choice').filter(has_text=name)
                 assert card.count() == 1

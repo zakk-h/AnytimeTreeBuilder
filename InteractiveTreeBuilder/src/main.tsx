@@ -35,7 +35,6 @@ import {
   Sparkles,
   Undo2,
   Network,
-  ChevronRight,
 } from 'lucide-react';
 
 import type {
@@ -150,12 +149,12 @@ type ChoiceGroupEntry = {
 
 const DEFAULT_COLORS: BuilderColors = {
   splitNode: '#ffffff',
-  leafNode: '#eaf2e9',
+  leafNode: '#edf6f1',
   leafNodesByClass: {
     '-1': '#D1D5DB',
   },
-  edge: '#9caeaa',
-  background: '#f6f5f0',
+  edge: '#7c90a1',
+  background: '#f7f9fc',
 };
 
 const BINARY_GROUP_LABEL = 'Binary features';
@@ -691,7 +690,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
       ? featureDescription(b.feature, meta, ui)
       : undefined;
 
-  const label = useLabelMetrics(title, 28, 64, true);
+  const label = useLabelMetrics(title, 26, 56, true);
   const nodeStyle = {
     width: label.width,
     ...(b.kind === 'leaf' ? {
@@ -1057,12 +1056,8 @@ function SidePanel({
   return (
     <aside className="panel">
       <div className="brand">
-        <div className="brand-badge">
-          <Sparkles size={19} />
-        </div>
         <div>
           <div className="brand-title">Tree overview</div>
-          <div className="brand-subtitle">Every choice stays within your budget.</div>
         </div>
       </div>
 
@@ -1335,7 +1330,7 @@ function SidePanel({
                             setOpenDescriptionKey((cur) => (cur === desc.key ? null : desc.key));
                           }}
                         >
-                          <AdaptiveText className="feature-summary-name" text={entry.name} minimum={20} maximum={22} />
+                          <AdaptiveText className="feature-summary-name" text={entry.name} minimum={16} maximum={18} />
                           <span className="choice-group-count">
                             {entry.totalCount} choices
                           </span>
@@ -1405,7 +1400,7 @@ function SidePanel({
                           setOpenDescriptionKey((cur) => (cur === desc.key ? null : desc.key));
                         }}
                       >
-                        <AdaptiveText className="feature-summary-name" text={entry.name} minimum={20} maximum={22} />
+                        <AdaptiveText className="feature-summary-name" text={entry.name} minimum={16} maximum={18} />
                         {expandedEntry && (
                           <span className="choice-group-count">
                             {entry.totalCount} choices
@@ -1835,13 +1830,14 @@ function FlowView({
         source: String(e.source),
         target: String(e.target),
         label: e.label,
-        type: 'straight',
+        type: 'smoothstep',
+        pathOptions: { borderRadius: 16 },
         animated: false,
-        markerEnd: { type: MarkerType.ArrowClosed, color: ui.colors.edge },
+        markerEnd: { type: MarkerType.ArrowClosed, color: ui.colors.edge, width: 18, height: 18 },
         labelBgPadding: [9, 5] as [number, number],
         labelBgBorderRadius: 999,
         style: {
-          strokeWidth: 2,
+          strokeWidth: 3.5,
           stroke: ui.colors.edge,
         },
         labelStyle: {
@@ -1908,7 +1904,6 @@ function App() {
   const [graph, setGraph] = useState<AndOrGraph>(initialGraph);
   const [meta, setMeta] = useState<FeatureMeta & Record<string, unknown>>(initialMeta);
   const [graphGeneration, setGraphGeneration] = useState(0);
-  const [payloadName, setPayloadName] = useState<string>('Example workspace');
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [thresholdDecimals, setThresholdDecimals] = useState(3);
   const [ui, setUi] = useState<BuilderUi>(() => makeDefaultUi());
@@ -1932,7 +1927,7 @@ function App() {
   const nativeQueriedRefresh = useRef(0);
   const active = findNode(snapshot.root, snapshot.activeUid);
 
-  const loadPayload = (raw: unknown, name: string) => {
+  const loadPayload = (raw: unknown) => {
     const payload = raw as Window['ARBORENUM_BUILDER_PAYLOAD'];
 
     const nextGraph = payload?.graph;
@@ -1952,7 +1947,6 @@ function App() {
     setMeta(nextMeta);
     setSnapshot(autoExpandSingletons(makeRoot(nextGraph), nextGraph));
     setHistory([]);
-    setPayloadName(name);
     setUploadError(null);
     setUi(makeDefaultUi());
   };
@@ -2001,7 +1995,6 @@ function App() {
       nativeQueriedSelection.current = snapshot;
       nativeQueriedRefresh.current = nativeRefresh;
       rememberCurrentPayload({ graph: fragment, meta });
-      setPayloadName(`native ArborEnum · query ${response.query_id}`);
       setUploadError(null);
     }).catch(error => {
       if (!controller.signal.aborted && sequence === nativeRequest.current) setUploadError(error instanceof Error ? error.message : String(error));
@@ -2023,7 +2016,6 @@ function App() {
       nativeQueriedSelection.current = next;
       nativeQueriedRefresh.current = nativeRefresh;
       rememberCurrentPayload({ graph: fragment, meta });
-      setPayloadName(`native ArborEnum · query ${result.view.query_id}`);
       setHistory(previous => [...previous, cloneSnapshot(selected)]);
       setSnapshot(next);
       setUploadError(null);
@@ -2061,23 +2053,23 @@ function App() {
   return (
     <div className="app-shell" style={themeStyle}>
       <header className="canvas-header">
-          <div>
-            <div className="workspace-brand"><span className="workspace-mark"><Network size={22} /></span><div><div className="workspace-eyebrow">ANYTIME TREE BUILDER</div><h1>Your tree. Every possibility.</h1></div></div>
-            <p className="payload-name">{datasetPending ? 'Waiting for a new dataset tree…' : payloadName.startsWith('native ArborEnum') ? 'Live enumeration workspace' : `Loaded ${payloadName}`}</p>
-            <LiveEnumerationPanel
-              open={enumerationOpen}
-              onClose={() => setEnumerationOpen(false)}
-              onAvailable={setLiveAvailable}
-              onConnect={connectNative}
-              onPrepare={prepareNative}
-              onReady={readyNative}
-              onRefresh={() => setNativeRefresh(value => value + 1)}
-              querying={nativeBusy}
-              canRefresh={nativeReady}
-            />
-            {nativeBusy && <p className="native-query-status" role="status">Reading options from the native graph…</p>}
-            {uploadError && <p className="upload-error">{uploadError}</p>}
+          <div className="workspace-brand">
+            <span className="workspace-mark"><Network size={19} /></span>
+            <h1>AnytimeTreeBuilder</h1>
           </div>
+          <LiveEnumerationPanel
+            open={enumerationOpen}
+            onClose={() => setEnumerationOpen(false)}
+            onAvailable={setLiveAvailable}
+            onConnect={connectNative}
+            onPrepare={prepareNative}
+            onReady={readyNative}
+            onRefresh={() => setNativeRefresh(value => value + 1)}
+            querying={nativeBusy}
+            canRefresh={nativeReady}
+          />
+          {nativeBusy && <span className="native-query-status" role="status">Updating node options…</span>}
+          {uploadError && <p className="upload-error workspace-error" role="alert">{uploadError}</p>}
 
           <div className="header-actions">
             {!datasetPending && <BuilderSettingsMenu
@@ -2090,7 +2082,7 @@ function App() {
             />}
 
             <UploadMenu liveAvailable={liveAvailable} onDataset={() => setEnumerationOpen(true)} onGraph={async file => {
-              try { loadPayload(await readJsonFile(file), file.name); }
+              try { loadPayload(await readJsonFile(file)); }
               catch (error) { setUploadError(error instanceof Error ? error.message : 'Could not load graph JSON.'); }
             }} />
 
@@ -2101,7 +2093,6 @@ function App() {
       </header>
 
       <div className="canvas-card">
-        <div className="canvas-context"><span><Network size={14} /> DECISION CANVAS</span><span>{datasetPending ? 'Awaiting your first tree' : 'Select a node to explore'}<ChevronRight size={13} /></span></div>
         {datasetPending ? <div className="flow-wrap dataset-waiting" role="status"><Network size={38} strokeWidth={1} /><h2>Waiting for your first tree</h2><p>Your new tree will appear here as soon as its first completion is ready.</p></div> : <ReactFlowProvider key={graphGeneration}>
           <div className="flow-wrap">
             <FlowView
