@@ -318,6 +318,12 @@ static void actor_queries() {
     auto result = session.query("complete", {{"tree", root()}, {"active_uid", 0}, {"next_uid", 1}, {"mode", "optimal"}});
     require(result.contains("tree") && !result.contains("graph"), "Stopped session lost its native model");
     require(session.status()["full_graph_exports"] == 0 && session.status()["node_queries"] == 48, "Unexpected graph export or lost requests");
+    session.shutdown();
+    const auto closed_at = std::chrono::steady_clock::now();
+    bool rejected = false;
+    try { session.query("node", {{"tree", root()}, {"active_uid", 0}}); }
+    catch (const QueryUnavailable&) { rejected = true; }
+    require(rejected && std::chrono::steady_clock::now() - closed_at < std::chrono::seconds(1), "Closed session queued a query with no owner to answer it");
 }
 int main() {
     try {

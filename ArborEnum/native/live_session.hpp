@@ -150,7 +150,10 @@ class Session {
     }
 public:
     Session(std::string id, Dataset data, Settings settings) : id_(std::move(id)), settings_(Settings::checked(settings, data.X.size())), worker_([this, data = std::move(data)](std::stop_token stop) mutable { run(std::move(data), stop); }) {}
-    ~Session() { worker_.request_stop(); wake_.notify_all(); }
+    ~Session() { shutdown(); }
+    // Closing the application also cancels pending/in-progress graph queries.
+    // The UI's Stop operation intentionally retains queries on the live model.
+    void shutdown() { worker_.request_stop(); wake_.notify_all(); }
     void stop() { cancel_search_.store(true); wake_.notify_all(); }
     bool done() const { std::lock_guard lock(mutex_); return phase_ == "finished" || phase_ == "stopped" || phase_ == "failed"; }
     json metadata() const { std::lock_guard lock(mutex_); return meta_; }
@@ -162,6 +165,7 @@ public:
         auto future = request->promise.get_future();
         {
             std::lock_guard lock(mutex_);
+            if (worker_.get_stop_token().stop_requested()) throw QueryUnavailable("Native session closed");
             if (!ready_) throw QueryUnavailable("Waiting for the first feasible native tree");
             if (requests_.size() >= 32) throw QueryUnavailable("Native query queue is full; retry the latest selection");
             requests_.push(request); pending_.store(true, std::memory_order_relaxed);

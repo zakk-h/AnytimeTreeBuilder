@@ -84,6 +84,7 @@ jobs:
       - name: Build and test static Linux package
         if: runner.os == 'Linux'
         run: |
+          mkdir -p dist/apps
           docker run --rm -v "$PWD:/src" -w /src node:22-alpine sh -ec '
             apk add --no-cache g++ cmake make python3 git
             git config --global --add safe.directory /src

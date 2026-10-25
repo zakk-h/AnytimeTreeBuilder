@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
                 std::lock_guard lock(session_mutex);
                 for (const auto& [key, slot] : sessions) existing.push_back(slot.session);
             }
-            for (const auto& session : existing) if (session) session->stop();
+            for (const auto& session : existing) if (session) session->shutdown();
         };
 
         server.set_pre_routing_handler([&](const httplib::Request& req, httplib::Response& res) {
