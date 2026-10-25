@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const flags = new Set(process.argv.slice(2));
-for (const flag of flags) if (!['--ui-ready', '--static'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
+for (const flag of flags) if (!['--ui-ready', '--static', '--engine-only'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
 const platform = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
 if (!platform || !['x64', 'arm64'].includes(process.arch)) throw new Error('Supported builds: Windows, macOS and Linux on x64/arm64.');
 const name = `AnytimeTreeBuilder-${platform}-${process.arch}`;
@@ -82,3 +82,4 @@ const archive = join(output, `${name}.zip`);
 run('cmake', ['-E', 'tar', 'cf', archive, '--format=zip', name], output);
 writeFileSync(`${archive}.sha256`, `${hash(archive)}  ${name}.zip\n`);
 console.log(`\nPortable app: ${packageDir}\nDownloadable ZIP: ${archive}\nRunning it requires no Node.js, Python, compiler or separate HTML file.`);
+if (!flags.has('--engine-only')) run(process.execPath, [join(root, 'scripts', 'build-app.mjs')]);

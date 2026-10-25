@@ -14,5 +14,5 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo Build complete. Open dist\desktop for your portable app and ZIP.
-start "" "%~dp0dist\desktop"
+echo Build complete. Open dist\apps for your desktop application.
+start "" "%~dp0dist\apps"

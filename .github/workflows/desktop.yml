@@ -1,4 +1,4 @@
-name: Portable desktop apps
+name: Desktop applications
 
 on:
   push:
@@ -40,18 +40,23 @@ jobs:
           - runner: windows-2022
             platform: windows-x64
             binary: AnytimeTreeBuilder.exe
+            app_binary: win-unpacked/AnytimeTreeBuilder.exe
           - runner: macos-15
             platform: macos-arm64
             binary: AnytimeTreeBuilder
+            app_binary: mac-arm64/AnytimeTreeBuilder.app/Contents/MacOS/AnytimeTreeBuilder
           - runner: macos-15-intel
             platform: macos-x64
             binary: AnytimeTreeBuilder
+            app_binary: mac/AnytimeTreeBuilder.app/Contents/MacOS/AnytimeTreeBuilder
           - runner: ubuntu-24.04
             platform: linux-x64
             binary: AnytimeTreeBuilder
+            app_binary: linux-unpacked/anytimetreebuilder
           - runner: ubuntu-24.04-arm
             platform: linux-arm64
             binary: AnytimeTreeBuilder
+            app_binary: linux-arm64-unpacked/anytimetreebuilder
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     defaults:
@@ -75,14 +80,14 @@ jobs:
           xcrun clang++ --version
       - name: Build and test Windows/macOS package
         if: runner.os != 'Linux'
-        run: node scripts/build-desktop.mjs --ui-ready
+        run: node scripts/build-desktop.mjs --ui-ready --engine-only
       - name: Build and test static Linux package
         if: runner.os == 'Linux'
         run: |
           docker run --rm -v "$PWD:/src" -w /src node:22-alpine sh -ec '
             apk add --no-cache g++ cmake make python3 git
             git config --global --add safe.directory /src
-            node scripts/build-desktop.mjs --ui-ready --static
+            node scripts/build-desktop.mjs --ui-ready --engine-only --static
             python3 ArborEnum/native/tests/test_desktop.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
             python3 ArborEnum/native/tests/test_live_api.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
           '
@@ -95,6 +100,33 @@ jobs:
         run: |
           python ArborEnum/native/tests/test_desktop.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
           python ArborEnum/native/tests/test_live_api.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+      - name: Verify engine ownership and crash cleanup
+        run: node desktop/app/tests/engine.cjs dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }}
+      - name: Build native desktop window and installers
+        run: node scripts/build-app.mjs
+      - name: Exercise packaged Windows/macOS window
+        if: runner.os != 'Linux'
+        run: node desktop/app/tests/app.cjs "dist/apps/${{ matrix.app_binary }}"
+      - name: Exercise packaged Linux window
+        if: runner.os == 'Linux'
+        # GitHub's restricted user namespace policy requires this flag for the
+        # test process. Packaged applications keep Electron's sandbox enabled.
+        env:
+          ATB_TEST_ARGS: '["--no-sandbox"]'
+        run: xvfb-run -a node desktop/app/tests/app.cjs "dist/apps/${{ matrix.app_binary }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AnytimeTreeBuilder-App-${{ matrix.platform }}
+          path: |
+            dist/apps/*.exe
+            dist/apps/*.dmg
+            dist/apps/*.zip
+            dist/apps/*.AppImage
+            dist/apps/*.deb
+            dist/apps/*.tar.gz
+            dist/apps/*.sha256
+          if-no-files-found: error
+          retention-days: 90
       - uses: actions/upload-artifact@v4
         with:
           name: AnytimeTreeBuilder-${{ matrix.platform }}

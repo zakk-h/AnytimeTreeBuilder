@@ -1,0 +1,31 @@
+AnytimeTreeBuilder desktop application
+
+Windows: run the installer, or extract the application ZIP and open
+AnytimeTreeBuilder.exe from the extracted folder.
+Mac: open the DMG and drag AnytimeTreeBuilder into Applications, or extract the
+ZIP and open AnytimeTreeBuilder.app.
+Linux: install the .deb on Debian/Ubuntu, or make the AppImage executable and
+open it. The tar.gz contains an extracted application as an alternative to FUSE.
+
+The application opens its own window. Upload > Upload dataset starts native
+live enumeration. Closing the window quits the app and stops the C++ engine.
+No external browser, Python, Node.js installation, compiler, internet connection
+or precomputed graph is required. Your datasets stay on this computer.
+
+The window uses bundled Electron/Chromium; enumeration, graph queries and
+completions use the actual ArborEnum C++ graph in a managed local process.
+All UI/API traffic stays on the engine's own loopback address. The renderer has
+no Node integration and is sandboxed. External navigation and permissions are
+blocked. Closing the parent's private stdin pipe stops the engine cooperatively,
+including when the desktop parent crashes.
+
+These downloads do not have commercial Windows signing or Apple Developer ID
+signing/notarization. Existing first-launch OS trust warnings still apply.
+Linux sandbox or installation restrictions may depend on your distribution.
+
+Rebuild using the repository's build-desktop.cmd (Windows),
+build-desktop.command (Mac), or build-desktop.sh (Linux). Output: dist/apps.
+The previous browser-opening native packages remain available in dist/desktop;
+--engine-only builds those without packaging the desktop window.
+
+Project: https://github.com/zakk-h/AnytimeTreeBuilder

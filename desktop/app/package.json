@@ -1,0 +1,78 @@
+{
+  "name": "anytime-tree-builder-desktop",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Interactive decision trees with local, live C++ enumeration",
+  "author": "Zakk Heile <zakk-h@users.noreply.github.com>",
+  "homepage": "https://github.com/zakk-h/AnytimeTreeBuilder",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "install-electron && electron .",
+    "package": "electron-builder --publish never",
+    "test:app": "node tests/app.cjs"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0",
+    "playwright-core": "1.64.1"
+  },
+  "build": {
+    "appId": "io.github.zakk-h.anytimetreebuilder",
+    "productName": "AnytimeTreeBuilder",
+    "directories": {
+      "output": "../../dist/apps",
+      "buildResources": "."
+    },
+    "files": [
+      "main.cjs",
+      "engine.cjs",
+      "icon.png",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../native",
+        "to": "native"
+      }
+    ],
+    "asar": true,
+    "artifactName": "AnytimeTreeBuilder-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "category": "public.app-category.education",
+      "icon": "icon.png",
+      "identity": "-",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "icon.png",
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always"
+    },
+    "linux": {
+      "icon": "icon.png",
+      "executableName": "anytimetreebuilder",
+      "syncDesktopName": true,
+      "category": "Education",
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ]
+    },
+    "deb": {
+      "compression": "gz"
+    }
+  },
+  "desktopName": "io.github.zakk-h.anytimetreebuilder.desktop"
+}

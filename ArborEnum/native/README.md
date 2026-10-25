@@ -105,3 +105,11 @@ The portable app uses the same HTTP service, owner thread, graph queries, cancel
 Desktop builds select a free IPv4 loopback port and open the generated URL through ShellExecute on Windows, `open` on macOS, or `xdg-open` on Linux, without a shell. They ignore hosting environment configuration and keep the existing Host/Origin and per-browser cookie checks. `--no-browser` suppresses opening; `--port 0` explicitly requests a free port. Windows uses a static MSVC runtime. Official Linux packages use static musl linking.
 
 `python3 native/tests/test_desktop.py BINARY EXPECTED_HTML` (from the ArborEnum directory) copies the executable into an unrelated directory with spaces, checks the embedded UI byte-for-byte, runs simultaneous instances on distinct free ports, verifies external hosts stay blocked, and exercises real native enumeration/completion and shutdown. On Linux it also verifies automatic browser launch using a fixture opener.
+
+## Managed desktop window
+
+The default root build launchers now also package an Electron window in `dist/apps`. The native service still embeds its UI and owns the same C++ graph. The desktop parent starts it with `--managed --no-browser --port 0`, checks the health protocol, then opens a sandboxed BrowserWindow at the announced loopback origin. The renderer has no Node integration or privileged preload bridge.
+
+`--managed` requires a parent-owned stdin pipe (or Unix socket). The existing shutdown watcher checks it without blocking: EOF triggers the same cooperative session cancellation and HTTP shutdown as Ctrl+C. Closing the desktop window ends that pipe; a crashed parent also closes it at the OS level. There is no network-accessible shutdown endpoint. The janitor uses a stop-token-aware wait so it does not delay shutdown by its five-second idle interval. After twelve seconds the desktop parent terminates an unresponsive child as a last resort.
+
+`node desktop/app/tests/engine.cjs BINARY` verifies native startup, enumeration, cooperative parent-pipe shutdown and cleanup after an abruptly terminated parent. `desktop/app/tests/app.cjs PACKAGED_APPLICATION` exercises the actual packaged window and checks that its native service disappears on close.

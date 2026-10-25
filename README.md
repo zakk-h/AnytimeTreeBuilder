@@ -4,11 +4,19 @@ Build decision trees interactively while ArborEnum grows a Rashomon set in the b
 
 This repository contains the integrated ArborEnum engine and InteractiveTreeBuilder GUI. A single clone includes all source needed to build and run it; no submodules or precomputed Rashomon graph are required.
 
-## Portable desktop application
+## Desktop application
 
-Download the package for your computer from **Actions → Portable desktop apps → the latest successful run → Artifacts**. Extract the artifact download, then extract the platform ZIP inside it and open `AnytimeTreeBuilder.exe` on Windows, `Open AnytimeTreeBuilder.command` on macOS, or `AnytimeTreeBuilder` on Linux. Your browser opens on a free local port automatically. Choose **Upload → Upload dataset** to start live enumeration. Keep the application running while using the browser; Ctrl+C closes it.
+Download **Actions → Desktop applications → the latest successful run → Artifacts → AnytimeTreeBuilder-App-…** for your computer. Extract the artifact download, then launch the package inside:
 
-The executable contains both the current UI and the C++ ArborEnum engine. Running a downloaded package requires no Node.js, Python, compiler, separate HTML, port forwarding, or precomputed graph. A browser is required. Datasets stay on your computer. The Windows and macOS/Linux downloads are different binaries; a Windows `.exe` is not a universal executable. Phones and tablets cannot run these desktop binaries.
+| Computer | Application package |
+| --- | --- |
+| Windows x64 | Run the installer `.exe`, or extract the portable ZIP and open `AnytimeTreeBuilder.exe` |
+| Mac, Apple silicon / Intel | Open the DMG and drag `AnytimeTreeBuilder.app` into Applications, or extract the app ZIP |
+| Linux x64 / ARM64 | Install the `.deb` on Debian/Ubuntu, open the executable AppImage, or extract the `.tar.gz` and run `anytimetreebuilder` |
+
+The app opens its own desktop window. Choose **Upload → Upload dataset** to start live enumeration. Closing the window quits the application and stops the engine automatically. No external browser, Python, Node.js installation, compiler, port forwarding, internet connection or precomputed graph is required. Datasets stay on your computer. Each operating system has its own packages.
+
+The window uses bundled Electron/Chromium. A managed native C++ process contains the current UI and ArborEnum engine; graph queries and completions still operate on its actual C++ graph. The sandboxed renderer has no Node integration, external navigation and permissions are blocked, and it only accesses its own loopback API. The parent owns a private stdin pipe: closing it, including on a parent crash, makes the engine stop cooperatively. This does not add a Python bridge or another Rashomon graph.
 
 To rebuild the current checkout whenever the source changes:
 
@@ -18,9 +26,15 @@ To rebuild the current checkout whenever the source changes:
 | macOS | Double-click `build-desktop.command`, or run `./build-desktop.sh` |
 | Linux | Run `./build-desktop.sh` |
 
-Outputs appear under `dist/desktop/`, including a portable folder, ZIP, SHA-256 checksum and build manifest. Re-running builds and embeds the current source; update your checkout first for a new version. Building requires Node.js 22.12+, npm, CMake 3.20+ and a C++20 toolchain (`std::jthread`): Visual Studio 2022 C++ tools on Windows, Xcode 26+ on macOS, or GCC 12+ on Linux. It builds for the computer running the script. The GitHub workflow builds and tests Windows x64, macOS Intel/Apple silicon, and Linux x64/ARM64 automatically. Linux CI builds are static musl binaries. macOS builds target macOS 13+ and Windows builds target Windows 10/11. These downloads are not commercially signed or notarized. Xcode 26 supplies the required standard `std::jthread` support ([Apple release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26-release-notes)).
+Outputs appear under `dist/apps/`: Windows installer/portable ZIP, Mac DMG/app ZIP, or Linux AppImage/deb/tar.gz, plus SHA-256 checksums. Re-running rebuilds the current source; update your checkout first for a new version. Building requires Node.js 22.12+, npm, CMake 3.20+ and a C++20 toolchain (`std::jthread`): Visual Studio 2022 C++ tools on Windows, Xcode 26+ on macOS, or GCC 12+ on Linux. Linux packaging uses the tools downloaded by electron-builder. It builds for the computer running the script. The GitHub workflow builds and exercises Windows x64, macOS Intel/Apple silicon, and Linux x64/ARM64 on their respective runners.
 
-Headless usage is available with `AnytimeTreeBuilder --no-browser`; the chosen local URL is printed. `--port 8765` selects a fixed port and `--open-browser` explicitly opens the browser when passing options. Existing server builds and `launch.sh` continue to work as below.
+These packages do not have commercial Windows signing or Apple Developer ID signing/notarization; wrapping the UI in an app does not remove OS trust warnings. Linux desktop dependencies and sandbox policies depend on the distribution. Mac packages target macOS 13+ and Windows packages target Windows 10/11. Xcode 26 supplies the required standard `std::jthread` support ([Apple release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26-release-notes)).
+
+### Native browser-opening package
+
+The smaller, browser-opening native packages remain in `dist/desktop` and in the `AnytimeTreeBuilder-…` Actions artifacts. `./build-desktop.sh --engine-only` builds these without the Electron window. `--ui-ready` reuses the already-built production UI, and `--static` selects static linking for a suitable Linux toolchain (official Linux engine builds use musl).
+
+Headless native usage is available with `AnytimeTreeBuilder --no-browser`; the chosen local URL is printed. `--port 8765` selects a fixed port and `--open-browser` explicitly opens the browser when passing options. Existing server builds and `launch.sh` continue to work as below.
 
 ## Build and launch
 
@@ -97,3 +111,15 @@ Native regressions cover path queries, exhaustive constrained optima on a small 
 | [PROVENANCE.md](PROVENANCE.md) | Upstream repositories, exact source revisions and vendored licenses |
 
 The original Python API, examples and standalone uploaded/embedded graph workflow remain in their respective source directories. Live enumeration uses the native service.
+
+## Desktop window checks
+
+The application workflow tests the packaged executable on every supported OS/architecture, including CSV upload, native completion, option refresh, renderer isolation, blocked external requests and engine cleanup on window close. `desktop/app/tests/engine.cjs` also kills a parent process abruptly to verify that its native engine stops without a desktop shutdown handler.
+
+```sh
+node desktop/app/tests/engine.cjs dist/desktop/AnytimeTreeBuilder-linux-x64/AnytimeTreeBuilder
+# After packaging (substitute the packaged executable path for your OS):
+node desktop/app/tests/app.cjs dist/apps/linux-unpacked/anytimetreebuilder
+```
+
+The window test requires a graphical session (CI uses Xvfb on Linux). Restricted CI user-namespace policies may require `ATB_TEST_ARGS='["--no-sandbox"]'` for the test process. The application never adds that flag in production. Desktop dependencies are pinned in `desktop/app/package-lock.json`; update Electron regularly for bundled Chromium security fixes.

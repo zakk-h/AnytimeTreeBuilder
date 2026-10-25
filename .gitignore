@@ -1,6 +1,7 @@
 # Build output and dependency installations
 /bin/
 /build/
+/desktop/native/
 node_modules/
 dist/
 .vite/

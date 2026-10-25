@@ -2,6 +2,7 @@
 #include "local_origin.hpp"
 #include "vendor/httplib.h"
 #include "desktop_launch.hpp"
+#include "managed_process.hpp"
 #ifdef ARBORENUM_EMBEDDED_UI
 #include "embedded_ui.hpp"
 #endif
@@ -102,6 +103,7 @@ struct BrowserSession {
 int main(int argc, char** argv) {
     try {
         std::string html_path;
+        bool managed = false;
 #ifdef ARBORENUM_DESKTOP
         int port = 0;
         bool open_browser = argc == 1;
@@ -119,15 +121,18 @@ int main(int argc, char** argv) {
                     throw std::invalid_argument("Invalid port: " + value);
             }
             else if (arg == "--no-browser") open_browser = false;
+            else if (arg == "--managed") { managed = true; open_browser = false; }
             else if (arg == "--open-browser") open_browser = true;
             else if (arg == "--help") {
                 std::cout << "AnytimeTreeBuilder [--ui /path/to/index.html] [--port 0..65535] [--no-browser | --open-browser]\n"
-                          << "Desktop builds include the UI; port 0 selects a free local port.\n";
+                          << "Desktop builds include the UI; port 0 selects a free local port.\n"
+                          << "--managed exits cooperatively when its parent closes the stdin pipe.\n";
                 return 0;
             } else throw std::invalid_argument("Unknown argument: " + arg);
         }
         if (port < 0 || port > 65535)
             throw std::invalid_argument("Port must be between 0 and 65535");
+        if (managed) { require_owner_pipe(); open_browser = false; }
 
         std::size_t max_sessions = 2;
         if (const char* setting = std::getenv("ARBORENUM_MAX_SESSIONS")) {
@@ -348,15 +353,20 @@ int main(int argc, char** argv) {
         }
         const std::string url = "http://127.0.0.1:" + std::to_string(port);
 
+        std::condition_variable_any janitor_wake;
+        std::mutex janitor_mutex;
         std::jthread janitor([&](std::stop_token token) {
+            std::unique_lock lock(janitor_mutex);
             while (!token.stop_requested() && !shutting_down.load()) {
-                std::this_thread::sleep_for(std::chrono::seconds(5));
+                janitor_wake.wait_for(lock, token, std::chrono::seconds(5), [&] { return shutting_down.load(); });
                 if (!token.stop_requested() && !shutting_down.load()) reap_idle();
             }
         });
         std::jthread shutdown_watcher([&](std::stop_token token) {
-            while (!token.stop_requested() && !shutting_down.load())
+            while (!token.stop_requested() && !shutting_down.load()) {
+                if (managed && owner_pipe_closed()) shutting_down.store(true);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
             if (shutting_down.load()) {
                 stop_all();
                 server.stop();
