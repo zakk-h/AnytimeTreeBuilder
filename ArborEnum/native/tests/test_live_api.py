@@ -7,6 +7,7 @@ import http.cookiejar
 from pathlib import Path
 import socket
 import signal
+import random
 import os
 import subprocess
 import sys
@@ -49,10 +50,13 @@ def main():
         assert call('/api/session', {'settings': {'unknown': 1}})[0] == 400
         # A deliberately broad binary initial solve: query and cancel before
         # its first coarse checkpoint, then keep exploring the retained model.
-        early = {'feature_names': [f'bit{f}' for f in range(9)], 'class_names': ['no', 'yes'],
-                 'X': [[(i >> f) & 1 for f in range(9)] for i in range(512)],
-                 'y': [i.bit_count() % 2 for i in range(512)],
-                 'settings': {'depth_budget': 6, 'lambda_reg': .002, 'rashomon_mult': 2, 'runtime_limit_seconds': 1}}
+        # Avoid the tiny cached DAG of a full binary cube on faster machines.
+        rng = random.Random(812)
+        words = [rng.getrandbits(20) for _ in range(1024)]
+        early = {'feature_names': [f'bit{f}' for f in range(20)], 'class_names': ['no', 'yes'],
+                 'X': [[(i >> f) & 1 for f in range(20)] for i in words],
+                 'y': [i.bit_count() % 2 for i in words],
+                 'settings': {'depth_budget': 8, 'lambda_reg': .002, 'rashomon_mult': 2, 'runtime_limit_seconds': 1}}
         code, status = call('/api/session', early)
         assert code == 202, status
         early_id = status['session_id']

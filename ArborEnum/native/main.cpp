@@ -231,11 +231,6 @@ int main(int argc, char** argv) {
                 respond(res, {{"error", "Host/Origin not allowed"}}, 403);
                 return httplib::Server::HandlerResponse::Handled;
             }
-            if (req.method == "POST" &&
-                req.get_header_value("Content-Type").find("application/json") != 0) {
-                respond(res, {{"error", "Expected application/json"}}, 415);
-                return httplib::Server::HandlerResponse::Handled;
-            }
             return httplib::Server::HandlerResponse::Unhandled;
         });
 
@@ -256,7 +251,19 @@ int main(int argc, char** argv) {
             const auto current = get_session(key);
             respond(res, current ? current->status() : json(nullptr));
         });
-        server.Post("/api/session", [&](const auto& req, auto& res) {
+        // Normal POST handlers run after httplib consumes the bounded request
+        // body. Rejecting media types in pre-routing leaves unread TCP bytes,
+        // which can reset the connection and lose the error response on Windows.
+        auto post_json = [&](const std::string& path, httplib::Server::Handler handler) {
+            server.Post(path, [respond, handler = std::move(handler)](const auto& req, auto& res) {
+                if (req.get_header_value("Content-Type").find("application/json") != 0) {
+                    respond(res, {{"error", "Expected application/json"}}, 415);
+                    return;
+                }
+                handler(req, res);
+            });
+        };
+        post_json("/api/session", [&](const auto& req, auto& res) {
             const auto key = ensure_browser(req, res);
             auto body = json::parse(req.body);
             auto settings = Settings::parse(body.value("settings", json::object()));
@@ -309,15 +316,15 @@ int main(int argc, char** argv) {
         server.Get("/api/meta", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res)) respond(res, current->metadata());
         });
-        server.Post("/api/node", [&](const auto& req, auto& res) {
+        post_json("/api/node", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res))
                 respond(res, current->query("node", json::parse(req.body)));
         });
-        server.Post("/api/complete", [&](const auto& req, auto& res) {
+        post_json("/api/complete", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res))
                 respond(res, current->query("complete", json::parse(req.body)));
         });
-        server.Post("/api/stop", [&](const auto& req, auto& res) {
+        post_json("/api/stop", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res)) {
                 current->stop();
                 respond(res, current->status(), 202);

@@ -264,13 +264,17 @@ static void initial_root(bool split_only, int cancel_stage = 0) {
 }
 static void initial_actor_queries() {
     Dataset data; data.classes = {"no", "yes"};
-    for (int f = 0; f < 9; ++f) data.names.push_back("bit" + std::to_string(f));
-    for (int i = 0; i < 512; ++i) {
+    // A full 9-bit cube collapses into a tiny cached DAG and can finish before
+    // a fast machine's 1ms observer wakes. Random masks avoid that symmetry.
+    std::mt19937 rng(812);
+    for (int f = 0; f < 20; ++f) data.names.push_back("bit" + std::to_string(f));
+    for (int i = 0; i < 1024; ++i) {
+        const auto mask = static_cast<unsigned>(rng()) & ((1u << 20) - 1);
         std::vector<double> row;
-        for (int f = 0; f < 9; ++f) row.push_back((i >> f) & 1);
-        data.X.push_back(std::move(row)); data.y.push_back(std::popcount(unsigned(i)) % 2);
+        for (int f = 0; f < 20; ++f) row.push_back((mask >> f) & 1);
+        data.X.push_back(std::move(row)); data.y.push_back(std::popcount(mask) % 2);
     }
-    Settings settings; settings.depth = 5; settings.lambda = .002; settings.multiplier = 2.; settings.second_multiplier = 2.; settings.runtime = 1;
+    Settings settings; settings.depth = 8; settings.lambda = .002; settings.multiplier = 2.; settings.second_multiplier = 2.; settings.runtime = 1;
     Session session("initial", std::move(data), settings);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     json status;
