@@ -1,11 +1,19 @@
 #include "live_session.hpp"
 #include "local_origin.hpp"
 #include "vendor/httplib.h"
+#include "desktop_launch.hpp"
+#ifdef ARBORENUM_EMBEDDED_UI
+#include "embedded_ui.hpp"
+#endif
+#ifdef _WIN32
+#include <bcrypt.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -44,6 +52,12 @@ static std::string new_secret() {
         if (n <= 0) throw std::runtime_error("Cannot obtain secure random bytes");
         filled += static_cast<std::size_t>(n);
     }
+#elif defined(_WIN32)
+    if (BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                       BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+        throw std::runtime_error("Cannot obtain secure random bytes");
+#elif defined(__APPLE__)
+    arc4random_buf(bytes.data(), bytes.size());
 #else
     std::random_device rd;
     for (auto& byte : bytes) byte = static_cast<unsigned char>(rd());
@@ -88,18 +102,32 @@ struct BrowserSession {
 int main(int argc, char** argv) {
     try {
         std::string html_path;
+#ifdef ARBORENUM_DESKTOP
+        int port = 0;
+        bool open_browser = argc == 1;
+#else
         int port = 8765;
+        bool open_browser = false;
+#endif
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "--ui" && i + 1 < argc) html_path = argv[++i];
-            else if (arg == "--port" && i + 1 < argc) port = std::stoi(argv[++i]);
+            else if (arg == "--port" && i + 1 < argc) {
+                const std::string value = argv[++i];
+                const auto parsed = std::from_chars(value.data(), value.data() + value.size(), port);
+                if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
+                    throw std::invalid_argument("Invalid port: " + value);
+            }
+            else if (arg == "--no-browser") open_browser = false;
+            else if (arg == "--open-browser") open_browser = true;
             else if (arg == "--help") {
-                std::cout << "arborenum-builder --ui /path/to/dist/index.html [--port 8765]\n";
+                std::cout << "AnytimeTreeBuilder [--ui /path/to/index.html] [--port 0..65535] [--no-browser | --open-browser]\n"
+                          << "Desktop builds include the UI; port 0 selects a free local port.\n";
                 return 0;
             } else throw std::invalid_argument("Unknown argument: " + arg);
         }
-        if (port < 1 || port > 65535)
-            throw std::invalid_argument("Port must be between 1 and 65535");
+        if (port < 0 || port > 65535)
+            throw std::invalid_argument("Port must be between 0 and 65535");
 
         std::size_t max_sessions = 2;
         if (const char* setting = std::getenv("ARBORENUM_MAX_SESSIONS")) {
@@ -110,10 +138,18 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("ARBORENUM_MAX_SESSIONS must be 1 through 16");
         }
 
-        std::ifstream input(html_path, std::ios::binary);
-        if (!input) throw std::runtime_error("Cannot open builder HTML; pass --ui /path/to/dist/index.html");
-        const std::string html((std::istreambuf_iterator<char>(input)), {});
-        input.close();
+        std::string html;
+        if (!html_path.empty()) {
+            std::ifstream input(html_path, std::ios::binary);
+            if (!input) throw std::runtime_error("Cannot open builder HTML: " + html_path);
+            html.assign(std::istreambuf_iterator<char>(input), {});
+        } else {
+#ifdef ARBORENUM_EMBEDDED_UI
+            html.assign(reinterpret_cast<const char*>(arborenum_embedded_ui), sizeof(arborenum_embedded_ui));
+#else
+            throw std::runtime_error("Pass --ui /path/to/dist/index.html or build the desktop application");
+#endif
+        }
 
         httplib::Server server;
         server.new_task_queue = [] { return new httplib::ThreadPool(4); };
@@ -130,8 +166,11 @@ int main(int argc, char** argv) {
             res.status = status;
             res.set_content(body.dump(), "application/json");
         };
-        const std::string authority = "127.0.0.1:" + std::to_string(port);
+#ifdef ARBORENUM_DESKTOP
+        const char* env_host = nullptr; // Portable desktop apps always stay on loopback.
+#else
         const char* env_host = std::getenv("RENDER_EXTERNAL_HOSTNAME");
+#endif
         const std::string public_host = env_host ? env_host : "";
 
         auto ensure_browser = [&](const httplib::Request& req, httplib::Response& res) {
@@ -290,9 +329,17 @@ int main(int argc, char** argv) {
 
         std::signal(SIGINT, signal_stop);
         std::signal(SIGTERM, signal_stop);
+#ifdef _WIN32
+        std::signal(SIGBREAK, signal_stop);
+#endif
         const std::string bind_host = public_host.empty() ? "127.0.0.1" : "0.0.0.0";
-        if (!server.bind_to_port(bind_host, port))
+        if (port == 0) {
+            port = server.bind_to_any_port(bind_host);
+            if (port < 1) throw std::runtime_error("Cannot choose a free local port");
+        } else if (!server.bind_to_port(bind_host, port)) {
             throw std::runtime_error("Cannot bind " + bind_host + ":" + std::to_string(port));
+        }
+        const std::string url = "http://127.0.0.1:" + std::to_string(port);
 
         std::jthread janitor([&](std::stop_token token) {
             while (!token.stop_requested() && !shutting_down.load()) {
@@ -308,7 +355,10 @@ int main(int argc, char** argv) {
                 server.stop();
             }
         });
-        std::cout << "Interactive Tree Builder: http://" << authority << "\n" << std::flush;
+        std::cout << "Interactive Tree Builder: " << url << "\n"
+                  << "Keep this application running while using the builder. Press Ctrl+C to close.\n" << std::flush;
+        if (open_browser && !open_local_browser(url))
+            std::cerr << "Could not open the browser automatically. Open " << url << " manually.\n";
         server.listen_after_bind();
         janitor.request_stop();
         shutdown_watcher.request_stop();

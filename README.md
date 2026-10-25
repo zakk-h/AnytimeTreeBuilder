@@ -4,6 +4,24 @@ Build decision trees interactively while ArborEnum grows a Rashomon set in the b
 
 This repository contains the integrated ArborEnum engine and InteractiveTreeBuilder GUI. A single clone includes all source needed to build and run it; no submodules or precomputed Rashomon graph are required.
 
+## Portable desktop application
+
+Download the package for your computer from **Actions → Portable desktop apps → the latest successful run → Artifacts**. Extract the artifact download, then extract the platform ZIP inside it and open `AnytimeTreeBuilder.exe` on Windows, `Open AnytimeTreeBuilder.command` on macOS, or `AnytimeTreeBuilder` on Linux. Your browser opens on a free local port automatically. Choose **Upload → Upload dataset** to start live enumeration. Keep the application running while using the browser; Ctrl+C closes it.
+
+The executable contains both the current UI and the C++ ArborEnum engine. Running a downloaded package requires no Node.js, Python, compiler, separate HTML, port forwarding, or precomputed graph. A browser is required. Datasets stay on your computer. The Windows and macOS/Linux downloads are different binaries; a Windows `.exe` is not a universal executable. Phones and tablets cannot run these desktop binaries.
+
+To rebuild the current checkout whenever the source changes:
+
+| Build computer | Launcher in the repository root |
+| --- | --- |
+| Windows | Double-click `build-desktop.cmd` |
+| macOS | Double-click `build-desktop.command`, or run `./build-desktop.sh` |
+| Linux | Run `./build-desktop.sh` |
+
+Outputs appear under `dist/desktop/`, including a portable folder, ZIP, SHA-256 checksum and build manifest. Re-running builds and embeds the current source; update your checkout first for a new version. Building requires Node.js 22.12+, npm, CMake 3.20+ and a C++20 toolchain (`std::jthread`): Visual Studio 2022 C++ tools on Windows, Xcode 26+ on macOS, or GCC 12+ on Linux. It builds for the computer running the script. The GitHub workflow builds and tests Windows x64, macOS Intel/Apple silicon, and Linux x64/ARM64 automatically. Linux CI builds are static musl binaries. macOS builds target macOS 13+ and Windows builds target Windows 10/11. These downloads are not commercially signed or notarized. Xcode 26 supplies the required standard `std::jthread` support ([Apple release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26-release-notes)).
+
+Headless usage is available with `AnytimeTreeBuilder --no-browser`; the chosen local URL is printed. `--port 8765` selects a fixed port and `--open-browser` explicitly opens the browser when passing options. Existing server builds and `launch.sh` continue to work as below.
+
 ## Build and launch
 
 Requires Node.js 22.12+ and npm, CMake 3.20+, and a C++20 compiler with `std::jthread` support. The combined build and launch scripts use Bash; Linux is tested.

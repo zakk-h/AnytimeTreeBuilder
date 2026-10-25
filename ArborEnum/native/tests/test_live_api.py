@@ -6,6 +6,8 @@ import json
 import http.cookiejar
 from pathlib import Path
 import socket
+import signal
+import os
 import subprocess
 import sys
 import time
@@ -19,7 +21,7 @@ def main():
         sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
     client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-    process = subprocess.Popen([binary, '--ui', html, '--port', str(port)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    process = subprocess.Popen([binary, '--ui', html, '--port', str(port)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
     def call(path, body=None, headers=None):
         request = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers={'Content-Type': 'application/json', **(headers or {})})
         try:
@@ -107,7 +109,8 @@ def main():
         assert call('/api/session')[1]['full_graph_exports'] == 0
         print('Native HTTP node-path queries, all completion modes, concurrent readers, zero exports, stop retention and preview origins passed')
     finally:
-        process.terminate()
+        if os.name == 'nt': process.send_signal(signal.CTRL_BREAK_EVENT)
+        else: process.terminate()
         try: output = process.communicate(timeout=15)[0]
         except subprocess.TimeoutExpired:
             process.kill(); process.communicate()

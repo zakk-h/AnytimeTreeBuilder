@@ -1,0 +1,104 @@
+name: Portable desktop apps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: InteractiveTreeBuilder/package-lock.json
+      - run: npm ci
+        working-directory: InteractiveTreeBuilder
+      - run: npm run typecheck && npm test && npm run build
+        working-directory: InteractiveTreeBuilder
+      - run: node scripts/frontend-notices.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-ui
+          path: InteractiveTreeBuilder/dist/
+          retention-days: 30
+
+  native:
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: windows-x64
+            binary: AnytimeTreeBuilder.exe
+          - runner: macos-15
+            platform: macos-arm64
+            binary: AnytimeTreeBuilder
+          - runner: macos-15-intel
+            platform: macos-x64
+            binary: AnytimeTreeBuilder
+          - runner: ubuntu-24.04
+            platform: linux-x64
+            binary: AnytimeTreeBuilder
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+            binary: AnytimeTreeBuilder
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-ui
+          path: InteractiveTreeBuilder/dist
+      - name: Select Xcode with standard C++20 jthread support
+        if: runner.os == 'macOS'
+        run: |
+          for candidate in /Applications/Xcode_26*.app; do
+            if [ -d "$candidate" ]; then sudo xcode-select -s "$candidate"; break; fi
+          done
+          xcrun clang++ --version
+      - name: Build and test Windows/macOS package
+        if: runner.os != 'Linux'
+        run: node scripts/build-desktop.mjs --ui-ready
+      - name: Build and test static Linux package
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src node:22-alpine sh -ec '
+            apk add --no-cache g++ cmake make python3
+            node scripts/build-desktop.mjs --ui-ready --static
+            python3 ArborEnum/native/tests/test_desktop.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+            python3 ArborEnum/native/tests/test_live_api.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+          '
+      - uses: actions/setup-python@v5
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.12'
+      - name: Test standalone application and live HTTP API
+        if: runner.os != 'Linux'
+        run: |
+          python ArborEnum/native/tests/test_desktop.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+          python ArborEnum/native/tests/test_live_api.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AnytimeTreeBuilder-${{ matrix.platform }}
+          path: |
+            dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}.zip
+            dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
