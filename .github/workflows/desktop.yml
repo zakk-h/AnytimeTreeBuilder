@@ -80,7 +80,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           docker run --rm -v "$PWD:/src" -w /src node:22-alpine sh -ec '
-            apk add --no-cache g++ cmake make python3
+            apk add --no-cache g++ cmake make python3 git
+            git config --global --add safe.directory /src
             node scripts/build-desktop.mjs --ui-ready --static
             python3 ArborEnum/native/tests/test_desktop.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
             python3 ArborEnum/native/tests/test_live_api.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
