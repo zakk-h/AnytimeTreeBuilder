@@ -1,3 +1,4 @@
+import { readNativeResponse } from './nativeResponse';
 import type { AndOrGraph, BuildNode, HistorySnapshot, LeafNode, SplitNode, TrieNode } from './types';
 
 export type NativeSummary = { uid: number; minimum: number; sample_size: number; loss?: number };
@@ -81,7 +82,7 @@ export class NativeGraphAdapter {
 
 export async function nativeApi<T>(path: string, session: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`/api/${path}?session_id=${encodeURIComponent(session)}`, { signal, ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
-  const payload = await response.json();
+  const payload = await readNativeResponse(response, `/api/${path}`);
   if (!response.ok) throw new Error(payload.error ?? 'Native graph query failed.');
   return payload;
 }

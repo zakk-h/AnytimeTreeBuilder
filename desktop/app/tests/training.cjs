@@ -23,6 +23,15 @@ async function exerciseTraining(page) {
   assert.equal(await start.isDisabled(), true, 'Duplicate IDs were not rejected');
   await page.getByLabel('Proxy threshold IDs', { exact: true }).fill('0');
   assert.equal(await start.isEnabled(), true);
+  const transient = async route => {
+    if (route.request().method() === 'POST') await route.fulfill({ status: 503, contentType: 'text/html', body: '<!DOCTYPE html><title>Temporary proxy failure</title>' });
+    else await route.continue();
+  };
+  await page.route('**/api/session', transient);
+  await start.click();
+  await page.locator('.live-dialog .upload-error').filter({ hasText: 'HTML page instead of API data for /api/session (HTTP 503)' }).waitFor();
+  assert.equal(await start.isEnabled(), true, 'A failed server response prevented retrying training');
+  await page.unroute('**/api/session', transient);
   const posted = page.waitForResponse(response => response.url().endsWith('/api/session') && response.request().method() === 'POST');
   await start.click();
   const response = await posted;

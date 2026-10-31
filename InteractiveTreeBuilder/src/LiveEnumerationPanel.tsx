@@ -1,3 +1,4 @@
+import { readNativeResponse } from './nativeResponse';
 import { useEffect, useRef, useState } from 'react';
 import { Play, RefreshCw, Square, X, Table2 } from 'lucide-react';
 import type { ArborEnumBuilderMeta } from './arborenumPayload';
@@ -15,7 +16,7 @@ const finished = (s: Status) => ['finished', 'stopped', 'failed'].includes(s.pha
 async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T | null> {
   const response = await fetch(path, { signal, ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
   if (response.status === 204) return null;
-  const result = await response.json();
+  const result = await readNativeResponse(response, path.split('?')[0]);
   if (!response.ok) throw new Error(result.error ?? `Native service returned ${response.status}.`);
   return result;
 }

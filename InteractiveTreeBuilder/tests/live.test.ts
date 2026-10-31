@@ -1,3 +1,4 @@
+import { readNativeResponse } from '../src/nativeResponse';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCsv, toDataset } from '../src/liveDataset';
@@ -117,4 +118,16 @@ test('training settings preserve advanced controls and reject invalid objectives
     assert.throws(() => native({ ...defaults, ...patch }));
   }
   assert.equal(error({ ...defaults, depth_budget: 0, lookahead_k: 0, abstain_cost: 0 }), undefined);
+});
+
+test('native responses preserve JSON and explain transient HTML or invalid responses', async () => {
+  assert.deepEqual(await readNativeResponse(new Response('{"error":"Session expired"}', { status: 409 }), '/api/session'), { error: 'Session expired' });
+  assert.equal(await readNativeResponse(new Response('null'), '/api/session'), null);
+  for (const status of [200, 502, 503]) {
+    await assert.rejects(readNativeResponse(new Response('<!DOCTYPE html><title>Proxy error</title>', { status }), '/api/session'), error => {
+      const message = String(error);
+      return message.includes('/api/session') && message.includes('HTML page') && message.includes('HTTP ' + status) && !message.includes('<!DOCTYPE');
+    });
+  }
+  await assert.rejects(readNativeResponse(new Response('Service unavailable', { status: 503 }), '/api/node'), /invalid API response.*HTTP 503/);
 });
