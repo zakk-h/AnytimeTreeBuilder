@@ -332,6 +332,71 @@ static void actor_queries() {
     catch (const QueryUnavailable&) { rejected = true; }
     require(rejected && std::chrono::steady_clock::now() - closed_at < std::chrono::seconds(1), "Closed session queued a query with no owner to answer it");
 }
+static int abstained(ArborEnum& model, const json& tree, const Packed& mask) {
+    if (tree.at("kind") == "leaf") return tree.at("prediction") == -1 ? int(mask.count()) : 0;
+    auto children = model.live_child_masks(mask, tree.at("feature"));
+    return abstained(model, tree.at("left"), children.first) + abstained(model, tree.at("right"), children.second);
+}
+static void minimum_abstention() {
+    ArborEnum model;
+    std::vector<std::vector<uint8_t>> X;
+    for (int i = 0; i < 8; ++i) X.push_back({uint8_t(i < 6)});
+    model.prepare_continuous_data(std::vector<std::vector<double>>(8), X, std::vector<int>(8, 0),
+        std::vector<std::vector<uint8_t>>(8), std::vector<std::vector<uint8_t>>(8), -1);
+    model.fit_prepared_anytime(.125, 1, 0., 0., .1, 1, true, false, 0, false, false, true, {}, {}, 1);
+    auto left = std::make_shared<TreeTrieNode>(), right = std::make_shared<TreeTrieNode>();
+    left->budget = 8; right->budget = 8;
+    left->add_leaf(-1, 1); left->add_leaf(0, 6);
+    right->add_leaf(-1, 1); right->add_leaf(0, 8);
+    model.result = std::make_shared<TreeTrieNode>();
+    model.result->min_objective = 2;
+    model.result->splits.push_back(SplitNode{0, left, right});
+    const json meta = {{"root_n", 8}};
+    const json constraint = {{"mode", "avoid"}, {"minimizeAbstention", true}};
+    auto complete = [&](json tree, int active, const json& c) {
+        GraphQueries query(model, meta);
+        return query.complete(std::move(tree), active, 3, "constrained", c, 0);
+    };
+    // Independent exhaustive comparison across budgets, including the case in
+    // which each sibling can avoid abstention but both cannot afford to do so.
+    for (int budget = 2; budget <= 16; ++budget) {
+        model.result->budget = budget;
+        std::pair<int, int> expected{INT_MAX, INT_MAX};
+        for (const auto& [tree, objective] : enumerate(model.result.get(), {}, json::object(), -1))
+            expected = std::min(expected, std::pair{abstained(model, tree, model.live_root_mask()), objective});
+        const auto result = complete(root(), 0, constraint);
+        const auto& tree = result.at("tree");
+        require(std::pair{abstained(model, tree, model.live_root_mask()), cost(model.result.get(), tree)} == expected,
+            "Minimum abstention disagreed with exhaustive trees or objective tie-break");
+        require(result["abstained_samples"] == expected.first && result["objective"] == expected.second, "Minimum-abstention result metrics were wrong");
+    }
+    model.result->budget = 12;
+    auto result = complete(root(), 0, constraint);
+    require(result["abstained_samples"] == 2 && result["objective"] == 7, "Planner minimized leaves instead of samples or lost sibling budget tradeoffs");
+    const json partial = {{"uid", 0}, {"kind", "split"}, {"feature", 0},
+        {"left", {{"uid", 1}, {"kind", "leaf"}, {"prediction", -1}}}, {"right", {{"uid", 2}, {"kind", "choice"}}}};
+    result = complete(partial, 0, constraint);
+    require(result["tree"]["left"] == partial["left"] && result["tree"]["right"]["prediction"] == 0 && result["abstained_samples"] == 6,
+        "Minimum abstention changed an existing leaf or missed the best remaining completion");
+    auto scoped = partial; scoped["left"] = {{"uid", 1}, {"kind", "choice"}};
+    result = complete(scoped, 1, constraint);
+    require(result["tree"]["left"]["prediction"] == 0 && result["tree"]["right"] == scoped["right"], "Minimum abstention changed choices outside the selected subtree");
+    auto sample = constraint; sample["mode"] = "sample"; sample["targetPrediction"] = -1; sample["featureTruth"] = {{"0", true}};
+    result = complete(root(), 0, sample);
+    require(result["tree"]["left"]["prediction"] == -1 && result["tree"]["right"]["prediction"] == 0, "Minimum abstention violated a required prediction");
+    bool rejected = false;
+    auto forbidden = constraint; forbidden["forbiddenInternalFeatures"] = {0};
+    try { complete(root(), 0, forbidden); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "Minimum abstention ignored a forbidden feature");
+    left->budget = 5;
+    result = complete(scoped, 0, constraint);
+    require(result["abstained_samples"] == 6, "Minimum abstention exceeded an internal node budget");
+    bool cancelled = false;
+    try { GraphQueries q(model, meta, [] { return true; }); q.complete(root(), 0, 3, "constrained", constraint, 0); }
+    catch (const std::runtime_error&) { cancelled = true; }
+    require(cancelled, "Minimum abstention ignored query cancellation");
+}
+
 static void training_options() {
     for (const auto& bad : std::vector<json>{
         {{"allow_abstain", 1}}, {{"abstain_cost", -1}}, {{"proxy_style", 2}}, {{"max_number_thresholds_per_feature", 0}},
@@ -392,7 +457,7 @@ int main() {
         initial_actor_queries();
         incremental_attachment(false); incremental_attachment(true);
         incremental_attachment(true, 1); incremental_attachment(true, 2);
-        native_queries(); actor_queries(); training_options();
+        native_queries(); actor_queries(); training_options(); minimum_abstention();
         std::cout << "Incremental attachment, mid-solve queries/completions, cancellation, offline graph equivalence, native paths, exhaustive optima, concurrent actor requests, stop retention and zero exports passed\n";
         return 0;
     }

@@ -8,7 +8,7 @@ export type NativeNodeView = {
   options: { uid: number; leaves: Array<{ prediction: number; loss: number }>; splits: Array<{ feature: number; minimum: number; left_minimum: number; right_minimum: number; left_size: number; right_size: number }> };
   visited_nodes: number;
 };
-export type NativeConstraint = { mode: 'avoid' | 'sample'; forbiddenInternalFeatures?: number[]; featureTruth?: Record<string, boolean>; targetPrediction?: number };
+export type NativeConstraint = { mode: 'avoid' | 'sample'; forbiddenInternalFeatures?: number[]; featureTruth?: Record<string, boolean>; targetPrediction?: number; minimizeAbstention?: boolean };
 export type NativeCompletion = { session_id: string; tree: BuildNode; active_uid: number; next_uid: number; visited_nodes: number; view: NativeNodeView };
 
 /** An adapter for existing rendering functions, containing only the user's

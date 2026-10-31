@@ -29,6 +29,8 @@ type ConstraintResult = { ok: boolean; message?: string };
 const STYLE_ID = 'arborenum-constrained-completion-style';
 const BUTTON_ID = 'arborenum-constrained-completion-button';
 const MODAL_ID = 'arborenum-constrained-completion-modal';
+const ABSTENTION_ID = 'arborenum-minimize-abstention';
+const minimizeAbstention = () => (document.getElementById(ABSTENTION_ID) as HTMLInputElement | null)?.checked ?? false;
 
 function internalWindow() {
   return window as unknown as Window & Record<string, unknown>;
@@ -113,7 +115,7 @@ function showMessage(message: HTMLElement, text: string) {
 }
 
 async function invokeConstraint(spec: ConstraintSpec): Promise<ConstraintResult> {
-  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) return window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION(spec);
+  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) return window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION({ ...spec, minimizeAbstention: minimizeAbstention() });
   const optimal = findOptimalButton();
   if (!optimal || optimal.disabled) return { ok: false, message: 'The tree has no unfinished choices to complete.' };
 
@@ -266,7 +268,7 @@ function avoidPanel(message: HTMLElement) {
   run.textContent = 'Build optimal constrained completion';
   run.onclick = () => {
     const selected = selectedOriginalFeatures(grid);
-    if (!selected.length) return showMessage(message, 'Select at least one feature to avoid.');
+    if (!selected.length && !minimizeAbstention()) return showMessage(message, 'Select a feature to avoid, or enable minimum abstention.');
     finish(invokeConstraint({ mode: 'avoid', forbiddenInternalFeatures: forbiddenInternalFeatures(selected) }), message);
   };
   body.append(grid, run);
@@ -315,7 +317,7 @@ function partialTreeUsesSelectedFeature(selected: number[]) {
 }
 
 async function invokeSampleWhileAvoiding(spec: SampleSpec, forbiddenFeatures: number[]): Promise<ConstraintResult> {
-  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) return window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION({ ...spec, forbiddenInternalFeatures: forbiddenFeatures });
+  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) return window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION({ ...spec, forbiddenInternalFeatures: forbiddenFeatures, minimizeAbstention: minimizeAbstention() });
   const graph = currentPayload()?.graph;
   const tries = graph?.trie_nodes;
   const splits = graph?.split_nodes;
@@ -438,7 +440,23 @@ function openModal() {
   sampleTab.onclick = () => show('sample');
   bothTab.onclick = () => show('both');
 
-  modal.append(header, tabs, content, message);
+  modal.append(header);
+  if (currentPayload()?.meta?.use_deferral && window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) {
+    const preference = document.createElement('div');
+    preference.className = 'constraint-body';
+    preference.style.paddingBottom = '0';
+    const label = document.createElement('label');
+    label.className = 'constraint-check-row';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox'; checkbox.id = ABSTENTION_ID;
+    label.append(checkbox, document.createTextNode('Minimize abstention'));
+    const help = document.createElement('div');
+    help.className = 'constraint-help';
+    help.textContent = 'Prefer zero abstention. If that is impossible, minimize the number of abstained training samples, then the objective. Keep the current Rashomon bound and existing decisions. You can use this alone without selecting features to avoid, or combine it with the constraints below.';
+    preference.append(label, help);
+    modal.append(preference);
+  }
+  modal.append(tabs, content, message);
   backdrop.appendChild(modal);
   backdrop.onmousedown = closeModal;
   document.body.appendChild(backdrop);

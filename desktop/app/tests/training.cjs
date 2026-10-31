@@ -46,6 +46,39 @@ async function exerciseTraining(page) {
   assert.equal(meta.training_settings.trie_cache, false);
   assert.deepEqual(meta.training_settings.proxy_threshold_features, [0]);
   assert.equal(await page.evaluate(async () => (await (await fetch('/api/session')).json()).full_graph_exports), 0);
+  // The tight original budget forces all samples to abstain. The wider
+  // second run admits an ordinary class leaf, despite its higher objective.
+  async function minimumCompletion(expectedAbstained) {
+    await page.getByRole('button', { name: 'Constrained', exact: true }).click();
+    await page.getByLabel('Minimize abstention', { exact: true }).check();
+    const pending = page.waitForResponse(r => r.url().includes('/api/complete?'));
+    await page.getByRole('button', { name: 'Build optimal constrained completion', exact: true }).click();
+    const response = await pending;
+    assert.equal(response.status(), 200, await response.text());
+    assert.equal(response.request().postDataJSON().constraint.minimizeAbstention, true);
+    const result = await response.json();
+    assert.equal(result.abstained_samples, expectedAbstained);
+    await page.locator('.constraint-modal').waitFor({ state: 'detached' });
+    await page.waitForFunction(() => !document.querySelector('.native-query-status'));
+    return result;
+  }
+  await page.locator('.arborenum-node-leaf').click();
+  await minimumCompletion(20);
+  await page.locator('.arborenum-node-leaf .node-title').filter({ hasText: /^Abstain$/ }).waitFor();
+  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Upload dataset' }).click();
+  await page.locator('.live-file input').setInputFiles({ name: 'abstain-wide.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await page.getByLabel('Rashomon multiplier', { exact: true }).fill('2');
+  const next = page.waitForResponse(r => r.url().endsWith('/api/session') && r.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Start ArborEnum', exact: true }).click();
+  const secondId = (await (await next).json()).session_id;
+  await page.waitForFunction(sid => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.graph?.metadata?.session_id === sid, secondId);
+  await page.waitForFunction(() => !document.querySelector('.native-query-status'));
+  const zero = await minimumCompletion(0);
+  assert.notEqual(zero.tree.prediction, -1);
+  assert.equal(zero.objective, 11);
+  assert.equal(await page.evaluate(async () => (await (await fetch('/api/session')).json()).full_graph_exports), 0);
+  console.log('Minimum-abstention UI finds zero when feasible and preserves the lowest possible rate under a tight budget');
   console.log('Abstain labels, exact-label objective, oracle-aware summary, depth zero, advanced controls and native settings round-trip passed');
 }
 async function exerciseStop(page) {

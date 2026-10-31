@@ -131,6 +131,112 @@ class GraphQueries {
             return {json{{"uid", current}, {"kind", "split"}, {"feature", chosen.split->feature}, {"left", std::move(left.first)}, {"right", std::move(right.first)}}, left.second + right.second};
         }
     };
+    // Pareto states retain only nondominated (objective, abstained samples)
+    // pairs. A single lexicographic best per node is insufficient: siblings
+    // must share a finite objective budget.
+    struct AbstentionPlanner : Planner {
+        struct Plan {
+            int objective, abstained;
+            const LeafNode* leaf = nullptr;
+            const SplitNode* split = nullptr;
+            std::shared_ptr<const Plan> left, right;
+        };
+        using Ptr = std::shared_ptr<const Plan>;
+        using Frontier = std::vector<Ptr>;
+        std::array<std::unordered_map<TreeTrieNode*, Frontier>, 2> pareto;
+        using Planner::Planner;
+        Frontier prune(Frontier points) {
+            std::sort(points.begin(), points.end(), [](const Ptr& a, const Ptr& b) {
+                return a->objective != b->objective ? a->objective < b->objective : a->abstained < b->abstained;
+            });
+            Frontier out;
+            int least = INF;
+            for (const auto& p : points) {
+                owner.check();
+                if (p->abstained < least) { out.push_back(p); least = p->abstained; }
+            }
+            return out;
+        }
+        Frontier combine(const Frontier& left, const Frontier& right, const SplitNode* split, int budget) {
+            std::map<int, Ptr> points;
+            for (const auto& l : left) for (const auto& r : right) {
+                owner.check();
+                const int64_t objective = int64_t(l->objective) + r->objective;
+                if (objective > budget) break; // Frontiers are sorted by objective.
+                const int abstained = l->abstained + r->abstained;
+                auto next = points.lower_bound(int(objective));
+                if (next != points.end() && next->first == objective && next->second->abstained <= abstained) continue;
+                if (next != points.begin() && std::prev(next)->second->abstained <= abstained) continue;
+                while (next != points.end() && next->second->abstained >= abstained) next = points.erase(next);
+                points.emplace_hint(next, int(objective), std::make_shared<Plan>(Plan{int(objective), abstained, nullptr, split, l, r}));
+            }
+            Frontier out;
+            for (auto& [objective, plan] : points) out.push_back(std::move(plan));
+            return out;
+        }
+        const Frontier& alternatives(TreeTrieNode* node, const Packed& mask, bool sample) {
+            auto& cache = pareto[sample ? 1 : 0];
+            if (auto found = cache.find(node); found != cache.end()) return found->second;
+            owner.check(); ++owner.visited_;
+            Frontier out;
+            for (const auto& l : node->leaves)
+                if ((!sample || l.prediction == target) && l.loss <= node->budget)
+                    out.push_back(std::make_shared<Plan>(Plan{l.loss, l.prediction == -1 ? int(mask.count()) : 0, &l, nullptr, {}, {}}));
+            out = prune(std::move(out));
+            for (const auto& s : node->splits) {
+                owner.check();
+                if (!s.left || !s.right || forbidden.count(s.feature)) continue;
+                bool left = sample, right = sample;
+                if (auto branch = truth.find(s.feature); sample && branch != truth.end()) {
+                    left = branch->second; right = !branch->second;
+                }
+                auto masks = owner.model_.live_child_masks(mask, s.feature);
+                const auto& ls = alternatives(s.left.get(), masks.first, left);
+                const auto& rs = alternatives(s.right.get(), masks.second, right);
+                auto joined = combine(ls, rs, &s, node->budget);
+                out.insert(out.end(), joined.begin(), joined.end());
+                out = prune(std::move(out));
+            }
+            return cache.emplace(node, std::move(out)).first->second;
+        }
+        Frontier partial(const Located& item, const std::unordered_map<int, const Located*>& by_uid, size_t& choices) {
+            owner.check();
+            const auto& build = *item.build;
+            const std::string kind = build.at("kind");
+            if (kind == "choice") {
+                if (item.scope) { ++choices; return alternatives(item.node, item.mask, item.sample); }
+                return {std::make_shared<Plan>(Plan{item.node->min_objective, 0, nullptr, nullptr, {}, {}})};
+            }
+            if (kind == "leaf") {
+                const auto& l = owner.leaf(item.node, build.at("prediction"));
+                if (item.scope && item.sample && l.prediction != target) throw std::invalid_argument("An existing leaf conflicts with the required prediction");
+                return {std::make_shared<Plan>(Plan{l.loss, l.prediction == -1 ? int(item.mask.count()) : 0, &l, nullptr, {}, {}})};
+            }
+            const int feature = build.at("feature");
+            if (item.scope && forbidden.count(feature)) throw std::invalid_argument("A forbidden feature is already selected in this subtree");
+            const auto left = partial(*by_uid.at(build.at("left").at("uid").get<int>()), by_uid, choices);
+            const auto right = partial(*by_uid.at(build.at("right").at("uid").get<int>()), by_uid, choices);
+            return combine(left, right, &owner.split(item.node, feature), item.node->budget);
+        }
+        json materialize(const Ptr& plan, int& uid) {
+            owner.check();
+            const int current = uid++;
+            if (plan->leaf) return {{"uid", current}, {"kind", "leaf"}, {"prediction", plan->leaf->prediction}};
+            auto left = materialize(plan->left, uid);
+            auto right = materialize(plan->right, uid);
+            return {{"uid", current}, {"kind", "split"}, {"feature", plan->split->feature}, {"left", std::move(left)}, {"right", std::move(right)}};
+        }
+        void fill(json& build, const Ptr& plan, const std::unordered_map<int, const Located*>& by_uid, int& uid) {
+            owner.check();
+            const int old_uid = build.at("uid");
+            if (build.at("kind") == "choice") {
+                if (by_uid.at(old_uid)->scope) { build = materialize(plan, uid); build["uid"] = old_uid; }
+            } else if (build.at("kind") == "split") {
+                fill(build.at("left"), plan->left, by_uid, uid);
+                fill(build.at("right"), plan->right, by_uid, uid);
+            }
+        }
+    };
 public:
     GraphQueries(ArborEnum& model, const json& meta, std::function<bool()> cancelled = {}) : model_(model), meta_(meta), cancelled_(std::move(cancelled)) {}
     size_t visited() const { return visited_; }
@@ -159,6 +265,21 @@ public:
         if (mode == "constrained" && constraint.value("mode", "") != "avoid" && constraint.value("mode", "") != "sample") throw std::invalid_argument("Invalid native completion constraint");
         prepare(tree, active, constraint);
         if (next_uid <= *uids_.rbegin()) throw std::invalid_argument("next_uid overlaps existing displayed UIDs");
+        if (constraint.value("minimizeAbstention", false)) {
+            AbstentionPlanner planner(*this, constraint);
+            std::unordered_map<int, const Located*> by_uid;
+            for (const auto& item : located_) by_uid.emplace(item.build->at("uid").get<int>(), &item);
+            size_t choices = 0;
+            const auto candidates = planner.partial(located_.front(), by_uid, choices);
+            if (!choices) throw std::invalid_argument("The selected subtree has no unfinished choices");
+            if (candidates.empty()) throw std::invalid_argument("No completion satisfies these constraints and the Rashomon budget");
+            // Pruned frontiers have ascending cost and strictly decreasing
+            // abstention, so the final point minimizes abstention, then cost.
+            const auto& best = candidates.back();
+            planner.fill(tree, best, by_uid, next_uid);
+            return {{"tree", std::move(tree)}, {"active_uid", active}, {"next_uid", next_uid}, {"visited_nodes", visited_},
+                {"abstained_samples", best->abstained}, {"objective", best->objective}};
+        }
         Planner planner(*this, constraint);
         int64_t total = 0;
         std::vector<Located*> frontier;
