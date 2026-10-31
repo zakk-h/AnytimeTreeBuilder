@@ -177,7 +177,7 @@ function makeDefaultUi(): BuilderUi {
 function predictionLabel(prediction: number | undefined, ui: BuilderUi): string {
   if (prediction === undefined || prediction === null) return 'predict —';
 
-  if (Number(prediction) === -1) return 'defer';
+  if (Number(prediction) === -1) return 'Abstain';
 
   const custom = ui.labelNames[String(prediction)]?.trim();
   return custom || `predict ${prediction}`;
@@ -678,7 +678,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
     b.kind === 'split'
       ? ''
       : b.kind === 'leaf'
-        ? `${leafSampleSizeLabel(graph, b.leafId)} · ${leafMisclassificationRate(
+        ? `${leafSampleSizeLabel(graph, b.leafId)} · ${Number(b.prediction) === -1 && meta.abstain_uses_labels ? 'exact training labels' : leafMisclassificationRate(
             graph,
             meta,
             b.leafId,
@@ -694,7 +694,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
   const nodeStyle = {
     width: label.width,
     ...(b.kind === 'leaf' ? {
-      '--leaf-node-bg': ui.colors.leafNodesByClass[String(b.prediction)] || ui.colors.leafNode,
+      '--leaf-node-bg': ui.colors.leafNodesByClass[String(b.prediction)] || (Number(b.prediction) === -1 ? '#fff8eb' : ui.colors.leafNode),
     } : {}),
   } as CSSProperties;
 
@@ -706,7 +706,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
       <Handle type="target" position={Position.Top} className="handle" />
 
       <div className="node-copy">
-        <div className="node-eyebrow">{b.kind === 'split' ? 'Split rule' : b.kind === 'leaf' ? 'Prediction' : 'Decision point'}<span>#{b.uid}</span></div>
+        <div className="node-eyebrow">{b.kind === 'split' ? 'Split rule' : b.kind === 'leaf' ? Number(b.prediction) === -1 ? 'Abstention' : 'Prediction' : 'Decision point'}<span>#{b.uid}</span></div>
         <div
           className="node-title"
           ref={label.ref}
@@ -818,7 +818,7 @@ function SplitButton({
 
         <div className="choice-card-sub">
           {leafSampleSizeLabel(graph, choice.leaf.id)} ·{' '}
-          {leafMisclassificationRate(graph, meta, choice.leaf.id)} · obj{' '}
+          {choice.leaf.prediction === -1 && meta.abstain_uses_labels ? 'exact training labels' : leafMisclassificationRate(graph, meta, choice.leaf.id)} · obj{' '}
           {formatObjective(graph, objective)}
           {!feasible ? ` · over by ${formatObjective(graph, excessValue)}` : ''}
         </div>
@@ -1154,7 +1154,7 @@ function SidePanel({
 
           <div className="budget-box">
             <div>
-              <span>accuracy</span>
+              <span>{completeStats.hasDeferral && meta.abstain_uses_labels ? 'training accuracy (with oracle)' : 'accuracy'}</span>
               <b>{stripZeros((100 * completeStats.accuracy).toFixed(2))}%</b>
             </div>
 
@@ -1167,14 +1167,14 @@ function SidePanel({
 
             {completeStats.hasDeferral && (
               <div>
-                <span>deferral rate</span>
+                <span>abstention rate</span>
                 <b>{stripZeros((100 * completeStats.deferralRate).toFixed(2))}%</b>
               </div>
             )}
 
             {completeStats.hasDeferral && (
               <div>
-                <span>deferred n</span>
+                <span>abstained samples</span>
                 <b>
                   {completeStats.deferredN}/{completeStats.totalN}
                 </b>

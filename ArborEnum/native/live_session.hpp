@@ -94,7 +94,7 @@ class Session {
                 double cut = col[(n - 1) / 2];
                 for (size_t i = 0; i < n; ++i) proxy[i].push_back(data.X[i][f] <= cut);
             }
-            model.prepare_continuous_data(numeric, bin, data.y, seed, proxy);
+            model.prepare_continuous_data(numeric, bin, data.y, seed, proxy, settings_.max_thresholds, settings_.abstain ? data.y : std::vector<int>{});
             json registry = json::array();
             for (size_t f = 0; f < binary.size(); ++f) registry.push_back({{"internalFeature", f}, {"originalFeature", binary[f]}, {"originalName", data.names[binary[f]]}, {"threshold", binary_cuts[f]}, {"kind", "binary_threshold"}, {"continuousGroup", nullptr}});
             auto starts = model.get_continuous_starts();
@@ -102,7 +102,9 @@ class Session {
                 auto cuts = model.get_continuous_cutpoints(group);
                 for (size_t k = 0; k < cuts.size(); ++k) registry.push_back({{"internalFeature", starts.at(group) + k}, {"originalFeature", continuous[group]}, {"originalName", data.names[continuous[group]]}, {"threshold", cuts[k]}, {"kind", "continuous_threshold"}, {"continuousGroup", group}});
             }
-            meta = {{"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", static_cast<int>(std::llround(settings_.lambda * n))}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}};
+            for (const auto* ids : {&settings_.proxy_features, &settings_.initial_features})
+                for (int id : *ids) if (static_cast<size_t>(id) >= registry.size()) throw std::invalid_argument("Threshold feature ID is outside the prepared feature registry");
+            meta = {{"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", static_cast<int>(std::llround(settings_.lambda * n))}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
             { std::lock_guard lock(mutex_); meta_ = meta; phase_ = "running"; }
             model.live_poll = [&] {
                 if (!root_announced) {
@@ -120,12 +122,22 @@ class Session {
                 model.live_poll();
             };
             model.live_stop_requested = [&] { return cancel_search_.load() || lifetime.stop_requested(); };
-            model.set_key_mode(settings_.key_mode == "exact" ? ArborEnum::KeyMode::EXACT : ArborEnum::KeyMode::HASH64);
-            model.set_trie_cache_enabled(true);
+            model.set_key_mode(settings_.key_mode == "exact" ? ArborEnum::KeyMode::EXACT : settings_.key_mode == "lits_exact" ? ArborEnum::KeyMode::LITS_EXACT : settings_.key_mode == "hash128" ? ArborEnum::KeyMode::HASH128 : ArborEnum::KeyMode::HASH64);
+            model.set_trie_cache_enabled(settings_.trie_cache);
+            model.set_greedy_split_mode(settings_.greedy_split);
+            model.set_greedy_continuous_mode(settings_.greedy_continuous == "numerical" ? 1 : 0);
+            model.set_stronger_rollout(settings_.stronger_rollout);
+            model.set_evaluated_use_min_objectives(settings_.evaluated_min);
+            model.set_additive(settings_.additive);
+            model.set_multiplicative_slack(settings_.slack);
             if (!model.live_stop_requested()) {
                 model.fit_prepared_anytime(settings_.lambda, settings_.depth, settings_.multiplier, settings_.second_multiplier, settings_.multiplier_step, settings_.lookahead,
-                    true, false, 0, false, false, true, {}, {}, settings_.width, -1, settings_.proxy_refinement,
-                    settings_.proxy_mode != "binarized", settings_.proxy_mode != "binarized", settings_.proxy_mode == "continuous", settings_.runtime, settings_.memory);
+                    settings_.multipass, settings_.rule_list, settings_.proxy_style, settings_.majority_only, settings_.cache_cheap, true,
+                    settings_.proxy_features, settings_.initial_features, settings_.width, settings_.max_rounds, settings_.proxy_refinement,
+                    settings_.continuous_lickety < 0 ? settings_.proxy_mode != "binarized" : bool(settings_.continuous_lickety),
+                    settings_.continuous_exact < 0 ? settings_.proxy_mode != "binarized" : bool(settings_.continuous_exact),
+                    settings_.continuous_greedy < 0 ? settings_.proxy_mode == "continuous" : bool(settings_.continuous_greedy),
+                    settings_.runtime, settings_.memory, settings_.abstain, settings_.abstain_cost);
             }
             { std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); phase_ = cancel_search_.load() ? "stopped" : "finished"; }
         } catch (const LiveEnumerationCancelled&) {

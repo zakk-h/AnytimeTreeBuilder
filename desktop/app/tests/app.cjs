@@ -3,6 +3,7 @@ const { mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const { _electron } = require('playwright-core');
+const { exerciseTraining } = require('./training.cjs');
 
 async function main() {
   const profile = mkdtempSync(join(tmpdir(), 'Anytime Tree Builder '));
@@ -51,6 +52,7 @@ async function main() {
     assert.equal(await page.evaluate(async () => { try { await fetch('https://example.com/'); return true; } catch { return false; } }), false);
     await page.evaluate(() => window.open('https://example.com/'));
     assert.equal((await desktop.windows()).length, 1);
+    await exerciseTraining(page);
     if (process.env.ATB_SCREENSHOT) await page.screenshot({ path: process.env.ATB_SCREENSHOT });
     assert.deepEqual(errors, []);
     const closed = desktop.waitForEvent('close', { timeout: 20_000 });

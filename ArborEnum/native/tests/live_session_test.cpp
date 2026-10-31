@@ -325,6 +325,59 @@ static void actor_queries() {
     catch (const QueryUnavailable&) { rejected = true; }
     require(rejected && std::chrono::steady_clock::now() - closed_at < std::chrono::seconds(1), "Closed session queued a query with no owner to answer it");
 }
+static void training_options() {
+    for (const auto& bad : std::vector<json>{
+        {{"allow_abstain", 1}}, {{"abstain_cost", -1}}, {{"proxy_style", 2}}, {{"max_number_thresholds_per_feature", 0}},
+        {{"lookahead_k", 2.5}}, {{"depth_budget", 128}}, {{"refinement_width", 4294967297LL}}, {{"trie_cache", "false"}},
+        {{"proxy_threshold_features", {0, 0}}}, {{"continuous_proxy_in_greedy", 1}}}) {
+        bool rejected = false;
+        try { Settings::parse(bad); } catch (const std::exception&) { rejected = true; }
+        require(rejected, "Invalid training settings were accepted: " + bad.dump());
+    }
+    require(Settings::parse({{"depth_budget", 0}}).lookahead == 0, "Depth-zero default lookahead was invalid");
+    bool overflow = false;
+    try { Settings::checked(Settings::parse({{"allow_abstain", true}, {"abstain_cost", 1e20}}), 20); }
+    catch (const std::exception&) { overflow = true; }
+    require(overflow, "Abstention loss overflow was accepted");
+    for (double eta : {0., .25, 1.}) {
+        Dataset data; data.names = {"constant"}; data.classes = {"no", "yes"};
+        for (int i = 0; i < 20; ++i) { data.X.push_back({0}); data.y.push_back(i % 2); }
+        auto settings = Settings::parse({{"allow_abstain", true}, {"abstain_cost", eta}, {"lambda_reg", .05},
+            {"depth_budget", 0}, {"key_mode", "hash128"}, {"trie_cache", false}, {"runtime_limit_seconds", -1}, {"memory_limit_mb", -1}});
+        require(Settings::parse(settings.as_json()).as_json() == settings.as_json(), "Training settings did not round-trip");
+        Session session("abstain", std::move(data), settings);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!session.done()) { require(std::chrono::steady_clock::now() < deadline, "Abstention fit timed out"); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+        require(session.status()["phase"] == "finished", session.status().dump());
+        require(session.metadata()["abstain_uses_labels"] == true && session.metadata()["eta_defer"] == eta, "Abstention metadata missing");
+        auto view = session.query("node", {{"tree", root()}, {"active_uid", 0}});
+        bool found = false;
+        for (const auto& leaf : view["options"]["leaves"]) if (leaf["prediction"] == -1) {
+            found = true; require(leaf["loss"] == 1 + int(std::llround(eta * 20)), "Abstention loss included classification mistakes or omitted its penalty");
+        }
+        require(found == (eta < .5), "Abstention feasibility ignored its cost");
+        auto best = session.query("complete", {{"tree", root()}, {"active_uid", 0}, {"next_uid", 1}, {"mode", "optimal"}});
+        require((best["tree"]["prediction"] == -1) == (eta < .5), "Optimal completion did not respect abstention cost");
+        if (found) {
+            auto constrained = session.query("complete", {{"tree", root()}, {"active_uid", 0}, {"next_uid", 1}, {"mode", "constrained"}, {"constraint", {{"mode", "sample"}, {"targetPrediction", -1}}}});
+            require(constrained["tree"]["prediction"] == -1, "Constrained completion could not select Abstain");
+        }
+        require(session.status()["full_graph_exports"] == 0, "Abstention exported the graph");
+    }
+    // Exercise alternative search/cache modes on a real nontrivial native fit.
+    auto advanced = Settings::parse({{"depth_budget", 3}, {"lookahead_k", 2}, {"proxy_mode", "continuous"},
+        {"proxy_refinement", "off"}, {"proxy_style", 3}, {"key_mode", "lits_exact"}, {"max_refinement_rounds", 0},
+        {"max_number_thresholds_per_feature", 2}, {"rule_list_mode", true}, {"use_multipass", false},
+        {"majority_leaf_only", true}, {"cache_cheap_subproblems", true}, {"stronger_rollout", true},
+        {"greedy_split_mode", 2}, {"greedy_continuous_mode", "numerical"}, {"evaluated_use_min_objectives", true},
+        {"additive", true}, {"multiplicative_slack", .1}, {"proxy_threshold_features", {0}}, {"initial_active_threshold_features", {0}},
+        {"continuous_proxy_in_greedy", false}, {"continuous_proxy_in_lickety", false}, {"continuous_proxy_in_depthd_exact", true}});
+    Session session("advanced", dataset(), advanced);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!session.done()) { require(std::chrono::steady_clock::now() < deadline, "Advanced fit timed out"); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    require(session.status()["phase"] == "finished" && session.status()["ready"] == true, session.status().dump());
+    require(session.metadata()["training_settings"] == advanced.as_json(), "Native training configuration was not retained");
+}
 int main() {
     try {
         initial_root(false); initial_root(true);
@@ -332,7 +385,7 @@ int main() {
         initial_actor_queries();
         incremental_attachment(false); incremental_attachment(true);
         incremental_attachment(true, 1); incremental_attachment(true, 2);
-        native_queries(); actor_queries();
+        native_queries(); actor_queries(); training_options();
         std::cout << "Incremental attachment, mid-solve queries/completions, cancellation, offline graph equivalence, native paths, exhaustive optima, concurrent actor requests, stop retention and zero exports passed\n";
         return 0;
     }

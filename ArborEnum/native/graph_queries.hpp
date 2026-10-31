@@ -36,7 +36,7 @@ class GraphQueries {
     void locate(TreeTrieNode* node, Packed mask, json& build, int depth, bool in_scope,
                 bool sample, const json& constraint) {
         check(); ++visited_;
-        if (!node || depth > 20 || located_.size() >= 100000) throw std::invalid_argument("Invalid displayed tree");
+        if (!node || depth > meta_.value("depth_budget", 127) || located_.size() >= 100000) throw std::invalid_argument("Invalid displayed tree");
         int uid = build.at("uid").get<int>();
         if (uid < 0 || !uids_.insert(uid).second) throw std::invalid_argument("Duplicate or invalid displayed node UID");
         if (uid == active_) { in_scope = true; sample = constraint.value("mode", "") == "sample"; }

@@ -84,7 +84,17 @@ All mutation bodies are JSON. `session_id` rejects stale session requests.
 - `POST /api/stop?session_id=ID`: `{}`; cancel enumeration while retaining native exploration.
 - `GET /api/snapshot`: 410; full-graph snapshots are removed.
 
-Settings: `lambda_reg`, `depth_budget`, `rashomon_mult`, `second_rashomon_mult`, `multiplier_step_size`, `lookahead_k`, `refinement_width`, `proxy_mode`, `proxy_refinement`, `key_mode`, `runtime_limit_seconds`, `memory_limit_mb`. Unknown settings are rejected. Depth is 0–20, lookahead is 0–depth, limits are positive and multiplier expansion cannot decrease the initial multiplier.
+Settings are validated in `live_types.hpp`; `Settings::as_json()` lists every supported field. Each session returns its effective configuration in `meta.training_settings`.
+
+- Objective: `lambda_reg`, `rashomon_mult`, `second_rashomon_mult`, `multiplier_step_size`, `additive`, `multiplicative_slack`. Additive tolerance adds the tolerance times the sample count to the reference objective; the default is relative tolerance.
+- Abstention: `allow_abstain` and `abstain_cost` (default 0.1). The native prepared black-box labels are the training labels themselves. Prediction `-1` means **Abstain**, with leaf loss `gamma + round(abstain_cost * sample_count)` and no classification mistakes. Zero cost permits a trivial all-abstain optimum. This is an oracle action on training data, not a learned prediction for unseen rows. Metadata retains `use_deferral`, `eta_defer` and `abstain_uses_labels` for rendering, export and summary calculations.
+- Search: `depth_budget` (0–127), `lookahead_k` (0–depth), `proxy_style` (0 recursive, 1 block, 3 without postprocessing), `greedy_split_mode` (0 entropy, 1 entropy with exact depth-one, 2 child-leaf objective), `greedy_continuous_mode` (`binary` / `numerical`), `rule_list_mode`, `majority_leaf_only`, `use_multipass`, `stronger_rollout`, `evaluated_use_min_objectives`.
+- Refinement: `refinement_width`, `max_refinement_rounds` (-1 unlimited, 0 skips threshold refinement), `max_number_thresholds_per_feature` (-1 exhaustive, otherwise a positive cap), `proxy_mode`, `proxy_refinement`.
+- Identity/caching: `key_mode` (`hash`, `hash128`, `exact`, `lits_exact`), `trie_cache`, `cache_cheap_subproblems`. Anytime enumeration always enables its required proxy objective cache.
+- Expert overrides: `proxy_threshold_features` and `initial_active_threshold_features` are distinct nonnegative internal threshold IDs after preprocessing; an empty list selects the native defaults. `continuous_proxy_in_lickety`, `continuous_proxy_in_depthd_exact`, and `continuous_proxy_in_greedy` accept true, false or null (follow `proxy_mode`). Invalid IDs fail the session with a reported error.
+- Resources: `runtime_limit_seconds` and `memory_limit_mb` accept positive values or -1 for unlimited. Their initial-solve semantics remain as described above.
+
+Unknown fields, invalid types, non-finite values and objective integer overflows are rejected. Expanding the Rashomon tolerance cannot decrease it. The UI groups these settings under the training dialog and its Advanced section.
 
 The service binds to IPv4 loopback. Explicit loopback Host/Origin names are accepted on forwarded preview ports; external hosts/origins are rejected. C++ HTTP/JSON dependencies are pinned vendored MIT headers: cpp-httplib 0.18.7 and nlohmann/json 3.11.3.
 

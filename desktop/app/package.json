@@ -1,6 +1,6 @@
 {
   "name": "anytime-tree-builder-desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Interactive decision trees with local, live C++ enumeration",
   "author": "Zakk Heile <zakk-h@users.noreply.github.com>",
@@ -12,7 +12,7 @@
     "test:app": "node tests/app.cjs"
   },
   "devDependencies": {
-    "electron": "45.0.0",
+    "electron": "45.2.1",
     "electron-builder": "26.18.0",
     "playwright-core": "1.64.1"
   },

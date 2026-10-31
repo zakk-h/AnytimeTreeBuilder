@@ -20,6 +20,8 @@ Choose **Upload → Upload dataset**, select a CSV and its target column, then s
 
 Select nodes to explore splits, use **Update options** to see new alternatives, or choose **Optimal**, **Random** or **Constrained** to complete a subtree. **Stop** ends enumeration and keeps the graph available. Closing the app shuts down the engine.
 
+**Allow Abstain leaves** lets a leaf use the exact training labels, with an adjustable cost per abstained sample. **Advanced training settings** exposes search, refinement, threshold and cache controls.
+
 **Upload → Upload graph** opens an existing JSON graph.
 
 ## Build

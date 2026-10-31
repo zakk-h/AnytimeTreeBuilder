@@ -3,6 +3,8 @@ import { Play, RefreshCw, Square, X, Table2 } from 'lucide-react';
 import type { ArborEnumBuilderMeta } from './arborenumPayload';
 import './liveEnumeration.css';
 import { parseCsv, toDataset } from './liveDataset';
+import { DEFAULT_TRAINING_SETTINGS, nativeTrainingSettings, trainingSettingsError } from './trainingSettings';
+import { TrainingFields } from './TrainingFields';
 
 type Status = {
   session_id: string; phase: string; error: string; stop_requested: boolean;
@@ -36,10 +38,8 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   const [target, setTarget] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [lambda, setLambda] = useState(0.005), [depth, setDepth] = useState(5);
-  const [multiplier, setMultiplier] = useState(0.01), [second, setSecond] = useState(0.01);
-  const [runtime, setRuntime] = useState(600), [memory, setMemory] = useState(10000);
-  const [proxy, setProxy] = useState('binarized');
+  const [settings, setSettings] = useState({ ...DEFAULT_TRAINING_SETTINGS });
+  const settingsError = trainingSettingsError(settings);
   const sessionRef = useRef(''), readyRef = useRef(false);
   const draftRef = useRef(false), fileRead = useRef(0);
   const dialog = useRef<HTMLElement>(null);
@@ -99,7 +99,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
       const dataset = toDataset(rows, target);
       draftRef.current = true;
       onPrepare();
-      const current = await api<Status>('/api/session', { ...dataset, settings: { lambda_reg: lambda, depth_budget: depth, rashomon_mult: multiplier, second_rashomon_mult: second, runtime_limit_seconds: runtime, memory_limit_mb: memory, proxy_mode: proxy } });
+      const current = await api<Status>('/api/session', { ...dataset, settings: nativeTrainingSettings(settings) });
       if (current) {
         sessionRef.current = current.session_id; readyRef.current = false;
         draftRef.current = false;
@@ -123,7 +123,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
       <section ref={dialog} className="live-dialog" role="dialog" aria-modal="true" aria-labelledby="live-title" onClick={e => e.stopPropagation()} onKeyDown={event => {
         if (event.key === 'Escape' && !busy) { event.stopPropagation(); onClose(); }
         if (event.key !== 'Tab') return;
-        const items = [...dialog.current!.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled)')];
+        const items = [...dialog.current!.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), summary')].filter(item => item.getClientRects().length > 0);
         const first = items[0], last = items[items.length - 1];
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -144,18 +144,11 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
           } catch (e) { if (sequence === fileRead.current) setError(String(e)); }
         }}/></label>
         {rows && <><p>{filename} · {(rows.length - 1).toLocaleString()} rows · {rows[0].length - 1} features</p><label>Target column<select aria-label="Target column" value={target} onChange={e => setTarget(e.target.value)}>{rows[0].map(name => <option key={name}>{name}</option>)}</select></label></>}
-        <div className="live-fields">
-          <label>Leaf penalty λ<input aria-label="Leaf penalty" type="number" min="0" step="0.001" value={lambda} onChange={e => setLambda(e.target.valueAsNumber)}/></label>
-          <label>Maximum depth<input type="number" min="0" max="20" value={depth} onChange={e => setDepth(e.target.valueAsNumber)}/></label>
-          <label>Rashomon multiplier<input type="number" min="0" step="0.005" value={multiplier} onChange={e => { setMultiplier(e.target.valueAsNumber); setSecond(Math.max(second, e.target.valueAsNumber)); }}/></label>
-          <label>Expand multiplier to<input type="number" min={multiplier} step="0.005" value={second} onChange={e => setSecond(e.target.valueAsNumber)}/></label>
-          <label>Runtime limit (seconds)<input type="number" min="1" value={runtime} onChange={e => setRuntime(e.target.valueAsNumber)}/></label>
-          <label>Memory limit (MB)<input type="number" min="1" value={memory} onChange={e => setMemory(e.target.valueAsNumber)}/></label>
-          <label>Proxy mode<select aria-label="Proxy mode" value={proxy} onChange={e => setProxy(e.target.value)}><option value="hybrid">Hybrid</option><option value="continuous">Continuous</option><option value="binarized">Binarized</option></select></label>
-        </div>
+        <TrainingFields value={settings} onChange={setSettings}/>
+        {settingsError && <p role="alert" className="upload-error">{settingsError}</p>}
         {running && <p>Stop the current enumeration before starting another dataset.</p>}
         {error && <p role="alert" className="upload-error">{error}</p>}
-        <button className="primary-button" disabled={!rows || busy || !!running || ![lambda, depth, multiplier, second, runtime, memory].every(Number.isFinite) || lambda < 0 || multiplier < 0 || second < multiplier || depth < 0 || depth > 20 || !Number.isInteger(depth) || runtime <= 0 || memory <= 0} onClick={() => void launch()}><Play size={16}/> {busy ? 'Starting…' : 'Start ArborEnum'}</button>
+        <button className="primary-button" disabled={!rows || busy || !!running || !!settingsError} onClick={() => void launch()}><Play size={16}/> {busy ? 'Starting…' : 'Start ArborEnum'}</button>
       </section>
     </div>}
   </div>;

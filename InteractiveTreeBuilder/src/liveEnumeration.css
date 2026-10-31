@@ -27,3 +27,16 @@
 .dataset-waiting p { max-width:400px; font-size:14px; line-height:1.8; margin:0; color:#66758a; }
 @keyframes live-spin { to { transform:rotate(360deg); } }
 @media(max-width:600px) { .live-fields { gap:12px; } .live-dialog { padding:24px; } .live-overlay { padding:12px; } .live-dialog h2 { font-size:24px; } .live-enumeration { margin-left:0; } }
+
+.training-abstain { padding:16px; border:1px solid var(--accent-border); border-radius:8px; background:var(--accent-soft); margin-bottom:20px; }
+.training-abstain > label + label { margin-top:16px; }
+.live-dialog .training-toggle { display:flex; flex-direction:row; align-items:flex-start; gap:10px; cursor:pointer; }
+.live-dialog .training-toggle input { width:17px; height:17px; margin:2px 0 0; flex-shrink:0; }
+.live-dialog small { display:block; font-size:12px; line-height:1.5; font-weight:400; color:var(--muted); }
+.training-toggle small { margin-top:4px; }
+.training-advanced { margin:16px 0 24px; border-top:1px solid var(--line); padding-top:16px; }
+.training-advanced summary { cursor:pointer; font-size:14px; font-weight:600; color:var(--ink); }
+.training-advanced h3 { font-size:14px; margin:22px 0 12px; }
+.training-advanced .live-fields { margin:12px 0 20px; padding:0; border:0; }
+.training-toggles { display:grid; gap:14px; }
+.training-advanced > button { margin-top:20px; }

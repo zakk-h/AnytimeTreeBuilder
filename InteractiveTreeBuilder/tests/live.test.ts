@@ -100,3 +100,21 @@ test('label fitting uses measured glyph widths and preserves a readable minimum'
   assert.equal(fitLabelFont('W'.repeat(300), 240, measure, 28, 64), 28);
   assert.equal(fitLabelFont('a very long label with several words that cannot fit two lines', 100, measure, 28, 64), 28);
 });
+
+
+test('training settings preserve advanced controls and reject invalid objectives and IDs', async () => {
+  const { DEFAULT_TRAINING_SETTINGS: defaults, nativeTrainingSettings: native, trainingSettingsError: error } = await import('../src/trainingSettings');
+  const settings = { ...defaults, allow_abstain: true, abstain_cost: .25, runtime_limit_seconds: -1, memory_limit_mb: -1, key_mode: 'hash128', proxy_style: 3, proxy_threshold_features: '0, 2', initial_active_threshold_features: '1', continuous_proxy_in_greedy: true, trie_cache: false };
+  assert.equal(error(settings), undefined);
+  const encoded = native(settings);
+  assert.deepEqual(encoded.proxy_threshold_features, [0, 2]);
+  assert.deepEqual(encoded.initial_active_threshold_features, [1]);
+  assert.equal(encoded.allow_abstain, true);
+  assert.equal(encoded.abstain_cost, .25);
+  assert.equal(encoded.trie_cache, false);
+  for (const patch of [{ abstain_cost: -1 }, { abstain_cost: NaN }, { depth_budget: 128 }, { lookahead_k: 6 }, { proxy_style: 2 }, { max_number_thresholds_per_feature: 0 }, { proxy_threshold_features: '1,1' }, { proxy_threshold_features: '1,' }, { initial_active_threshold_features: '1.5' }]) {
+    assert.ok(error({ ...defaults, ...patch }), JSON.stringify(patch));
+    assert.throws(() => native({ ...defaults, ...patch }));
+  }
+  assert.equal(error({ ...defaults, depth_budget: 0, lookahead_k: 0, abstain_cost: 0 }), undefined);
+});

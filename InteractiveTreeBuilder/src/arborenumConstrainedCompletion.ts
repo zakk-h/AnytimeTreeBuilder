@@ -68,12 +68,12 @@ function originalFeatures() {
 
 function predictions() {
   const names = currentPayload()?.meta?.classNames;
-  if (Array.isArray(names)) return names.map((_, index) => index);
+  if (Array.isArray(names)) return [...names.map((_, index) => index), ...(currentPayload()?.meta?.use_deferral ? [-1] : [])];
   return Array.from(
     new Set(
       (currentPayload()?.graph?.leaf_nodes ?? [])
         .map((leaf) => Number(leaf.prediction))
-        .filter((x) => Number.isFinite(x) && x >= 0),
+        .filter((x) => Number.isFinite(x) && x >= -1),
     ),
   ).sort((a, b) => a - b);
 }
@@ -206,7 +206,8 @@ function makeSampleControls() {
   for (const prediction of predictions()) {
     const option = document.createElement('option');
     option.value = String(prediction);
-    option.textContent = `class ${prediction}`;
+    const names = currentPayload()?.meta?.classNames;
+    option.textContent = prediction === -1 ? 'Abstain' : Array.isArray(names) ? String(names[prediction]) : `class ${prediction}`;
     select.appendChild(option);
   }
   predictionLabel.append(predictionName, select);
