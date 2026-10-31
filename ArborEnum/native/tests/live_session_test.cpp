@@ -295,6 +295,10 @@ static void initial_actor_queries() {
     require(status["checkpoint"] == 0 && status["ready"] == true && status["phase"] == "stopped", "Stopping the initial solve lost its usable root");
     auto result = session.query("complete", {{"tree", root()}, {"active_uid", 0}, {"next_uid", 1}, {"mode", "optimal"}});
     require(result.contains("tree") && status["full_graph_exports"] == 0, "Initial cancellation lost native completion");
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const auto retained = session.status();
+    require(retained["elapsed_seconds"] == status["elapsed_seconds"], "Stopped enumeration timer continued advancing");
+    require(retained["checkpoint"] == status["checkpoint"] && retained["phase"] == "stopped", "Stopped enumeration continued building");
 }
 static void actor_queries() {
     Settings settings; settings.depth = 4; settings.lambda = .01; settings.multiplier = .2; settings.runtime = 5;
@@ -318,6 +322,9 @@ static void actor_queries() {
     auto result = session.query("complete", {{"tree", root()}, {"active_uid", 0}, {"next_uid", 1}, {"mode", "optimal"}});
     require(result.contains("tree") && !result.contains("graph"), "Stopped session lost its native model");
     require(session.status()["full_graph_exports"] == 0 && session.status()["node_queries"] == 48, "Unexpected graph export or lost requests");
+    const auto terminal = session.status();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    require(session.status()["elapsed_seconds"] == terminal["elapsed_seconds"], "Completed enumeration timer continued advancing");
     session.shutdown();
     const auto closed_at = std::chrono::steady_clock::now();
     bool rejected = false;

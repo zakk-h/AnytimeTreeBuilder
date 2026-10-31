@@ -23,12 +23,12 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
       {number('memory_limit_mb', 'Memory limit (MB)', '-1 for unlimited.', -1)}
       {select('proxy_mode', 'Proxy mode', [['binarized', 'Binarized'], ['hybrid', 'Hybrid'], ['continuous', 'Continuous']])}
     </div>
-    <div className="training-abstain">
-      {toggle('allow_abstain', 'Allow Abstain leaves', 'Abstain uses the exact target label for each training sample instead of a single class prediction. It does not learn labels for unseen data.')}
-      {s.allow_abstain && number('abstain_cost', 'Abstention cost', 'Cost per abstained sample, in addition to the leaf penalty. Zero makes full abstention optimal when feasible.')}
-    </div>
     <details className="training-advanced">
       <summary>Advanced training settings</summary>
+      <div className="training-abstain">
+        {toggle('allow_abstain', 'Allow Abstain leaves', 'Abstain uses the exact target label for each training sample instead of a single class prediction. It does not learn labels for unseen data.')}
+        {s.allow_abstain && number('abstain_cost', 'Abstention cost', 'Cost per abstained sample, in addition to the leaf penalty. Zero makes full abstention optimal when feasible.')}
+      </div>
       <h3>Objective and search</h3>
       <div className="live-fields">
         {number('lookahead_k', 'Lookahead depth', 'Higher values improve the initial proxy at greater search cost.', 0, s.depth_budget, 1)}
@@ -40,7 +40,7 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
       </div>
       <div className="training-toggles">
         {toggle('additive', 'Additive Rashomon tolerance', 'Interpret each multiplier as extra objective per sample instead of a relative increase.')}
-        {toggle('rule_list_mode', 'Rule lists only', 'Restrict enumeration to rule-list structures.')}
+        {toggle('rule_list_mode', 'Guarantee rule-list recovery', 'Ensure rule lists are recovered within the objective bound, alongside other tree structures.')}
         {toggle('majority_leaf_only', 'Majority class leaves only', 'Exclude ordinary non-majority class leaves; Abstain remains a separate action.')}
         {toggle('use_multipass', 'Multipass search', 'Use repeated passes during the native search.')}
         {toggle('stronger_rollout', 'Stronger rollout', 'Spend additional work improving rollout bounds.')}

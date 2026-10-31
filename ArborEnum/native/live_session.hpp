@@ -17,6 +17,7 @@ class Session {
     const std::string id_;
     const Settings settings_;
     const std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point ended_{};
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::string phase_ = "preparing", error_;
@@ -139,13 +140,13 @@ class Session {
                     settings_.continuous_greedy < 0 ? settings_.proxy_mode == "continuous" : bool(settings_.continuous_greedy),
                     settings_.runtime, settings_.memory, settings_.abstain, settings_.abstain_cost);
             }
-            { std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); phase_ = cancel_search_.load() ? "stopped" : "finished"; }
+            { std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); phase_ = cancel_search_.load() ? "stopped" : "finished"; ended_ = std::chrono::steady_clock::now(); }
         } catch (const LiveEnumerationCancelled&) {
-            std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); phase_ = "stopped";
+            std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); phase_ = "stopped"; ended_ = std::chrono::steady_clock::now();
         } catch (const std::exception& e) {
-            std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); error_ = e.what(); phase_ = "failed";
+            std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); error_ = e.what(); phase_ = "failed"; ended_ = std::chrono::steady_clock::now();
         } catch (...) {
-            std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); error_ = "Unknown native enumeration error"; phase_ = "failed";
+            std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); error_ = "Unknown native enumeration error"; phase_ = "failed"; ended_ = std::chrono::steady_clock::now();
         }
         // No model access occurs on HTTP threads, including after fit completes.
         while (!lifetime.stop_requested()) {
@@ -191,7 +192,7 @@ public:
     }
     json status() const {
         std::lock_guard lock(mutex_);
-        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count()}};
+        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
     }
 };
 }

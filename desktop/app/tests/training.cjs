@@ -7,9 +7,10 @@ async function exerciseTraining(page) {
   await page.locator('.live-file input').setInputFiles({ name: 'abstain.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
   await page.getByLabel('Maximum depth', { exact: true }).fill('0');
   await page.getByLabel('Leaf penalty', { exact: true }).fill('.05');
+  assert.equal(await page.getByLabel('Allow Abstain leaves', { exact: true }).isVisible(), false);
+  await page.locator('summary').filter({ hasText: 'Advanced training settings' }).click();
   await page.getByLabel('Allow Abstain leaves', { exact: true }).check();
   await page.getByLabel('Abstention cost', { exact: true }).fill('.25');
-  await page.locator('summary').filter({ hasText: 'Advanced training settings' }).click();
   await page.getByLabel('Subproblem identity', { exact: true }).selectOption('hash128');
   await page.getByLabel('Proxy search style', { exact: true }).selectOption('3');
   await page.getByLabel('Maximum refinement rounds', { exact: true }).fill('0');
@@ -47,4 +48,33 @@ async function exerciseTraining(page) {
   assert.equal(await page.evaluate(async () => (await (await fetch('/api/session')).json()).full_graph_exports), 0);
   console.log('Abstain labels, exact-label objective, oracle-aware summary, depth zero, advanced controls and native settings round-trip passed');
 }
-module.exports = { exerciseTraining };
+async function exerciseStop(page) {
+  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Upload dataset' }).click();
+  await page.locator('summary').filter({ hasText: 'Advanced training settings' }).click();
+  await page.getByRole('button', { name: 'Reset training settings', exact: true }).click();
+  let word = 812;
+  const rows = Array.from({ length: 1024 }, () => {
+    word ^= word << 13; word ^= word >>> 17; word ^= word << 5;
+    const bits = Array.from({ length: 20 }, (_, f) => (word >>> f) & 1);
+    return [...bits, bits.reduce((a, b) => a ^ b, 0)].join(',');
+  });
+  const csv = [...Array.from({ length: 20 }, (_, f) => 'bit' + f), 'label'].join(',') + '\n' + rows.join('\n');
+  await page.locator('.live-file input').setInputFiles({ name: 'stop.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
+  await page.getByLabel('Maximum depth', { exact: true }).fill('8');
+  await page.getByLabel('Leaf penalty', { exact: true }).fill('.002');
+  await page.getByLabel('Rashomon multiplier', { exact: true }).fill('2');
+  await page.getByRole('button', { name: 'Start ArborEnum', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.live-progress')?.textContent.startsWith('stopped ·'));
+  const before = await page.evaluate(async () => (await fetch('/api/session')).json());
+  await page.waitForTimeout(1200); // Observe multiple UI polling intervals after cancellation.
+  const after = await page.evaluate(async () => (await fetch('/api/session')).json());
+  assert.equal(after.phase, 'stopped');
+  assert.equal(after.elapsed_seconds, before.elapsed_seconds);
+  assert.equal(after.checkpoint, before.checkpoint);
+  assert.equal(await page.getByRole('button', { name: 'Stop', exact: true }).count(), 0);
+  assert.ok((await page.locator('.live-progress').textContent()).includes(Math.floor(before.elapsed_seconds) + 's'));
+  console.log('Stop button cancels native enumeration and freezes the elapsed timer across UI polls');
+}
+module.exports = { exerciseTraining, exerciseStop };
