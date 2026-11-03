@@ -24,6 +24,7 @@ class Session {
     bool ready_ = false;
     uint64_t checkpoint_ = 0, query_count_ = 0, node_queries_ = 0, completion_queries_ = 0;
     size_t last_visited_ = 0;
+    double node_query_handler_seconds_ = 0.0;
     json meta_;
     std::queue<std::shared_ptr<Request>> requests_;
     std::atomic<bool> pending_{false}, cancel_search_{false};
@@ -41,6 +42,7 @@ class Session {
                 pending_.store(!requests_.empty(), std::memory_order_relaxed);
             }
             try {
+                const auto query_started = std::chrono::steady_clock::now();
                 GraphQueries graph(model, meta, [&] { return lifetime.stop_requested() || request->cancelled.load() || std::chrono::steady_clock::now() >= request->deadline; });
                 json reply;
                 const auto& body = request->body;
@@ -51,7 +53,10 @@ class Session {
                 {
                     std::lock_guard lock(mutex_);
                     ++query_count_;
-                    if (request->operation == "node") ++node_queries_; else ++completion_queries_;
+                    if (request->operation == "node") {
+                        ++node_queries_;
+                        node_query_handler_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - query_started).count();
+                    } else ++completion_queries_;
                     last_visited_ = visited;
                     reply["checkpoint"] = checkpoint_; reply["query_id"] = query_count_;
                 }
@@ -192,7 +197,7 @@ public:
     }
     json status() const {
         std::lock_guard lock(mutex_);
-        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
+        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
     }
 };
 }
