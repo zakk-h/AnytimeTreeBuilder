@@ -11,6 +11,7 @@ type Status = {
   session_id: string; phase: string; error: string; stop_requested: boolean;
   checkpoint: number; ready: boolean; query_count: number; elapsed_seconds: number;
   actual_root_budget: number; requested_root_budget: number;
+  focus_running: boolean; focus_requested: boolean; focus_uid: number; focus_error: string;
 };
 const finished = (s: Status) => ['finished', 'stopped', 'failed'].includes(s.phase);
 
@@ -22,12 +23,13 @@ async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promi
   return result;
 }
 
-export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh, onBudgetFilter, currentRootBudget, currentRootMinimum, trainingSampleCount, querying, canRefresh, open, onClose, onAvailable }: {
+export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh, onBudgetFilter, onFocusStatus, currentRootBudget, currentRootMinimum, trainingSampleCount, querying, canRefresh, open, onClose, onAvailable }: {
   onReady: (sessionId: string, meta: ArborEnumBuilderMeta) => void;
   onConnect: (sessionId: string) => void;
   onPrepare: () => void;
   onRefresh: () => void;
   onBudgetFilter: (budget: number | null) => void;
+  onFocusStatus: (uid: number | null) => void;
   currentRootBudget: number;
   currentRootMinimum: number;
   trainingSampleCount: number;
@@ -50,7 +52,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   const sessionRef = useRef(''), readyRef = useRef(false);
   const draftRef = useRef(false), fileRead = useRef(0);
   const dialog = useRef<HTMLElement>(null);
-  const callbacks = useRef({ onReady, onConnect, onAvailable }); callbacks.current = { onReady, onConnect, onAvailable };
+  const callbacks = useRef({ onReady, onConnect, onAvailable, onFocusStatus }); callbacks.current = { onReady, onConnect, onAvailable, onFocusStatus };
 
   useEffect(() => {
     if (!open) return;
@@ -76,6 +78,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
         const current = await api<Status>('/api/session', undefined, controller.signal);
         if (disposed || sessionRef.current !== observedSession) return;
         setStatus(current);
+        callbacks.current.onFocusStatus(current && (current.focus_running || current.focus_requested) ? current.focus_uid : null);
         if (current && !draftRef.current) {
           if (sessionRef.current !== current.session_id) {
             sessionRef.current = current.session_id; readyRef.current = false;
@@ -157,6 +160,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
         catch (e) { setError(String(e)); }
       }}><Square size={14} /> Stop</button>}
     </>}
+    {status?.focus_error && <p className="upload-error live-error" role="alert">{status.focus_error}</p>}
     {error && <p className="upload-error live-error" role="alert">{error}</p>}
     {open && <div className="live-overlay" onClick={() => !busy && onClose()}>
       <section ref={dialog} className="live-dialog" role="dialog" aria-modal="true" aria-labelledby="live-title" onClick={e => e.stopPropagation()} onKeyDown={event => {
