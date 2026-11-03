@@ -28,6 +28,7 @@ class Session {
     json meta_;
     std::queue<std::shared_ptr<Request>> requests_;
     std::atomic<bool> pending_{false}, cancel_search_{false};
+    std::atomic<int> requested_root_budget_{-1}, actual_root_budget_{-1};
     // The actor keeps its actual model alive after enumeration stops. Querying
     // a finished/cancelled run never requires an export or reconstruction.
     std::jthread worker_;
@@ -112,6 +113,9 @@ class Session {
                 for (int id : *ids) if (static_cast<size_t>(id) >= registry.size()) throw std::invalid_argument("Threshold feature ID is outside the prepared feature registry");
             meta = {{"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", static_cast<int>(std::llround(settings_.lambda * n))}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
             { std::lock_guard lock(mutex_); meta_ = meta; phase_ = "running"; }
+            model.live_requested_root_budget = [&] {
+                return requested_root_budget_.load(std::memory_order_relaxed);
+            };
             model.live_poll = [&] {
                 if (!root_announced) {
                     model.live_refresh_in_progress();
@@ -121,6 +125,8 @@ class Session {
                         root_announced = true;
                     }
                 }
+                const int current_budget = model.live_root_budget();
+                if (current_budget >= 0) actual_root_budget_.store(current_budget, std::memory_order_relaxed);
                 if (pending_.load(std::memory_order_relaxed)) pump(model, meta, lifetime);
             };
             model.live_checkpoint = [&] {
@@ -145,6 +151,7 @@ class Session {
                     settings_.continuous_greedy < 0 ? settings_.proxy_mode == "continuous" : bool(settings_.continuous_greedy),
                     settings_.runtime, settings_.memory, settings_.abstain, settings_.abstain_cost);
             }
+            actual_root_budget_.store(model.live_root_budget(), std::memory_order_relaxed);
             { std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); phase_ = cancel_search_.load() ? "stopped" : "finished"; ended_ = std::chrono::steady_clock::now(); }
         } catch (const LiveEnumerationCancelled&) {
             std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); phase_ = "stopped"; ended_ = std::chrono::steady_clock::now();
@@ -156,8 +163,26 @@ class Session {
         // No model access occurs on HTTP threads, including after fit completes.
         while (!lifetime.stop_requested()) {
             std::unique_lock lock(mutex_);
-            wake_.wait(lock, [&] { return lifetime.stop_requested() || !requests_.empty(); });
+            wake_.wait(lock, [&] {
+                return lifetime.stop_requested() || !requests_.empty() ||
+                    (phase_ == "finished" && requested_root_budget_.load() > actual_root_budget_.load() && actual_root_budget_.load() >= 0);
+            });
+            if (lifetime.stop_requested()) break;
+            const int requested = requested_root_budget_.load(std::memory_order_relaxed);
+            const bool extend = phase_ == "finished" && requested > actual_root_budget_.load(std::memory_order_relaxed);
+            if (extend) phase_ = "running";
             lock.unlock();
+            if (extend) {
+                try {
+                    model.live_extend_root_budget(requested);
+                    actual_root_budget_.store(model.live_root_budget(), std::memory_order_relaxed);
+                    std::lock_guard done_lock(mutex_);
+                    phase_ = "finished"; ended_ = std::chrono::steady_clock::now();
+                } catch (const std::exception& e) {
+                    std::lock_guard done_lock(mutex_);
+                    phase_ = "failed"; error_ = e.what(); ended_ = std::chrono::steady_clock::now();
+                }
+            }
             if (!lifetime.stop_requested()) pump(model, meta, lifetime);
         }
         std::lock_guard lock(mutex_);
@@ -173,6 +198,11 @@ public:
     // The UI's Stop operation intentionally retains queries on the live model.
     void shutdown() { worker_.request_stop(); wake_.notify_all(); }
     void stop() { cancel_search_.store(true); wake_.notify_all(); }
+    void set_budget(int budget) {
+        if (budget < 0 || budget > 1000000000) throw std::invalid_argument("Requested budget is out of range");
+        requested_root_budget_.store(budget, std::memory_order_relaxed);
+        wake_.notify_one();
+    }
     bool done() const { std::lock_guard lock(mutex_); return phase_ == "finished" || phase_ == "stopped" || phase_ == "failed"; }
     json metadata() const { std::lock_guard lock(mutex_); return meta_; }
     json query(std::string operation, json body) {
@@ -197,7 +227,7 @@ public:
     }
     json status() const {
         std::lock_guard lock(mutex_);
-        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
+        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"actual_root_budget", actual_root_budget_.load()}, {"requested_root_budget", requested_root_budget_.load()}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
     }
 };
 }
