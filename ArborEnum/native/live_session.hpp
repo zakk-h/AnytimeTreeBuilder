@@ -6,6 +6,7 @@
 
 namespace arborenum::live {
 class QueryUnavailable : public std::runtime_error { public: using std::runtime_error::runtime_error; };
+class FocusInterrupted : public std::exception {};
 class Session {
     struct Request {
         std::string operation;
@@ -29,6 +30,14 @@ class Session {
     std::queue<std::shared_ptr<Request>> requests_;
     std::atomic<bool> pending_{false}, cancel_search_{false};
     std::atomic<int> requested_root_budget_{-1}, actual_root_budget_{-1};
+    // Focus requests are latest-wins. Only the native worker touches the graph.
+    std::atomic<uint64_t> focus_epoch_{0};
+    bool focus_requested_ = false, focus_running_ = false;
+    int focus_uid_ = -1;
+    json focus_request_;
+    std::string focus_error_;
+    uint64_t running_focus_epoch_ = 0;
+    std::chrono::steady_clock::time_point focus_deadline_{};
     // The actor keeps its actual model alive after enumeration stops. Querying
     // a finished/cancelled run never requires an export or reconstruction.
     std::jthread worker_;
@@ -69,6 +78,48 @@ class Session {
                 }
                 request->promise.set_value(std::move(reply));
             } catch (...) { request->promise.set_exception(std::current_exception()); }
+        }
+    }
+    void maybe_run_focus(ArborEnum& model, const json& meta) {
+        json request;
+        uint64_t epoch;
+        {
+            std::lock_guard lock(mutex_);
+            if (!focus_requested_ || focus_running_ || !ready_) return;
+            request = focus_request_;
+            epoch = focus_epoch_.load(std::memory_order_relaxed);
+        }
+        try {
+            GraphQueries graph(model, meta);
+            auto path = graph.focus_path(request.at("tree"), request.at("active_uid"));
+            if (!model.live_can_focus(path)) return;
+            {
+                std::lock_guard lock(mutex_);
+                if (epoch != focus_epoch_.load(std::memory_order_relaxed)) return;
+                focus_requested_ = false;
+                focus_running_ = true;
+                focus_error_.clear();
+            }
+            running_focus_epoch_ = epoch;
+            focus_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            try {
+                model.live_refine_focus(path);
+            } catch (const FocusInterrupted&) {
+                // Both the 60s deadline and a newer focus request follow this
+                // same cooperative unwind. LiveSplitAttachment restores any
+                // incomplete placeholders; finished alternatives are retained.
+            }
+            {
+                std::lock_guard lock(mutex_);
+                focus_running_ = false;
+            }
+        } catch (const std::exception& e) {
+            std::lock_guard lock(mutex_);
+            focus_running_ = false;
+            if (epoch == focus_epoch_.load(std::memory_order_relaxed)) {
+                focus_requested_ = false;
+                focus_error_ = e.what();
+            }
         }
     }
     void run(Dataset data, std::stop_token lifetime) noexcept {
@@ -117,6 +168,9 @@ class Session {
                 return requested_root_budget_.load(std::memory_order_relaxed);
             };
             model.live_poll = [&] {
+                if (focus_running_ && (focus_epoch_.load(std::memory_order_relaxed) != running_focus_epoch_ ||
+                    std::chrono::steady_clock::now() >= focus_deadline_))
+                    throw FocusInterrupted();
                 if (!root_announced) {
                     model.live_refresh_in_progress();
                     if (model.live_root_has_solution()) {
@@ -128,6 +182,7 @@ class Session {
                 const int current_budget = model.live_root_budget();
                 if (current_budget >= 0) actual_root_budget_.store(current_budget, std::memory_order_relaxed);
                 if (pending_.load(std::memory_order_relaxed)) pump(model, meta, lifetime);
+                if (!focus_running_) maybe_run_focus(model, meta);
             };
             model.live_checkpoint = [&] {
                 { std::lock_guard lock(mutex_); ++checkpoint_; ready_ = model.live_root_has_solution(); }
@@ -164,7 +219,7 @@ class Session {
         while (!lifetime.stop_requested()) {
             std::unique_lock lock(mutex_);
             wake_.wait(lock, [&] {
-                return lifetime.stop_requested() || !requests_.empty() ||
+                return lifetime.stop_requested() || !requests_.empty() || focus_requested_ ||
                     (phase_ == "finished" && requested_root_budget_.load() > actual_root_budget_.load() && actual_root_budget_.load() >= 0);
             });
             if (lifetime.stop_requested()) break;
@@ -183,7 +238,10 @@ class Session {
                     phase_ = "failed"; error_ = e.what(); ended_ = std::chrono::steady_clock::now();
                 }
             }
-            if (!lifetime.stop_requested()) pump(model, meta, lifetime);
+            if (!lifetime.stop_requested()) {
+                pump(model, meta, lifetime);
+                model.live_poll(); // Resume work after the original anytime call finished.
+            }
         }
         std::lock_guard lock(mutex_);
         while (!requests_.empty()) {
@@ -198,6 +256,20 @@ public:
     // The UI's Stop operation intentionally retains queries on the live model.
     void shutdown() { worker_.request_stop(); wake_.notify_all(); }
     void stop() { cancel_search_.store(true); wake_.notify_all(); }
+    void request_focus(json body) {
+        if (!body.is_object() || !body.contains("tree") || !body.contains("active_uid") ||
+            !body.at("active_uid").is_number_integer())
+            throw std::invalid_argument("Expected a tree and active node UID");
+        {
+            std::lock_guard lock(mutex_);
+            focus_request_ = std::move(body);
+            focus_uid_ = focus_request_.at("active_uid").get<int>();
+            focus_error_.clear();
+            focus_requested_ = true;
+            focus_epoch_.fetch_add(1, std::memory_order_relaxed);
+        }
+        wake_.notify_one();
+    }
     void set_budget(int budget) {
         if (budget < 0 || budget > 1000000000) throw std::invalid_argument("Requested budget is out of range");
         requested_root_budget_.store(budget, std::memory_order_relaxed);
@@ -227,7 +299,7 @@ public:
     }
     json status() const {
         std::lock_guard lock(mutex_);
-        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"actual_root_budget", actual_root_budget_.load()}, {"requested_root_budget", requested_root_budget_.load()}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
+        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"actual_root_budget", actual_root_budget_.load()}, {"requested_root_budget", requested_root_budget_.load()}, {"focus_requested", focus_requested_}, {"focus_running", focus_running_}, {"focus_uid", focus_uid_}, {"focus_error", focus_error_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
     }
 };
 }
