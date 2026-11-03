@@ -872,6 +872,8 @@ function SidePanel({
   onRandom,
   onOptimal,
   onUndo,
+  onFocus,
+  focusedUid,
   canUndo,
 }: {
   graph: AndOrGraph;
@@ -887,6 +889,8 @@ function SidePanel({
   onRandom: () => void;
   onOptimal: () => void;
   onUndo: () => void;
+  onFocus: () => void;
+  focusedUid: number | null;
   canUndo: boolean;
 }) {
   const [query, setQuery] = useState('');
@@ -1224,6 +1228,10 @@ function SidePanel({
             : `Choices for node ${active?.uid ?? '—'}`}
         </div>
 
+        {active?.kind === 'choice' && graph.metadata?.native && <button
+          className="ghost-button" onClick={onFocus}>
+          {focusedUid === active.uid ? 'Focusing here (max 60s)…' : 'Focus on this subproblem (60s)'}
+        </button>}
         {budget && (
           <div className="budget-box">
             <div>
@@ -1920,6 +1928,7 @@ function App() {
   const [nativeBusy, setNativeBusy] = useState(false);
   const [nativeRefresh, setNativeRefresh] = useState(0);
   const [selectedRootBudget, setSelectedRootBudget] = useState<number | null>(null);
+  const [focusedUid, setFocusedUid] = useState<number | null>(null);
   const [datasetPending, setDatasetPending] = useState(false);
   const [enumerationOpen, setEnumerationOpen] = useState(false);
   const [liveAvailable, setLiveAvailable] = useState(false);
@@ -1952,6 +1961,7 @@ function App() {
     liveSession.current = '';
     lastNativeViewSignature.current = null;
     setSelectedRootBudget(null);
+    setFocusedUid(null);
     setDatasetPending(false);
     setNativeReady(false); setNativeBusy(false);
     ++nativeRequest.current;
@@ -1969,6 +1979,7 @@ function App() {
     liveSession.current = '';
     lastNativeViewSignature.current = null;
     setSelectedRootBudget(null);
+    setFocusedUid(null);
     nativeAdapter.current = new NativeGraphAdapter();
     nativeQueriedSelection.current = null;
     ++nativeRequest.current;
@@ -2136,6 +2147,7 @@ function App() {
             onReady={readyNative}
             onRefresh={() => setNativeRefresh(value => value + 1)}
             onBudgetFilter={setSelectedRootBudget}
+            onFocusStatus={setFocusedUid}
             currentRootBudget={rootBudget(graph)}
             currentRootMinimum={trieMinObjective(graph, graph.root_trie_id)}
             trainingSampleCount={rootSize(graph)}
@@ -2190,6 +2202,16 @@ function App() {
         thresholdDecimals={thresholdDecimals}
         ui={ui}
         canUndo={history.length > 0}
+        focusedUid={focusedUid}
+        onFocus={() => {
+          if (!liveSession.current || active?.kind !== 'choice') return;
+          setFocusedUid(active.uid);
+          void nativeApi('focus', liveSession.current,
+            { tree: snapshot.root, active_uid: active.uid }).catch(error => {
+              setUploadError(error instanceof Error ? error.message : String(error));
+              setFocusedUid(null);
+            });
+        }}
         onUndo={() => {
           const last = history[history.length - 1];
           if (!last) return;
