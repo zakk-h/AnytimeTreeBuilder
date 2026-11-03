@@ -10,6 +10,7 @@ import { TrainingFields } from './TrainingFields';
 type Status = {
   session_id: string; phase: string; error: string; stop_requested: boolean;
   checkpoint: number; ready: boolean; query_count: number; elapsed_seconds: number;
+  actual_root_budget: number; requested_root_budget: number;
 };
 const finished = (s: Status) => ['finished', 'stopped', 'failed'].includes(s.phase);
 
@@ -21,11 +22,15 @@ async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promi
   return result;
 }
 
-export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh, querying, canRefresh, open, onClose, onAvailable }: {
+export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh, onBudgetFilter, currentRootBudget, currentRootMinimum, trainingSampleCount, querying, canRefresh, open, onClose, onAvailable }: {
   onReady: (sessionId: string, meta: ArborEnumBuilderMeta) => void;
   onConnect: (sessionId: string) => void;
   onPrepare: () => void;
   onRefresh: () => void;
+  onBudgetFilter: (budget: number | null) => void;
+  currentRootBudget: number;
+  currentRootMinimum: number;
+  trainingSampleCount: number;
   querying: boolean;
   canRefresh: boolean;
   open: boolean;
@@ -34,6 +39,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
 }) {
   const [available, setAvailable] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
+  const [budgetValue, setBudgetValue] = useState<number | null>(null);
   const [rows, setRows] = useState<string[][] | null>(null);
   const [filename, setFilename] = useState('');
   const [target, setTarget] = useState('');
@@ -73,6 +79,8 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
         if (current && !draftRef.current) {
           if (sessionRef.current !== current.session_id) {
             sessionRef.current = current.session_id; readyRef.current = false;
+            setBudgetValue(null);
+            onBudgetFilter(null);
             callbacks.current.onConnect(current.session_id);
           }
           if (current.ready && !readyRef.current) {
@@ -91,8 +99,27 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
     void poll();
     return () => { disposed = true; clearTimeout(timer); controller.abort(); };
   }, []);
+  useEffect(() => {
+    if (budgetValue === null || !status?.ready) return;
+    const id = status.session_id;
+    const timer = setTimeout(() => {
+      void api<Status>(`/api/budget?session_id=${id}`, { budget: budgetValue })
+        .catch(e => setError(e instanceof Error ? e.message : String(e)));
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [budgetValue, status?.session_id, status?.ready]);
+
   if (!available) return null;
   const running = status && !finished(status);
+  const nativeBudget = Number.isFinite(currentRootBudget) ? Math.max(0, Math.round(currentRootBudget)) : 0;
+  const minimumBudget = Number.isFinite(currentRootMinimum) ? Math.max(0, Math.round(currentRootMinimum)) : 0;
+  const chosenBudget = budgetValue ?? nativeBudget;
+  const sliderMax = Math.max(chosenBudget + 1, nativeBudget + Math.max(10, Math.ceil(trainingSampleCount * 0.1)));
+  const updateBudget = (value: number) => {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0 || value > 1000000000) return;
+    setBudgetValue(value);
+    onBudgetFilter(value);
+  };
   const launch = async () => {
     if (!rows) return;
     setBusy(true); setError('');
@@ -113,6 +140,17 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   return <div className="live-enumeration">
     {status && <>
       <span className="live-progress" role="status">{status.stop_requested && !finished(status) ? 'Stopping…' : status.phase} · {Math.floor(status.elapsed_seconds)}s · {status.ready ? `${status.query_count} native queries` : 'waiting for first feasible tree'}</span>
+      {status.ready && <div className="live-budget-control" aria-label="Interactive Rashomon budget">
+        <label htmlFor="live-root-budget">Rashomon budget</label>
+        <input id="live-root-budget" aria-label="Rashomon budget slider" type="range"
+          min={Math.min(minimumBudget, chosenBudget)} max={sliderMax} step={1}
+          value={chosenBudget} onChange={event => updateBudget(Number(event.target.value))} />
+        <input aria-label="Rashomon objective budget" type="number" min={0} max={1000000000}
+          step={1} value={chosenBudget} onChange={event => updateBudget(Number(event.target.value))} />
+        <span>{(chosenBudget / Math.max(1, trainingSampleCount)).toFixed(4)} per sample</span>
+        {chosenBudget > nativeBudget && <span>Expanding when safe…</span>}
+        {chosenBudget < nativeBudget && <span>Filtering existing solutions</span>}
+      </div>}
       <button className="ghost-button" disabled={querying || !status.ready || !canRefresh} onClick={onRefresh}><RefreshCw size={15} className={querying ? 'live-spin' : ''} /> {querying ? 'Updating options…' : 'Update options'}</button>
       {running && <button className="ghost-button" disabled={status.stop_requested} onClick={async () => {
         try { const current = await api<Status>(`/api/stop?session_id=${status.session_id}`, {}); if (current) setStatus(current); }
