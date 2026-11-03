@@ -329,6 +329,15 @@ int main(int argc, char** argv) {
             if (auto current = checked_session(req, res))
                 respond(res, current->query("complete", json::parse(req.body)));
         });
+        post_json("/api/budget", [&](const auto& req, auto& res) {
+            if (auto current = checked_session(req, res)) {
+                const auto body = json::parse(req.body);
+                if (!body.contains("budget") || !body.at("budget").is_number_integer())
+                    throw std::invalid_argument("Expected an integer objective budget");
+                current->set_budget(body.at("budget").get<int>());
+                respond(res, current->status(), 202);
+            }
+        });
         post_json("/api/stop", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res)) {
                 current->stop();
