@@ -240,6 +240,23 @@ class GraphQueries {
 public:
     GraphQueries(ArborEnum& model, const json& meta, std::function<bool()> cancelled = {}) : model_(model), meta_(meta), cancelled_(std::move(cancelled)) {}
     size_t visited() const { return visited_; }
+    ArborEnum::LiveFocusPath focus_path(json tree, int active) {
+        prepare(tree, active);
+        ArborEnum::LiveFocusPath path;
+        std::function<bool(const json&)> visit = [&](const json& node) {
+            if (node.at("uid").get<int>() == active) return true;
+            if (node.at("kind") != "split") return false;
+            const int feature = node.at("feature").get<int>();
+            path.emplace_back(feature, false);
+            if (visit(node.at("left"))) return true;
+            path.back().second = true;
+            if (visit(node.at("right"))) return true;
+            path.pop_back();
+            return false;
+        };
+        if (!visit(tree)) throw std::invalid_argument("Focus node is not in the displayed tree");
+        return path;
+    }
     json view(json tree, int active) {
         prepare(tree, active);
         json summaries = json::array(), leaves = json::array(), splits = json::array();
