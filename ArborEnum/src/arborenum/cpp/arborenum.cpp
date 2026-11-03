@@ -933,6 +933,19 @@ public:
     // Called exclusively on the enumeration thread, between graph mutations.
     std::function<void()> live_checkpoint;
     std::function<void()> live_poll;
+    // Only read on the native worker. The session writes the target atomically.
+    std::function<int()> live_requested_root_budget;
+    int live_root_budget() const { return result ? result->budget : -1; }
+    // After the initial anytime call has returned, the worker can extend the
+    // retained native DAG without constructing a second model.
+    void live_extend_root_budget(int target_budget) {
+        if (!result || target_budget <= result->budget) return;
+        Packed root(n_words);
+        for (int w = 0; w < n_words - 1; ++w) root.w[(std::size_t)w] = ~0ULL;
+        root.w[(std::size_t)(n_words - 1)] = tail_mask;
+        extend_result_to_budget_(trained_depth_budget, target_budget, root,
+            empty_pk(), empty_continuous_path(), live_global_active_thresholds_);
+    }
     bool live_forbid_graph_export = false;
     std::function<bool()> live_stop_requested;
 
@@ -965,6 +978,7 @@ public:
 
 private:
     std::vector<TreeTrieNode*> live_split_parents_;
+    std::vector<int> live_global_active_thresholds_;
 
     // Transactional, incremental attachment. The native graph owns each child
     // as soon as construct_trie_extend chooses its canonical (possibly cached)
@@ -4993,6 +5007,7 @@ public:
         B_active.insert(B_active.end(), B_initial.begin(), B_initial.end());
 
         sort_unique_ints_inplace_(B_active);
+        live_global_active_thresholds_ = B_active;
 
         Packed root(n_words);
 
@@ -5083,6 +5098,19 @@ public:
         };
         publish();
 
+        int current_budget = eps_abs;
+        auto honor_live_budget_request = [&] {
+            if (!live_requested_root_budget) return;
+            const int requested = live_requested_root_budget();
+            if (requested <= current_budget) return;  // Shrinking is a display filter.
+            result = G_min;
+            extend_result_to_budget_(depth_budget, requested, root,
+                root_pk, root_cpath, B_active);
+            G_min = result;
+            current_budget = requested;
+            publish();
+        };
+
         int refinement_round = 0;
         while (!active_contains_all_threshold_columns_(B_active)) {
             if (max_refinement_rounds >= 0 &&
@@ -5109,6 +5137,7 @@ public:
 
             B_active.insert(B_active.end(), B_new.begin(), B_new.end());
             sort_unique_ints_inplace_(B_active);
+            live_global_active_thresholds_ = B_active;
 
             // the meaning of complete for this active feature set changed.
             // do not trust old (subproblem, depth) trie-cache hits.
@@ -5143,7 +5172,10 @@ public:
 
             ++refinement_round;
             publish();
+            honor_live_budget_request();
         }
+        // Even if no thresholds remain, honor a pending user increase.
+        honor_live_budget_request();
 
         // done using continuous Lickety's k=1 first-split suggestions to augment
         // the active threshold set. from here on, the active set is fixed and
@@ -5152,7 +5184,6 @@ public:
         anytime_lickety_first_split_cache.clear();
 
         // after all active-threshold refinement is done, we could consider increasing epsilon
-        int current_budget = eps_abs;
 
         if (
             second_rashomon_mult > rashomon_mult &&
@@ -5167,10 +5198,10 @@ public:
 
             double current_multiplier = rashomon_mult;
 
-            while (
-                current_budget < final_budget &&
-                !resource_limit_reached_()
-            ) {
+            while (!resource_limit_reached_()) {
+                const int effective_target = live_requested_root_budget && live_requested_root_budget() >= 0
+                    ? live_requested_root_budget() : final_budget;
+                if (current_budget >= effective_target) break;
                 current_multiplier = std::min(
                     second_rashomon_mult,
                     current_multiplier + multiplier_step_size
@@ -5189,10 +5220,7 @@ public:
                     next_budget = current_budget + 1;
                 }
 
-                next_budget = std::min(
-                    next_budget,
-                    final_budget
-                );
+                next_budget = std::min(next_budget, effective_target);
 
                 std::cout
                     << "Extending anytime multiplier to "
@@ -5325,6 +5353,7 @@ public:
 
                 ++automatic_refinement_round;
                 publish();
+                honor_live_budget_request();
             }
 
             // special correction:
@@ -5364,6 +5393,7 @@ public:
                 );
 
                 publish();
+                honor_live_budget_request();
                 if (resource_limit_reached_()) {
                     std::cout
                         << "Resource limit reached during corrected "
@@ -5389,6 +5419,7 @@ public:
             }
         }
 
+        honor_live_budget_request();
         allowed_proxy_features = old_allowed_proxy_features;
         restrict_proxy_in_lickety = old_restrict_lickety;
         restrict_proxy_in_depthd_exact = old_restrict_depthd;
