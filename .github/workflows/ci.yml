@@ -25,3 +25,7 @@ jobs:
         run: >-
           python3 ArborEnum/native/tests/test_live_api.py
           bin/arborenum-builder InteractiveTreeBuilder/dist/index.html
+      - name: Measure native polling overhead
+        run: >-
+          python3 ArborEnum/native/tests/benchmark_node_polling.py
+          bin/arborenum-builder InteractiveTreeBuilder/dist/index.html
