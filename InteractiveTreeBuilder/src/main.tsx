@@ -79,6 +79,7 @@ import { LiveEnumerationPanel } from './LiveEnumerationPanel';
 import { UploadMenu } from './UploadMenu';
 import { AdaptiveText, useLabelMetrics } from './AdaptiveText';
 import { NativeGraphAdapter, nativeApi, type NativeNodeView, type NativeCompletion, type NativeConstraint } from './nativeGraph';
+import { nextLiveNodeRefreshAt, nativeNodeViewSignature } from './liveOptionPolling';
 import type { ArborEnumBuilderMeta } from './arborenumPayload';
 import { normalizeArborEnumPayload, rememberCurrentPayload } from './arborenumPayload';
 
@@ -1925,6 +1926,9 @@ function App() {
   const nativeSelection = useRef(snapshot); nativeSelection.current = snapshot;
   const nativeQueriedSelection = useRef<HistorySnapshot | null>(null);
   const nativeQueriedRefresh = useRef(0);
+  const lastNativeViewSignature = useRef<string | null>(null);
+  const nativeBusyRef = useRef(false);
+  nativeBusyRef.current = nativeBusy;
   const active = findNode(snapshot.root, snapshot.activeUid);
 
   const loadPayload = (raw: unknown) => {
@@ -1938,6 +1942,7 @@ function App() {
 
     const nextMeta = coerceMeta(payload);
     liveSession.current = '';
+    lastNativeViewSignature.current = null;
     setDatasetPending(false);
     setNativeReady(false); setNativeBusy(false);
     ++nativeRequest.current;
@@ -1953,6 +1958,7 @@ function App() {
 
   const prepareNative = () => {
     liveSession.current = '';
+    lastNativeViewSignature.current = null;
     nativeAdapter.current = new NativeGraphAdapter();
     nativeQueriedSelection.current = null;
     ++nativeRequest.current;
@@ -1990,6 +1996,7 @@ function App() {
     void nativeApi<NativeNodeView>('node', session, { tree: snapshot.root, active_uid: snapshot.activeUid }, controller.signal).then(response => {
       if (sequence !== nativeRequest.current || session !== liveSession.current || nativeSelection.current !== snapshot) return;
       const fragment = nativeAdapter.current.view(snapshot, response);
+      lastNativeViewSignature.current = nativeNodeViewSignature(response);
       setGraph(fragment);
       setDatasetPending(false);
       nativeQueriedSelection.current = snapshot;
@@ -2002,6 +2009,58 @@ function App() {
     return () => controller.abort();
   }, [snapshot, nativeReady, nativeRefresh]);
 
+  // Automatically check the currently selected native node without showing a busy
+  // indicator or resetting the user's tree/viewport. A selection starts a new
+  // five-minute window. Only changed objective/choice data triggers a rerender.
+  useEffect(() => {
+    if (!nativeReady || !findNode(snapshot.root, snapshot.activeUid) || liveSession.current === '') return;
+    const selected = findNode(snapshot.root, snapshot.activeUid);
+    if (selected?.kind !== 'choice') return;
+    const session = liveSession.current;
+    const started = performance.now();
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let checking = false;
+    const check = async () => {
+      if (controller.signal.aborted) return;
+      if (!checking && !nativeBusyRef.current &&
+          nativeQueriedSelection.current === snapshot) {
+        checking = true;
+        const sequence = nativeRequest.current;
+        try {
+          const response = await nativeApi<NativeNodeView>(
+            'node', session, { tree: snapshot.root, active_uid: snapshot.activeUid }, controller.signal,
+          );
+          if (!controller.signal.aborted && session === liveSession.current &&
+              nativeSelection.current === snapshot &&
+              sequence === nativeRequest.current &&
+              !nativeBusyRef.current) {
+            const signature = nativeNodeViewSignature(response);
+            if (signature !== lastNativeViewSignature.current) {
+              const fragment = nativeAdapter.current.view(snapshot, response);
+              lastNativeViewSignature.current = signature;
+              setGraph(fragment);
+              rememberCurrentPayload({ graph: fragment, meta });
+            }
+          }
+        } catch {
+          // Background refresh is best effort; explicit node queries report errors.
+        } finally {
+          checking = false;
+        }
+      }
+      schedule();
+    };
+    const schedule = () => {
+      if (controller.signal.aborted) return;
+      const elapsed = performance.now() - started;
+      const next = nextLiveNodeRefreshAt(elapsed);
+      if (next !== null) timer = setTimeout(() => void check(), Math.max(0, next - elapsed));
+    };
+    schedule();
+    return () => { controller.abort(); if (timer) clearTimeout(timer); };
+  }, [snapshot, nativeReady]);
+
   const completeNative = async (mode: 'optimal' | 'random' | 'constrained', constraint?: NativeConstraint) => {
     if (!nativeReady || nativeBusy) return { ok: false, message: 'Wait for the current native query to finish.' };
     const selected = snapshot, session = liveSession.current;
@@ -2012,6 +2071,7 @@ function App() {
       if (sequence !== nativeRequest.current || session !== liveSession.current || nativeSelection.current !== selected) return { ok: false, message: 'Selection changed; request completion again.' };
       const next = nativeAdapter.current.normalize({ root: result.tree, activeUid: result.active_uid, nextUid: result.next_uid });
       const fragment = nativeAdapter.current.view(next, result.view);
+      lastNativeViewSignature.current = nativeNodeViewSignature(result.view);
       setGraph(fragment);
       nativeQueriedSelection.current = next;
       nativeQueriedRefresh.current = nativeRefresh;
