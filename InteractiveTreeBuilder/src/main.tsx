@@ -1228,7 +1228,7 @@ function SidePanel({
             : `Choices for node ${active?.uid ?? '—'}`}
         </div>
 
-        {active?.kind === 'choice' && graph.metadata?.native && <button
+        {active?.kind === 'choice' && graph.metadata?.native === true && <button
           className="ghost-button" onClick={onFocus}>
           {focusedUid === active.uid ? 'Focusing here (max 60s)…' : 'Focus on this subproblem (60s)'}
         </button>}
