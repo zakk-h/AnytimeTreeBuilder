@@ -57,7 +57,7 @@ class Session {
                 json reply;
                 const auto& body = request->body;
                 if (request->operation == "node") reply = graph.view(body.at("tree"), body.at("active_uid"));
-                else reply = graph.complete(body.at("tree"), body.at("active_uid"), body.at("next_uid"), body.at("mode"), body.value("constraint", json::object()), body.value("seed", std::random_device{}()));
+                else reply = graph.complete(body.at("tree"), body.at("active_uid"), body.at("next_uid"), body.at("mode"), body.value("constraint", json::object()), body.value("seed", std::random_device{}()), body.value("display_budget", -1));
                 const size_t visited = graph.visited();
                 if (request->operation != "node") reply["view"] = graph.view(reply.at("tree"), reply.at("active_uid"));
                 {
