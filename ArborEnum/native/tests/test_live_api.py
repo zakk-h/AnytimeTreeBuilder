@@ -111,6 +111,55 @@ def main():
             time.sleep(.01)
         assert call('/api/node?session_id=' + sid, query)[0] == 200
         assert call('/api/session')[1]['full_graph_exports'] == 0
+        # New dynamic-budget/focus session: allow work to finish, then increase
+        # the root objective budget without rebuilding or losing the graph.
+        tiny = {'feature_names': ['a', 'b'], 'class_names': ['no', 'yes'],
+                'X': [[(i >> 1) & 1, i & 1] for i in range(64)],
+                'y': [i % 2 for i in range(64)],
+                'settings': {'depth_budget': 2, 'lambda_reg': .01,
+                             'rashomon_mult': .01, 'second_rashomon_mult': .01,
+                             'runtime_limit_seconds': 3}}
+        code, fresh = call('/api/session', tiny)
+        assert code == 202, fresh
+        new_id = fresh['session_id']
+        until = time.monotonic() + 20
+        while fresh['phase'] != 'finished':
+            assert time.monotonic() < until and fresh['phase'] != 'failed', fresh
+            time.sleep(.025)
+            fresh = call('/api/session')[1]
+        q = '/api/node?session_id=' + new_id
+        root_query = {'tree': {'uid': 0, 'kind': 'choice'}, 'active_uid': 0}
+        code, before = call(q, root_query)
+        assert code == 200, before
+        target = before['root_budget'] + 1
+        code, submitted = call('/api/budget?session_id=' + new_id, {'budget': target})
+        assert code == 202 and submitted['requested_root_budget'] == target, submitted
+        until = time.monotonic() + 20
+        while True:
+            state = call('/api/session')[1]
+            if state['actual_root_budget'] >= target and state['phase'] == 'finished':
+                break
+            assert time.monotonic() < until and state['phase'] != 'failed', state
+            time.sleep(.025)
+        code, grown = call(q, root_query)
+        assert code == 200 and grown['root_budget'] >= target, grown
+        # Decrease is non-destructive: the requested display cap changes but
+        # already computed native solutions remain valid and queryable.
+        code, lowered = call('/api/budget?session_id=' + new_id,
+                             {'budget': before['root_budget']})
+        assert code == 202 and lowered['requested_root_budget'] == before['root_budget']
+        assert call(q, root_query)[1]['root_budget'] >= target
+        # Both normal completion and superseded focus use cooperative unwind.
+        assert call('/api/focus?session_id=' + new_id, root_query)[0] == 202
+        assert call('/api/focus?session_id=' + new_id, root_query)[0] == 202
+        until = time.monotonic() + 20
+        while True:
+            state = call('/api/session')[1]
+            if not state['focus_requested'] and not state['focus_running']:
+                break
+            assert time.monotonic() < until and not state['focus_error'], state
+            time.sleep(.025)
+        assert not state['focus_error'], state
         print('Native HTTP node-path queries, all completion modes, concurrent readers, zero exports, stop retention and preview origins passed')
     finally:
         if os.name == 'nt': process.send_signal(signal.CTRL_BREAK_EVENT)
