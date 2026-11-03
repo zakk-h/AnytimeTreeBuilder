@@ -4,6 +4,10 @@
 .live-progress::before { content:''; width:5px; height:5px; border-radius:50%; background:#849969; }
 .live-enumeration > .ghost-button { min-height:32px; padding:0 8px; font-size:12px; border-color:#e1e6d9; background:transparent; }
 .live-error { flex-basis:100%; margin:0; }
+.live-budget-control { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:4px 8px; border:1px solid #e1e6d9; border-radius:7px; font-size:11px; color:#52627a; }
+.live-budget-control label { white-space:nowrap; font-weight:600; }
+.live-budget-control input[type="range"] { width:120px; accent-color:var(--accent); }
+.live-budget-control input[type="number"] { width:75px; min-height:26px; border:1px solid #dce3eb; border-radius:5px; padding:2px 5px; font:inherit; color:#344054; }
 .live-overlay { position:fixed; inset:0; background:#192c2660; backdrop-filter:blur(6px); display:flex; justify-content:center; align-items:center; z-index:10000; padding:24px; }
 .live-dialog { position:relative; width:680px; max-width:100%; max-height:90dvh; overflow:auto; padding:36px; background:#ffffff; border:1px solid #e1e7ee; border-radius:15px; box-shadow:0 30px 100px #182b2840; color:#1d2939; }
 .dialog-eyebrow { display:flex; align-items:center; gap:8px; color:#66758a; font-size:12px; font-weight:600; letter-spacing:.13em; margin-bottom:14px; }
