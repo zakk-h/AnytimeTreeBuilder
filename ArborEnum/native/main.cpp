@@ -338,6 +338,12 @@ int main(int argc, char** argv) {
                 respond(res, current->status(), 202);
             }
         });
+        post_json("/api/focus", [&](const auto& req, auto& res) {
+            if (auto current = checked_session(req, res)) {
+                current->request_focus(json::parse(req.body));
+                respond(res, current->status(), 202);
+            }
+        });
         post_json("/api/stop", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res)) {
                 current->stop();
