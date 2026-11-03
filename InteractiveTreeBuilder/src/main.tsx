@@ -2088,7 +2088,7 @@ function App() {
     const sequence = ++nativeRequest.current;
     setNativeBusy(true);
     try {
-      const result = await nativeApi<NativeCompletion>('complete', session, { tree: selected.root, active_uid: selected.activeUid, next_uid: selected.nextUid, mode, constraint: constraint ?? {}, seed: Math.floor(Math.random() * 0xffffffff) });
+      const result = await nativeApi<NativeCompletion>('complete', session, { tree: selected.root, active_uid: selected.activeUid, next_uid: selected.nextUid, mode, constraint: constraint ?? {}, display_budget: rootBudget(displayedGraph), seed: Math.floor(Math.random() * 0xffffffff) });
       if (sequence !== nativeRequest.current || session !== liveSession.current || nativeSelection.current !== selected) return { ok: false, message: 'Selection changed; request completion again.' };
       const next = nativeAdapter.current.normalize({ root: result.tree, activeUid: result.active_uid, nextUid: result.next_uid });
       const fragment = nativeAdapter.current.view(next, result.view);
