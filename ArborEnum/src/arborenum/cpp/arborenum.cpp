@@ -938,7 +938,7 @@ public:
     int live_root_budget() const { return result ? result->budget : -1; }
     using LiveFocusPath = std::vector<std::pair<int, bool>>;
     bool live_can_focus(const LiveFocusPath& path) {
-        if (!result || live_proxy_frames_ != 0) return false;
+        if (!result || trained_depth_budget < 0 || live_proxy_frames_ != 0) return false;
         auto target = locate_live_focus_(path);
         if (active_enumeration_frames_.empty()) return true;
         const auto current = active_enumeration_frames_.back();
