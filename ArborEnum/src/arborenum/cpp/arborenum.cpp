@@ -936,6 +936,39 @@ public:
     // Only read on the native worker. The session writes the target atomically.
     std::function<int()> live_requested_root_budget;
     int live_root_budget() const { return result ? result->budget : -1; }
+    using LiveFocusPath = std::vector<std::pair<int, bool>>;
+    bool live_can_focus(const LiveFocusPath& path) {
+        if (!result || live_proxy_frames_ != 0) return false;
+        auto target = locate_live_focus_(path);
+        if (active_enumeration_frames_.empty()) return true;
+        const auto current = active_enumeration_frames_.back();
+        return target.depth < current.first ||
+            (target.depth == current.first && target.key != current.second);
+    }
+    void live_refine_focus(const LiveFocusPath& path) {
+        auto target = locate_live_focus_(path);
+        const K2 key{target.key, target.depth};
+        std::vector<int> active = live_global_active_thresholds_;
+        if (auto it = live_local_thresholds_.find(key); it != live_local_thresholds_.end())
+            active.insert(active.end(), it->second.begin(), it->second.end());
+        sort_unique_ints_inplace_(active);
+        const auto more = SelectNewThresholds(active, continuous_starts, live_refinement_width_);
+        active.insert(active.end(), more.begin(), more.end());
+        sort_unique_ints_inplace_(active);
+        RefineVisited visited;
+        try {
+            RefineGraphDfs(target.node, target.mask, target.depth, target.pk,
+                target.cpath, active, visited);
+        } catch (...) {
+            for (auto it = target.ancestors.rbegin(); it != target.ancestors.rend(); ++it)
+                (*it)->refresh_live_minimum();
+            throw;
+        }
+        for (auto it = target.ancestors.rbegin(); it != target.ancestors.rend(); ++it)
+            (*it)->refresh_live_minimum();
+        // Commit the next local threshold round only after it completed.
+        live_local_thresholds_[key] = std::move(active);
+    }
     // After the initial anytime call has returned, the worker can extend the
     // retained native DAG without constructing a second model.
     void live_extend_root_budget(int target_budget) {
@@ -979,6 +1012,67 @@ public:
 private:
     std::vector<TreeTrieNode*> live_split_parents_;
     std::vector<int> live_global_active_thresholds_;
+    int live_refinement_width_ = 1;
+    std::unordered_map<K2, std::vector<int>, K2::Hash> live_local_thresholds_;
+    std::vector<std::pair<int8_t, uint64_t>> active_enumeration_frames_;
+    int live_proxy_frames_ = 0;
+    struct LiveEnumerationFrame {
+        ArborEnum& owner;
+        LiveEnumerationFrame(ArborEnum& a, int8_t d, uint64_t key) : owner(a) {
+            owner.active_enumeration_frames_.emplace_back(d, key);
+        }
+        ~LiveEnumerationFrame() { owner.active_enumeration_frames_.pop_back(); }
+    };
+    struct LiveProxyFrame {
+        ArborEnum& owner;
+        explicit LiveProxyFrame(ArborEnum& a) : owner(a) { ++owner.live_proxy_frames_; }
+        ~LiveProxyFrame() { --owner.live_proxy_frames_; }
+    };
+    struct LiveFocusTarget {
+        std::shared_ptr<TreeTrieNode> node;
+        Packed mask;
+        PathKey pk;
+        ContinuousPath cpath;
+        int8_t depth;
+        uint64_t key;
+        std::vector<std::shared_ptr<TreeTrieNode>> ancestors;
+    };
+    LiveFocusTarget locate_live_focus_(const LiveFocusPath& path) {
+        if (!result) throw std::invalid_argument("No live native graph");
+        Packed mask(n_words);
+        for (int w = 0; w < n_words - 1; ++w) mask.w[(std::size_t)w] = ~0ULL;
+        mask.w[(std::size_t)(n_words - 1)] = tail_mask;
+        std::shared_ptr<TreeTrieNode> node = result;
+        PathKey pk = empty_pk();
+        ContinuousPath cpath = empty_continuous_path();
+        int8_t depth = trained_depth_budget;
+        std::vector<std::shared_ptr<TreeTrieNode>> ancestors;
+        for (auto [feature, right] : path) {
+            if (depth <= 0) throw std::invalid_argument("Focus path exceeds depth");
+            auto it = std::find_if(node->splits.begin(), node->splits.end(),
+                [feature](const SplitNode& s) { return s.feature == feature && s.left && s.right; });
+            if (it == node->splits.end()) throw std::invalid_argument("Unknown focus path split");
+            Packed left(n_words), right_mask(n_words);
+            split_threshold_bits_(mask, feature, left, right_mask);
+            const PathKey* pkL = &empty_pk();
+            const PathKey* pkR = &empty_pk();
+            PathKey localL, localR;
+            make_child_pks_if_needed_(feature, pk, pkL, pkR, localL, localR);
+            const ContinuousPath* cL = &cpath;
+            const ContinuousPath* cR = &cpath;
+            ContinuousPath cLocalL, cLocalR;
+            make_child_continuous_paths_if_needed_(feature, cpath, cL, cR, cLocalL, cLocalR);
+            ancestors.push_back(node);
+            node = right ? it->right : it->left;
+            mask = right ? std::move(right_mask) : std::move(left);
+            pk = right ? *pkR : *pkL;
+            cpath = right ? *cR : *cL;
+            --depth;
+        }
+        const uint64_t key = key_of_subproblem(mask, pk);
+        return {node, std::move(mask), std::move(pk), std::move(cpath), depth,
+                key, std::move(ancestors)};
+    }
 
     // Transactional, incremental attachment. The native graph owns each child
     // as soon as construct_trie_extend chooses its canonical (possibly cached)
@@ -1313,6 +1407,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyFrame proxy_frame(*this);
         if (live_poll) live_poll();
         // if greedy is feature-restricted, always use the existing binary feature loop.
         if (restrict_proxy_in_greedy) {
@@ -1449,6 +1544,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyFrame proxy_frame(*this);
         if (live_poll) live_poll();
         if (use_restricted_lickety_proxy_()) {
             if (proxy_style == 4) {
@@ -5008,6 +5104,8 @@ public:
 
         sort_unique_ints_inplace_(B_active);
         live_global_active_thresholds_ = B_active;
+        live_refinement_width_ = refinement_width;
+        live_local_thresholds_.clear();
 
         Packed root(n_words);
 
@@ -7517,8 +7615,8 @@ private:
         const std::vector<int>& B_active,
         RefineVisited& visited
     ) {
-        
         if (!G) return;
+        LiveEnumerationFrame live_frame(*this, depth, key_of_subproblem(mask, pk));
 
         TreeTrieNode* node_ptr = G.get();
 
@@ -8618,6 +8716,7 @@ private:
         // }
 
         const uint64_t k = key_of_subproblem(mask, pk);
+        LiveEnumerationFrame live_frame(*this, depth, k);
         K2 key{k, depth};
 
         if (trie_cache_enabled) {
