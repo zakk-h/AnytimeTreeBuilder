@@ -276,7 +276,8 @@ public:
         }
         return {{"root_budget", model_.result->budget}, {"root_minimum", model_.result->min_objective}, {"root_size", meta_.at("root_n")}, {"summaries", std::move(summaries)}, {"options", {{"uid", active}, {"leaves", std::move(leaves)}, {"splits", std::move(splits)}}}, {"visited_nodes", visited_}};
     }
-    json complete(json tree, int active, int next_uid, const std::string& mode, const json& constraint, uint64_t seed) {
+    json complete(json tree, int active, int next_uid, const std::string& mode, const json& constraint, uint64_t seed, int displayed_budget = -1) {
+        const int bound = displayed_budget < 0 ? model_.result->budget : std::min(model_.result->budget, displayed_budget);
         if (mode != "optimal" && mode != "random" && mode != "constrained") throw std::invalid_argument("Invalid completion mode");
         if (mode != "constrained" && !constraint.empty()) throw std::invalid_argument("Constraints require constrained completion mode");
         if (mode == "constrained" && constraint.value("mode", "") != "avoid" && constraint.value("mode", "") != "sample") throw std::invalid_argument("Invalid native completion constraint");
@@ -292,7 +293,11 @@ public:
             if (candidates.empty()) throw std::invalid_argument("No completion satisfies these constraints and the Rashomon budget");
             // Pruned frontiers have ascending cost and strictly decreasing
             // abstention, so the final point minimizes abstention, then cost.
-            const auto& best = candidates.back();
+            auto best_it = std::find_if(candidates.rbegin(), candidates.rend(),
+                [bound](const auto& candidate) { return candidate->objective <= bound; });
+            if (best_it == candidates.rend())
+                throw std::invalid_argument("No constrained completion fits the displayed budget");
+            const auto& best = *best_it;
             planner.fill(tree, best, by_uid, next_uid);
             return {{"tree", std::move(tree)}, {"active_uid", active}, {"next_uid", next_uid}, {"visited_nodes", visited_},
                 {"abstained_samples", best->abstained}, {"objective", best->objective}};
@@ -313,14 +318,14 @@ public:
             }
         }
         if (frontier.empty()) throw std::invalid_argument("The selected subtree has no unfinished choices");
-        if (total > model_.result->budget) throw std::invalid_argument("No completion satisfies the Rashomon budget");
+        if (total > bound) throw std::invalid_argument("No completion satisfies the displayed Rashomon budget");
         std::mt19937_64 rng(seed);
         for (auto* item : frontier) {
             const int best = planner.best(item->node, item->sample).objective;
             const int old_uid = item->build->at("uid");
             json filled;
             if (mode == "random") {
-                auto result = planner.random(item->node, model_.result->budget - static_cast<int>(total - best), next_uid, rng);
+                auto result = planner.random(item->node, bound - static_cast<int>(total - best), next_uid, rng);
                 total += result.second - best;
                 filled = std::move(result.first);
             } else filled = planner.optimal(item->node, item->sample, next_uid);
