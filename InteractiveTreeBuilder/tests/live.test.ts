@@ -1,4 +1,5 @@
 import { readNativeResponse } from '../src/nativeResponse';
+import { nextLiveNodeRefreshAt, nativeNodeViewSignature } from '../src/liveOptionPolling';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCsv, toDataset } from '../src/liveDataset';
@@ -130,4 +131,31 @@ test('native responses preserve JSON and explain transient HTML or invalid respo
     });
   }
   await assert.rejects(readNativeResponse(new Response('Service unavailable', { status: 503 }), '/api/node'), /invalid API response.*HTTP 503/);
+});
+
+
+test('automatic node polling uses 2s intervals for 30s, 10s thereafter, and stops at 5m', () => {
+  assert.deepEqual(Array.from({ length: 15 }, (_, i) => nextLiveNodeRefreshAt(i * 2_000)),
+    Array.from({ length: 15 }, (_, i) => (i + 1) * 2_000));
+  assert.equal(nextLiveNodeRefreshAt(29_999), 30_000);
+  assert.equal(nextLiveNodeRefreshAt(30_000), 40_000);
+  assert.equal(nextLiveNodeRefreshAt(39_999), 40_000);
+  assert.equal(nextLiveNodeRefreshAt(40_000), 50_000);
+  assert.equal(nextLiveNodeRefreshAt(289_999), 290_000);
+  assert.equal(nextLiveNodeRefreshAt(290_000), null);
+  assert.equal(nextLiveNodeRefreshAt(300_000), null);
+});
+
+test('node polling ignores changing query counters but detects choices and budget changes', () => {
+  const base: NativeNodeView = {
+    session_id: 's', checkpoint: 0, query_id: 1, visited_nodes: 1,
+    root_budget: 10, root_minimum: 2, root_size: 12,
+    summaries: [{ uid: 0, minimum: 2, sample_size: 12 }],
+    options: { uid: 0, leaves: [{ prediction: 0, loss: 2 }], splits: [] },
+  };
+  const signature = nativeNodeViewSignature(base);
+  assert.equal(nativeNodeViewSignature({ ...base, checkpoint: 100, query_id: 200, visited_nodes: 5 }), signature);
+  assert.notEqual(nativeNodeViewSignature({ ...base, root_budget: 11 }), signature);
+  assert.notEqual(nativeNodeViewSignature({ ...base, options: { ...base.options, splits: [{ feature: 3, minimum: 2, left_minimum: 1, right_minimum: 1, left_size: 6, right_size: 6 }] } }), signature);
+  assert.notEqual(nativeNodeViewSignature({ ...base, summaries: [{ uid: 0, minimum: 1, sample_size: 12 }] }), signature);
 });
