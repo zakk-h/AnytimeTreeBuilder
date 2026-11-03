@@ -1919,6 +1919,7 @@ function App() {
   const [nativeReady, setNativeReady] = useState(false);
   const [nativeBusy, setNativeBusy] = useState(false);
   const [nativeRefresh, setNativeRefresh] = useState(0);
+  const [selectedRootBudget, setSelectedRootBudget] = useState<number | null>(null);
   const [datasetPending, setDatasetPending] = useState(false);
   const [enumerationOpen, setEnumerationOpen] = useState(false);
   const [liveAvailable, setLiveAvailable] = useState(false);
@@ -1930,6 +1931,13 @@ function App() {
   const nativeBusyRef = useRef(false);
   nativeBusyRef.current = nativeBusy;
   const active = findNode(snapshot.root, snapshot.activeUid);
+  // Slider decreases filter feasibility without deleting native graph solutions.
+  const displayedGraph = useMemo<AndOrGraph>(() => {
+    if (!liveSession.current || selectedRootBudget === null) return graph;
+    const capped = Math.min(rootBudget(graph), selectedRootBudget);
+    return { ...graph, trie_nodes: graph.trie_nodes.map(node =>
+      node.id === graph.root_trie_id ? { ...node, budget: capped } : node) };
+  }, [graph, selectedRootBudget]);
 
   const loadPayload = (raw: unknown) => {
     const payload = raw as Window['ARBORENUM_BUILDER_PAYLOAD'];
@@ -1943,6 +1951,7 @@ function App() {
     const nextMeta = coerceMeta(payload);
     liveSession.current = '';
     lastNativeViewSignature.current = null;
+    setSelectedRootBudget(null);
     setDatasetPending(false);
     setNativeReady(false); setNativeBusy(false);
     ++nativeRequest.current;
@@ -1959,6 +1968,7 @@ function App() {
   const prepareNative = () => {
     liveSession.current = '';
     lastNativeViewSignature.current = null;
+    setSelectedRootBudget(null);
     nativeAdapter.current = new NativeGraphAdapter();
     nativeQueriedSelection.current = null;
     ++nativeRequest.current;
@@ -2125,6 +2135,10 @@ function App() {
             onPrepare={prepareNative}
             onReady={readyNative}
             onRefresh={() => setNativeRefresh(value => value + 1)}
+            onBudgetFilter={setSelectedRootBudget}
+            currentRootBudget={rootBudget(graph)}
+            currentRootMinimum={trieMinObjective(graph, graph.root_trie_id)}
+            trainingSampleCount={rootSize(graph)}
             querying={nativeBusy}
             canRefresh={nativeReady}
           />
@@ -2156,7 +2170,7 @@ function App() {
         {datasetPending ? <div className="flow-wrap dataset-waiting" role="status"><Network size={38} strokeWidth={1} /><h2>Waiting for your first tree</h2><p>Your new tree will appear here as soon as its first completion is ready.</p></div> : <ReactFlowProvider key={graphGeneration}>
           <div className="flow-wrap">
             <FlowView
-              graph={graph}
+              graph={displayedGraph}
               meta={meta}
               snapshot={snapshot}
               thresholdDecimals={thresholdDecimals}
@@ -2169,7 +2183,7 @@ function App() {
       </div>
 
       {datasetPending ? <aside className="panel dataset-waiting" aria-label="Waiting for dataset options"><CircleDot size={28} strokeWidth={1} /><h3>A fresh start</h3><p>Your split options and objective budget will appear with the new tree.</p></aside> : <SidePanel
-        graph={graph}
+        graph={displayedGraph}
         meta={meta}
         snapshot={snapshot}
         active={active}
@@ -2198,11 +2212,11 @@ function App() {
         onSetActive={(uid) => setSnapshot({ ...snapshot, activeUid: uid })}
         onApplyLeaf={(leafId) => {
           if (!active || (liveSession.current && (nativeBusy || nativeQueriedSelection.current !== snapshot))) return;
-          setWithHistory(applyLeaf(snapshot, graph, active.uid, leafId));
+          setWithHistory(applyLeaf(snapshot, displayedGraph, active.uid, leafId));
         }}
         onApplySplit={(splitId) => {
           if (!active || (liveSession.current && (nativeBusy || nativeQueriedSelection.current !== snapshot))) return;
-          setWithHistory(applySplit(snapshot, graph, active.uid, splitId));
+          setWithHistory(applySplit(snapshot, displayedGraph, active.uid, splitId));
         }}
       />}
     </div>
