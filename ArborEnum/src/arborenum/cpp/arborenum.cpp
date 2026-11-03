@@ -956,6 +956,7 @@ public:
         active.insert(active.end(), more.begin(), more.end());
         sort_unique_ints_inplace_(active);
         RefineVisited visited;
+        LiveFocusGuard focus_guard(*this);
         try {
             RefineGraphDfs(target.node, target.mask, target.depth, target.pk,
                 target.cpath, active, visited);
@@ -1016,6 +1017,12 @@ private:
     std::unordered_map<K2, std::vector<int>, K2::Hash> live_local_thresholds_;
     std::vector<std::pair<int8_t, uint64_t>> active_enumeration_frames_;
     int live_proxy_frames_ = 0;
+    bool live_focusing_ = false;
+    struct LiveFocusGuard {
+        ArborEnum& owner;
+        explicit LiveFocusGuard(ArborEnum& a) : owner(a) { owner.live_focusing_ = true; }
+        ~LiveFocusGuard() { owner.live_focusing_ = false; }
+    };
     struct LiveEnumerationFrame {
         ArborEnum& owner;
         LiveEnumerationFrame(ArborEnum& a, int8_t d, uint64_t key) : owner(a) {
@@ -8724,14 +8731,14 @@ private:
                 node = it->second;
                 if (live_bind) live_bind(node);
 
-                if (budget <= node->budget) {
+                if (!live_focusing_ && budget <= node->budget) {
                     return node;
                 }
             }
         }
 
         if (live_bind && node) live_bind(node);
-        if (node && !launched_by_anytime && budget <= node->budget) {
+        if (node && !live_focusing_ && !launched_by_anytime && budget <= node->budget) {
             return node;
         }
 
