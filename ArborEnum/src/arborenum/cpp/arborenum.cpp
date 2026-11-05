@@ -944,6 +944,8 @@ public:
             (*it)->refresh_live_minimum();
     }
 
+    bool live_in_proxy() const { return live_proxy_depth_ != 0; }
+
     bool live_root_has_solution() const {
         return result && result->min_objective != numeric_limits<int>::max() &&
             result->min_objective <= result->budget;
@@ -964,7 +966,46 @@ public:
 
 
 private:
+    mutable unsigned live_proxy_depth_ = 0;
+
+    // Readers execute on this same owner thread, between completed C++
+    // operations. Descendants may still be empty; readers skip infeasible
+    // alternatives. A proxy computation is deliberately indivisible to readers.
+    void live_yield_() const {
+        if (live_proxy_depth_ != 0) return;
+        if (live_poll) live_poll();
+        if (live_stop_requested && live_stop_requested()) throw LiveEnumerationCancelled();
+    }
+
+    class LiveProxyScope {
+        const ArborEnum& model_;
+    public:
+        explicit LiveProxyScope(const ArborEnum& model) : model_(model) {
+            model_.live_yield_();
+            ++model_.live_proxy_depth_;
+        }
+        ~LiveProxyScope() { --model_.live_proxy_depth_; }
+        LiveProxyScope(const LiveProxyScope&) = delete;
+        LiveProxyScope& operator=(const LiveProxyScope&) = delete;
+    };
+
     std::vector<TreeTrieNode*> live_split_parents_;
+
+    // Refinement can descend through already attached splits without entering
+    // solve_siblings_extend. Keep those ancestors in the same bottom-up refresh
+    // path so a mid-refinement reader sees their current feasible minima too.
+    class LiveReadPath {
+        ArborEnum& model_;
+        bool active_;
+    public:
+        LiveReadPath(ArborEnum& model, TreeTrieNode* node)
+            : model_(model), active_(bool(model.live_poll)) {
+            if (active_) model_.live_split_parents_.push_back(node);
+        }
+        ~LiveReadPath() { if (active_) model_.live_split_parents_.pop_back(); }
+        LiveReadPath(const LiveReadPath&) = delete;
+        LiveReadPath& operator=(const LiveReadPath&) = delete;
+    };
 
     // Transactional, incremental attachment. The native graph owns each child
     // as soon as construct_trie_extend chooses its canonical (possibly cached)
@@ -1108,7 +1149,6 @@ private:
 
     // enabled only by fit_then_extend and the explicit anytime algorithm.
     // negative values mean that the corresponding limit is disabled.
-    mutable uint32_t live_poll_ticks_ = 0;
     bool resource_limits_active_ = false;
     double runtime_limit_seconds_ = -1.0;
     double memory_limit_mb_ = -1.0;
@@ -1276,6 +1316,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (lookahead_init < 0) {
             return leaf_objective(mask);
         }
@@ -1299,7 +1340,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
-        if (live_poll) live_poll();
+        LiveProxyScope live_proxy_scope(*this);
         // if greedy is feature-restricted, always use the existing binary feature loop.
         if (restrict_proxy_in_greedy) {
             return train_greedy(mask, depth_budget, pk);
@@ -1412,6 +1453,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (use_restricted_depthd_exact_proxy_()) {
             return depthd_exact_solver_cached(mask, depth, pk);
         }
@@ -1435,7 +1477,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
-        if (live_poll) live_poll();
+        LiveProxyScope live_proxy_scope(*this);
         if (use_restricted_lickety_proxy_()) {
             if (proxy_style == 4) {
                 return split_algorithm(mask, depth, k, pk);
@@ -1554,8 +1596,7 @@ private:
     }
 
     bool resource_limit_reached_() const {
-        if (live_poll) live_poll();
-        if (live_stop_requested && live_stop_requested()) throw LiveEnumerationCancelled();
+        live_yield_();
         if (!resource_limits_active_) {
             return false;
         }
@@ -5427,6 +5468,7 @@ private:
         std::unordered_set<const TreeTrieNode*>& visited,
         TrieNodeProxyGapSummary& summary
     ) {
+        live_yield_();
         if (!node) {
             return;
         }
@@ -5478,6 +5520,7 @@ private:
         Packed right_mask(n_words);
 
         for (const auto& split : node->splits) {
+            live_yield_();
             if (!split.left || !split.right) {
                 continue;
             }
@@ -5572,6 +5615,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth <= 0 || lookahead_init < 0) {
             return leaf_objective(mask);
         }
@@ -5660,6 +5704,7 @@ private:
         std::unordered_set<const TreeTrieNode*>& visited,
         ProxyGapSummary& summary
     ) {
+        live_yield_();
         if (!node || depth <= 0) {
             return;
         }
@@ -5679,6 +5724,7 @@ private:
         Packed right_mask(n_words);
 
         for (const SplitNode& split : node->splits) {
+            live_yield_();
             if (!split.left || !split.right) {
                 continue;
             }
@@ -6368,6 +6414,7 @@ private:
     // a wrapper equivalent of ContinuousRSet
     // as seen just below, if we need to extend a graph to a bigger budget, we switch over to this construct_trie_extend method, which is an exact implementation of ContinuousRSet
     shared_ptr<TreeTrieNode> construct_trie(const Packed& mask, int8_t depth, int budget, const PathKey& pk, const ContinuousPath& cpath = empty_continuous_path(), const std::vector<int>* active_features = nullptr, const std::function<void(const shared_ptr<TreeTrieNode>&)>& live_bind = {}) {
+        live_yield_();
         // testing something
         auto node = std::make_shared<TreeTrieNode>();
         // force construct_trie_extend to treat this as an unsolved node.
@@ -6404,6 +6451,7 @@ private:
         Packed& R,
         const std::vector<int>* active_features
     ) {
+        live_yield_();
         if (!active_features || start_idx >= end_idx) return;
 
         const auto active_lo = std::lower_bound(
@@ -6443,6 +6491,7 @@ private:
         Q.push_back({0, (int)active_thresholds.size() - 1});
 
         while (!Q.empty()) {
+            live_yield_();
             auto [i, j] = Q.front();
             Q.pop_front();
 
@@ -6832,6 +6881,7 @@ private:
         std::unordered_set<int>& already_split,
         const std::vector<int>* active_features
     ) {
+        live_yield_();
         if (!node || !active_features || start_idx >= end_idx) return;
 
         // for (int f : *active_features) {
@@ -7133,6 +7183,7 @@ private:
             }
 
             while (it != pruned_intervals.end() && it->first <= hi + 1) {
+                live_yield_();
                 hi = std::max(hi, it->second);
                 it = pruned_intervals.erase(it);
             }
@@ -7145,6 +7196,7 @@ private:
         // it either solves it for the first time or resolves it (pruning that index too).
         // if it isn't feasible, it finds the pruned interval
         for (auto it = it0; it != evaluated.end() && it->first < end_idx; ++it) {
+            live_yield_();
             const int feat = it->first;
 
             auto pos_it = std::lower_bound(
@@ -7210,7 +7262,8 @@ private:
         { 
             int cur = M_L; 
             const int last = M_R; 
-            for (const auto& kv : pruned_intervals) { 
+            for (const auto& kv : pruned_intervals) {
+                live_yield_();
                 const int lo = kv.first; 
                 const int hi = kv.second; 
                 if (cur <= lo - 1) { 
@@ -7225,6 +7278,7 @@ private:
         }
 
         while (!Q.empty()) {
+            live_yield_();
             auto [i, j] = Q.front(); 
             Q.pop_front(); 
             i = std::max(i, M_L); 
@@ -7488,6 +7542,8 @@ private:
     ) {
         
         if (!G) return;
+        LiveReadPath live_path(*this, G.get());
+        live_yield_();
 
         TreeTrieNode* node_ptr = G.get();
 
@@ -7527,6 +7583,7 @@ private:
 
         // post-order: first refine children of the splits that already existed.
         for (std::size_t idx = 0; idx < split_count_before; ++idx) {
+            live_yield_();
             SplitNode& s = G->splits[idx];
 
             if (!s.left && !s.right) {
@@ -7672,6 +7729,7 @@ private:
         ContinuousPath pi_cur = materialize_continuous_path_(cpath);
 
         for (int cont_pos = 0; cont_pos < (int)continuous_starts.size(); ++cont_pos) {
+            live_yield_();
             const int raw_start_idx = continuous_starts[(std::size_t)cont_pos];
 
             const int raw_end_idx =
@@ -8022,6 +8080,7 @@ private:
         Packed& L,
         Packed& R
     ){
+        live_yield_();
         // continuous threshold group is [start_idx, end_idx).
         // threshold columns are already binarized and monotone ordered.
         if (start_idx >= end_idx) return;
@@ -8044,6 +8103,7 @@ private:
         int M_R = end_idx - 1;
 
         while (!Q.empty()) {
+            live_yield_();
             auto [i, j] = Q.front();
             Q.pop_front();
 
@@ -8290,6 +8350,7 @@ private:
                int budget, int8_t depth,
                const PathKey& pkL, const PathKey& pkR,
                const ContinuousPath& cpathL, const ContinuousPath& cpathR) {
+        live_yield_();
         int left_budget  = budget - loss_r;
         shared_ptr<TreeTrieNode> left_node =
             (left_budget >= 0) ? construct_trie(Lmask, depth - 1, left_budget, pkL, cpathL)
@@ -8303,6 +8364,7 @@ private:
         int min_right = (right_node ? right_node->min_objective : numeric_limits<int>::max());
 
         while (true) {
+            live_yield_();
             bool improved = false;
 
             int new_left_budget = (min_right == numeric_limits<int>::max()) ? -1 : (budget - min_right);
@@ -8338,6 +8400,7 @@ private:
                  int budget, int8_t depth,
                  const PathKey& pkL, const PathKey& pkR,
                  const ContinuousPath& cpathL, const ContinuousPath& cpathR) {
+        live_yield_();
         int left_budget  = budget - loss_r;
         int right_budget = budget - loss_l;
 
@@ -8391,6 +8454,7 @@ private:
         const std::vector<int>* active_features = nullptr,
         bool launched_by_anytime = false
     ) {
+        live_yield_();
         LiveSplitAttachment attachment(*this, parent.get(), feature, left_node, right_node);
         auto solve_or_extend = [&](
             shared_ptr<TreeTrieNode>& node,
@@ -8459,6 +8523,7 @@ private:
             int new_first_budget = budget - second_loss;
 
             while (new_first_budget > first_budget) {
+                live_yield_();
                 first_budget = new_first_budget;
 
                 first_node = solve_or_extend(
@@ -8582,6 +8647,7 @@ private:
 
     // the expected implementation of ContinuousRSet. here, we have active_thresholds (active_features) and directly extend a given node (or we can look up a better one if it exists).
     shared_ptr<TreeTrieNode> construct_trie_extend(shared_ptr<TreeTrieNode> node, const Packed& mask, int8_t depth, int budget, const PathKey& pk, const ContinuousPath& cpath = empty_continuous_path(), const std::vector<int>* active_features = nullptr, bool launched_by_anytime = false, const std::function<void(const shared_ptr<TreeTrieNode>&)>& live_bind = {}) {
+        live_yield_();
         // if (!node) {
         //     return construct_trie(mask, depth, budget, pk, cpath,  active_features);
         // }
@@ -8625,6 +8691,7 @@ private:
             existing_leaf_preds.reserve(node->leaves.size() * 2 + 4);
 
             for (const auto& leaf : node->leaves) {
+                live_yield_();
                 existing_leaf_preds.insert(leaf.prediction);
             }
 
@@ -8701,6 +8768,7 @@ private:
 
                 if (!majority_leaf_only) {
                     for (int c = 0; c < num_classes; ++c) {
+                        live_yield_();
                         const int mis =
                             n_sub - cnts[(size_t)c];
 
@@ -8720,6 +8788,7 @@ private:
                     int best_cnt = cnts[0];
 
                     for (int c = 1; c < num_classes; ++c) {
+                        live_yield_();
                         const int v = cnts[(size_t)c];
 
                         if (
@@ -8792,6 +8861,7 @@ private:
 
         // continuous groups, already fully binarized
         for (int cont_pos = 0; cont_pos < (int)continuous_starts.size(); ++cont_pos) {
+            live_yield_();
             const int raw_start_idx = continuous_starts[(size_t)cont_pos];
 
             const int raw_end_idx = (cont_pos + 1 < (int)continuous_starts.size())
@@ -8850,6 +8920,7 @@ private:
         }
 
         for (int f = 0; f < first_continuous_feature; ++f) {
+            live_yield_();
             if (already_split.count(f)) {
                 // if this happens, we still need to do the extended solve siblings because we have a bigger budget
                 auto it = std::find_if(
@@ -9095,6 +9166,7 @@ private:
         Packed& R,
         std::unordered_set<int>& already_split
     ){
+        live_yield_();
         // continuous threshold group is [start_idx, end_idx).
         // threshold columns are already binarized and monotone ordered.
         if (start_idx >= end_idx) return;
@@ -9118,6 +9190,7 @@ private:
         int M_R = end_idx - 1;
 
         while (!Q.empty()) {
+            live_yield_();
             auto [i, j] = Q.front();
             Q.pop_front();
 
@@ -9638,9 +9711,7 @@ private:
     }
 
     int leaf_objective(const Packed& mask) const {
-        // Bound query latency even inside a long proxy solve, without performing
-        // a callback on every leaf evaluation. Only the owner thread services it.
-        if (live_poll && ((++live_poll_ticks_ & 255U) == 0)) live_poll();
+        live_yield_();
         return best_leaf_action(mask).loss;
     }
 
@@ -10040,6 +10111,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) {
             return leaf_objective(mask);
         }
@@ -10069,6 +10141,7 @@ private:
         int current_best,
         ContinuousEvalMode eval_mode
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         // unlike rashomon, if we are just current best at best, can prune. can also update current best
         ContinuousBestSplitResult out;
         out.best_sum = current_best;
@@ -10294,6 +10367,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget == 0) {
             return leaf_objective(mask);
         }
@@ -10610,6 +10684,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) {
             return leaf_objective(mask);
         }
@@ -10833,6 +10908,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         constexpr int8_t depth_budget = 1;
 
         K2 key{0, depth_budget};
@@ -11522,6 +11598,7 @@ private:
         int8_t depth_budget,
         const PathKey& pk
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (numerical_X_cols_for_greedy.size() != continuous_starts.size() ||
             numerical_global_sorted_idx.size() != continuous_starts.size() ||
             numerical_unique_values_for_greedy.size() != continuous_starts.size()) {
@@ -11972,6 +12049,7 @@ private:
         const PathKey& pk,
         const NumericalGreedyState& state
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) {
             return leaf_objective(mask);
         }
@@ -12235,6 +12313,7 @@ private:
         const PathKey& pk,
         const NumericalGreedyState& state
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         constexpr int8_t DEPTH = 1;
 
         uint64_t kmask = 0;
@@ -12655,6 +12734,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) {
             return leaf_objective(mask);
         }
@@ -12874,6 +12954,7 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath = empty_continuous_path()
     ) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) {
             return GreedyObjFirstSplit{leaf_objective(mask), -1};
         }
@@ -13099,6 +13180,7 @@ private:
     // these are now existing binary algorithms - nothing new exists beyond this point. our contribution ends here.
 
     int train_greedy(const Packed& mask, int8_t depth_budget, const PathKey& pk) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget == 0) {
             return leaf_objective(mask);
         }
@@ -13198,6 +13280,7 @@ private:
     }
 
     int eval_with_lookahead(const Packed& m, int depth, int k, const PathKey& pk) {
+        LiveProxyScope live_proxy_scope(*this);
         if (k <= 0) return greedy_proxy_objective_(m, depth, pk);
         return generalized_lickety_split(m, depth, k, pk);
     }
@@ -13226,6 +13309,7 @@ private:
     }
 
     int depth1_exact_solver_cached(const Packed& mask, const PathKey& pk) {
+        LiveProxyScope live_proxy_scope(*this);
         constexpr int8_t DEPTH = 1;
         constexpr int8_t KTAG  = 0;
 
@@ -13393,6 +13477,7 @@ private:
 
 
     int depth2_special_solver_cached(const Packed& mask, const PathKey& pk){
+        LiveProxyScope live_proxy_scope(*this);
         constexpr int8_t DEPTH = 2;
         constexpr int8_t KTAG  = 1;
 
@@ -13594,6 +13679,7 @@ private:
 
 
     int depthd_exact_solver_cached(const Packed& mask, int8_t depth_budget, const PathKey& pk) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) return leaf_objective(mask);
         if (depth_budget == 1) return depth1_exact_solver_cached(mask, pk);
         if (depth_budget == 2) return depth2_special_solver_cached(mask, pk);
@@ -13818,6 +13904,7 @@ private:
     // our modified lickety_split algorithm that is O(nk^2d^2). 
     int lickety_split_k1(const Packed& mask, int8_t depth_budget, const PathKey& pk)
     {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget == 0) return leaf_objective(mask);
         const bool depthd_mode_matches_lickety = use_restricted_depthd_exact_proxy_();
 
@@ -13947,6 +14034,7 @@ private:
 
     // a generalized lickety_split algorithm with a lookahead parameter k. we also support other proxy styles here (such as recursively applying split) that have the same flavor.
     int generalized_lickety_split(const Packed& mask, int8_t depth_budget, int8_t k, const PathKey& pk) {
+        LiveProxyScope live_proxy_scope(*this);
         // only do this call if also anytime is false to allow for proxy strength refinement
         if (!anytime_mode_active_ && k == 1 && lookahead_init == 1 && proxy_style == 0) {
             return lickety_split_k1(mask, depth_budget, pk);
@@ -14122,6 +14210,7 @@ private:
     }
 
     int split_algorithm(const Packed& mask, int8_t depth_budget, int8_t k, const PathKey& pk) {
+        LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) return leaf_objective(mask);
         if (k > depth_budget - 1) k = depth_budget - 1; // same amount of computation is optimal
         if (k == depth_budget - 1) {
@@ -14227,6 +14316,7 @@ private:
         int bb_wrong_total,
         bool use_entropy
     ) const {
+        LiveProxyScope live_proxy_scope(*this);
         if (n_sub <= 1) return -1;
 
         const Packed& Ypos = Y_bits[(size_t)1];
@@ -14370,6 +14460,7 @@ private:
         const Packed& mask,
         bool use_entropy
     ) const {
+        LiveProxyScope live_proxy_scope(*this);
         int n_sub = 0;
         int pos_total = 0;
         int bb_wrong_total = 0;
@@ -14392,6 +14483,7 @@ private:
 
 
     int find_best_split(const Packed& mask, bool use_entropy) const {
+        LiveProxyScope live_proxy_scope(*this);
         if (num_classes == 2) {
             return find_best_split_binary(mask, use_entropy);
         }

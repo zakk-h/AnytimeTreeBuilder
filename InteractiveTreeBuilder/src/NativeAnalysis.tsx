@@ -38,9 +38,9 @@ function Violin({ values }: { values: number[] }) {
     <text x="150" y="273" textAnchor="middle">Sample disagreement</text>
   </svg>;
 }
-export function NativeAnalysis({ session, tree, disabled, abstain, onBusyChange }: { session: string; tree: BuildNode; disabled: boolean; abstain: boolean; onBusyChange: (busy: boolean) => void }) {
+export function NativeAnalysis({ session, tree, disabled, onBusyChange }: { session: string; tree: BuildNode; disabled: boolean; onBusyChange: (busy: boolean) => void }) {
   const [open, setOpen] = useState(false), [result, setResult] = useState<Result | null>(null), [busy, setBusy] = useState(false);
-  const [error, setError] = useState(''), [leaves, setLeaves] = useState(''), [abstained, setAbstained] = useState('');
+  const [error, setError] = useState('');
   const request = useRef<AbortController | null>(null), token = useRef(''), modal = useRef<HTMLElement>(null), previousFocus = useRef<HTMLElement | null>(null);
   const cancel = () => {
     request.current?.abort(); request.current = null;
@@ -52,22 +52,15 @@ export function NativeAnalysis({ session, tree, disabled, abstain, onBusyChange 
   useEffect(() => { onBusyChange(busy); }, [busy, onBusyChange]);
   useEffect(() => { if (open) modal.current?.querySelector<HTMLButtonElement>('button')?.focus(); }, [open]);
   const run = async () => {
-    const options: { maxLeaves?: number; maxAbstainedSamples?: number } = {};
-    for (const [raw, name, min] of [[leaves, 'maxLeaves', 1], [abstained, 'maxAbstainedSamples', 0]] as const) {
-      if (raw === '') continue;
-      const value = Number(raw);
-      if (!Number.isInteger(value) || value < min || value > 2147483647) { setError('Caps must be whole numbers within the engine range.'); return; }
-      options[name] = value;
-    }
     cancel(); const controller = new AbortController(); request.current = controller; token.current = crypto.randomUUID();
     setBusy(true); setError(''); setResult(null);
     try {
-      const response = await nativeApi<Result>('analyze', session, { tree, options, analysis_token: token.current }, controller.signal);
+      const response = await nativeApi<Result>('analyze', session, { tree, analysis_token: token.current }, controller.signal);
       if (!controller.signal.aborted) setResult(response);
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : String(e)); }
     finally { if (request.current === controller) { setBusy(false); request.current = null; token.current = ''; } }
   };
-  return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Open a dataset session to analyze its native graph' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); }}><BarChart3 size={16}/> Analyze</button>
+  return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Open a dataset session to analyze its native graph' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); void run(); }}><BarChart3 size={16}/> Analyze</button>
     {open && createPortal(<div className="analysis-overlay" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
       <section className="analysis-dialog" ref={modal} role="dialog" aria-modal="true" aria-labelledby="analysis-title" onKeyDown={e => {
         if (e.key === 'Escape') { e.stopPropagation(); close(); }
@@ -79,15 +72,12 @@ export function NativeAnalysis({ session, tree, disabled, abstain, onBusyChange 
         }
       }}>
         <header><div><h2 id="analysis-title">Analyze partial tree</h2><p>All represented completions of the whole current tree, preserving your selected splits and leaves.</p></div><button className="ghost-button" aria-label="Close analysis" onClick={close}><X size={20}/></button></header>
-        <div className="analysis-controls"><label>Maximum leaves<input aria-label="Analysis maximum leaves" type="number" min="1" step="1" placeholder="No cap" value={leaves} disabled={busy} onChange={e => { setLeaves(e.target.value); setResult(null); }}/></label>
-          {abstain && <label>Maximum abstained samples<input aria-label="Analysis maximum abstained samples" type="number" min="0" step="1" placeholder="No cap" value={abstained} disabled={busy} onChange={e => { setAbstained(e.target.value); setResult(null); }}/></label>}
-          <button className="primary-button" disabled={busy} onClick={() => void run()}>Calculate exact ranges</button>{busy && <button className="ghost-button" onClick={cancel}>Cancel analysis</button>}
-        </div>
-        {busy && <p role="status">Calculating exact counts and all-permutation ranges. Enumeration pauses at a safe checkpoint during this query.</p>}
-        {error && <p role="alert" className="upload-error">{error}</p>}
+        {busy && <button className="ghost-button" onClick={close}>Cancel analysis</button>}
+        {busy && <p role="status">Calculating exact counts and all-permutation ranges. Enumeration pauses while analysis reads the graph.</p>}
+        {error && <><p role="alert" className="upload-error">{error}</p><button className="primary-button" onClick={() => void run()}>Retry analysis</button></>}
         {result && <>
           <div className="analysis-metrics"><div><span>Feasible completions</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>Accuracy on predicted samples</span><b>{result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Training samples</span><b>{result.sample_count.toLocaleString()}</b></div></div>
-          <p className="analysis-note">Exact for the currently enumerated graph at checkpoint {result.checkpoint}. Trees are weighted uniformly; no completed trees or permutations were sampled. {result.accuracy.undefined_count !== '0' && `${countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.`}</p>
+          <p className="analysis-note">Exact for the graph available when analysis began. Trees are weighted uniformly; no completed trees or permutations were sampled. {result.accuracy.undefined_count !== '0' && `${countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.`}</p>
           <section><h3>Feature importance ranges</h3><p>Expected increase in loss over all permutations of one dataset feature, without refitting. Abstain contributes its configured cost; leaf penalties are excluded. Values are percentage points.</p>
             <table className="analysis-importance"><thead><tr><th>Feature</th><th>Minimum</th><th>Maximum</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{(100 * f.min).toFixed(3)}</td><td>{(100 * f.max).toFixed(3)}</td></tr>)}</tbody></table>
           </section>

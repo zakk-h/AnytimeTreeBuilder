@@ -2136,7 +2136,7 @@ function App() {
           {uploadError && <p className="upload-error workspace-error" role="alert">{uploadError}</p>}
 
           <div className="header-actions">
-            <NativeAnalysis session={liveSession.current} tree={snapshot.root} disabled={!nativeReady || datasetPending || nativeBusy} abstain={Boolean(meta.use_deferral)} onBusyChange={setAnalysisBusy}/>
+            <NativeAnalysis session={liveSession.current} tree={snapshot.root} disabled={!nativeReady || datasetPending || nativeBusy} onBusyChange={setAnalysisBusy}/>
             {!datasetPending && <BuilderSettingsMenu
               graph={graph}
               meta={meta}

@@ -40,4 +40,4 @@ For the smaller browser-based version, run `./build.sh` and `./launch.sh`, then 
 
 [Native engine and tests](ArborEnum/native/README.md) · [Frontend development](InteractiveTreeBuilder/README.md) · [Source provenance](PROVENANCE.md)
 
-**Constrained** completion supports optional leaf and abstained-sample caps. **Analyze** reports exact feature-importance and accuracy ranges, leaf/abstention distributions, and a sample-disagreement violin for completions of your current partial tree.
+**Constrained** completion supports optional leaf and abstained-sample caps. **Analyze** starts automatically on opening and reports exact feature-importance and accuracy ranges, leaf/abstention distributions, and a sample-disagreement violin for completions of your current partial tree.

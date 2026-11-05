@@ -91,6 +91,7 @@ static void incremental_attachment(bool cache, int cancel_stage = 0) {
     std::vector<json> selected_trees;
     model.live_stop_requested = [&] { return cancel; };
     model.live_poll = [&] {
+        require(!model.live_in_proxy(), "Query callback interrupted a proxy call");
         if (!model.result) return;
         model.live_refresh_in_progress();
         if (!model.live_root_has_solution()) return;
@@ -129,6 +130,7 @@ static void incremental_attachment(bool cache, int cancel_stage = 0) {
     };
     bool cancelled = false;
     try { fit(model); } catch (const LiveEnumerationCancelled&) { cancelled = true; }
+    require(!model.live_in_proxy(), "Proxy nesting was not restored after solver exit");
     require(saw_null, "No split was attached before child construction");
     require(cancelled == (cancel_stage != 0), "Cancellation was not delivered during attachment");
     if (cancel_stage != 1) require(saw_growing, "No split became visible while descendants were still growing");
@@ -221,6 +223,7 @@ static void initial_root(bool split_only, int cancel_stage = 0) {
     model.live_checkpoint = [&] { checkpoint = true; };
     model.live_stop_requested = [&] { return cancel; };
     model.live_poll = [&] {
+        require(!model.live_in_proxy(), "Query callback interrupted a proxy call");
         if (!model.result || checkpoint) return;
         model.live_refresh_in_progress();
         GraphQueries query(model, meta);
@@ -485,6 +488,30 @@ static void profile_fixture(bool continuous) {
         auto starts = model.get_continuous_starts(); auto cuts = model.get_continuous_cutpoints(0);
         for (size_t i = 0; i < cuts.size(); ++i) registry.push_back({{"internalFeature", starts.at(0) + i}, {"originalFeature", 0}, {"threshold", cuts[i]}});
     } else registry.push_back({{"internalFeature", 1}, {"originalFeature", 1}, {"threshold", 0}});
+    // Readers must tolerate partially built alternatives with null children,
+    // allocated-but-empty children, and finite children exceeding the budget.
+    // They contribute neither options, completions nor any analysis statistics.
+    {
+        GraphQueries query(model, meta, {}, &data);
+        const auto before = query.analyze(root(), json::object());
+        const auto view = query.view(root(), 0);
+        const auto split_count = model.result->splits.size();
+        auto empty = std::make_shared<TreeTrieNode>(); empty->budget = model.result->budget;
+        auto costly = std::make_shared<TreeTrieNode>(); costly->budget = model.result->budget + 10;
+        costly->add_leaf(0, costly->budget);
+        auto valid = std::make_shared<TreeTrieNode>(); valid->budget = model.result->budget; valid->add_leaf(0, 1);
+        model.result->splits.push_back({0, nullptr, nullptr});
+        model.result->splits.push_back({0, empty, valid});
+        model.result->splits.push_back({0, costly, valid});
+        require(query.view(root(), 0) == view, "Unfinished alternatives changed selectable options");
+        require(query.analyze(root(), json::object()) == before, "Unfinished alternatives changed analysis statistics");
+        for (const std::string mode : {"optimal", "random", "constrained"}) {
+            const json constraint = mode == "constrained" ? json{{"mode", "avoid"}, {"maxLeaves", 4}} : json::object();
+            auto result = query.complete(root(), 0, 1, mode, constraint, 42);
+            require(cost(model.result.get(), result["tree"]) <= model.result->budget, "Completion used an infeasible alternative");
+        }
+        model.result->splits.resize(split_count);
+    }
     const auto all = enumerate(model.result.get(), {}, json::object(), -1);
     require(all.size() > 10, "Analysis fixture had too few trees");
     const auto& selected = model.result->splits.front();

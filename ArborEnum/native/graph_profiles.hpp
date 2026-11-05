@@ -76,7 +76,7 @@ class GraphProfiles {
         if (kind == "leaf") return;
         for (const auto& split : k.node->splits) {
             check_();
-            if (!split.left || !split.right || forbidden_.count(split.feature)) continue;
+            if (!TreeTrieNode::split_has_solution(split, k.node->budget) || forbidden_.count(split.feature)) continue;
             if (kind == "split" && split.feature != k.fixed->at("feature").get<int>()) continue;
             bool ls = k.sample, rs = k.sample;
             if (auto found = truth_.find(split.feature); k.sample && found != truth_.end()) { ls = found->second; rs = !found->second; }
