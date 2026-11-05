@@ -9,7 +9,7 @@ import { TrainingFields } from './TrainingFields';
 
 type Status = {
   session_id: string; phase: string; error: string; stop_requested: boolean;
-  checkpoint: number; ready: boolean; query_count: number; elapsed_seconds: number;
+  checkpoint: number; ready: boolean; elapsed_seconds: number;
 };
 const finished = (s: Status) => ['finished', 'stopped', 'failed'].includes(s.phase);
 
@@ -112,7 +112,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   };
   return <div className="live-enumeration">
     {status && <>
-      <span className="live-progress" role="status">{status.stop_requested && !finished(status) ? 'Stopping…' : status.phase} · {Math.floor(status.elapsed_seconds)}s · {status.ready ? `${status.query_count} native queries` : 'waiting for first feasible tree'}</span>
+      <span className="live-progress" role="status">{status.stop_requested && !finished(status) ? 'Stopping…' : status.phase} · {Math.floor(status.elapsed_seconds)}s{!status.ready && ' · waiting for first feasible tree'}</span>
       <button className="ghost-button" disabled={querying || !status.ready || !canRefresh} onClick={onRefresh}><RefreshCw size={15} className={querying ? 'live-spin' : ''} /> {querying ? 'Updating options…' : 'Update options'}</button>
       {running && <button className="ghost-button" disabled={status.stop_requested} onClick={async () => {
         try { const current = await api<Status>(`/api/stop?session_id=${status.session_id}`, {}); if (current) setStatus(current); }
