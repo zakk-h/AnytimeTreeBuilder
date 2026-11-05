@@ -109,7 +109,7 @@ async function exerciseTraining(page) {
   assert.equal(await mistakesRow.locator('b').textContent(), '2/10');
   const abstentionRow = page.locator('.budget-box > div').filter({ has: page.locator('span', { hasText: /^abstention rate$/ }) });
   assert.equal(await abstentionRow.locator('b').textContent(), '50%');
-  const objectiveRow = page.locator('.metric').filter({ has: page.locator('span', { hasText: /^current lower bound$/ }) });
+  const objectiveRow = page.locator('.metric-grid > .metric').first();
   assert.equal(await objectiveRow.locator('b').textContent(), '0.35', 'Abstention summary changes altered the selected tree objective');
 
   assert.equal(await page.evaluate(async () => (await (await fetch('/api/session')).json()).full_graph_exports), 0);
