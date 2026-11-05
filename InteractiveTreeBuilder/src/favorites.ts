@@ -288,7 +288,7 @@ function completedAccuracyFromDom(): string | undefined {
   if (!completed) return undefined;
 
   for (const row of completed.querySelectorAll<HTMLElement>('.budget-box > div')) {
-    if (row.querySelector('span')?.textContent?.trim().toLowerCase() === 'accuracy') {
+    if (row.querySelector('span')?.textContent?.trim().toLowerCase().startsWith('accuracy')) {
       return row.querySelector('b')?.textContent?.trim() || undefined;
     }
   }

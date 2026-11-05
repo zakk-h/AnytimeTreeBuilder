@@ -23,12 +23,12 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
       {number('memory_limit_mb', 'Memory limit (MB)', '-1 for unlimited.', -1)}
       {select('proxy_mode', 'Proxy mode', [['binarized', 'Binarized'], ['hybrid', 'Hybrid'], ['continuous', 'Continuous']])}
     </div>
+    <div className="training-abstain">
+      {toggle('allow_abstain', 'Allow Abstain leaves', 'Allow trees to not predict on a training sample if the subregion is impure.')}
+      {s.allow_abstain && number('abstain_cost', 'Abstention cost', 'Cost per abstained sample, in addition to the leaf penalty.')}
+    </div>
     <details className="training-advanced">
       <summary>Advanced training settings</summary>
-      <div className="training-abstain">
-        {toggle('allow_abstain', 'Allow Abstain leaves', 'Abstain uses the exact target label for each training sample instead of a single class prediction. It does not learn labels for unseen data.')}
-        {s.allow_abstain && number('abstain_cost', 'Abstention cost', 'Cost per abstained sample, in addition to the leaf penalty. Zero makes full abstention optimal when feasible.')}
-      </div>
       <h3>Objective and search</h3>
       <div className="live-fields">
         {number('lookahead_k', 'Lookahead depth', 'Higher values improve the initial proxy at greater search cost.', 0, s.depth_budget, 1)}

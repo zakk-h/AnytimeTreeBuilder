@@ -7,10 +7,11 @@ async function exerciseTraining(page) {
   await page.locator('.live-file input').setInputFiles({ name: 'abstain.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) });
   await page.getByLabel('Maximum depth', { exact: true }).fill('0');
   await page.getByLabel('Leaf penalty', { exact: true }).fill('.05');
-  assert.equal(await page.getByLabel('Allow Abstain leaves', { exact: true }).isVisible(), false);
-  await page.locator('summary').filter({ hasText: 'Advanced training settings' }).click();
+  assert.equal(await page.getByLabel('Allow Abstain leaves', { exact: true }).isVisible(), true);
   await page.getByLabel('Allow Abstain leaves', { exact: true }).check();
   await page.getByLabel('Abstention cost', { exact: true }).fill('.25');
+  await page.locator('summary').filter({ hasText: 'Advanced training settings' }).click();
+
   await page.getByLabel('Subproblem identity', { exact: true }).selectOption('hash128');
   await page.getByLabel('Proxy search style', { exact: true }).selectOption('3');
   await page.getByLabel('Maximum refinement rounds', { exact: true }).fill('0');
@@ -42,8 +43,10 @@ async function exerciseTraining(page) {
   await page.getByRole('button', { name: 'Optimal', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('.native-query-status'));
   await page.locator('.arborenum-node-leaf .node-title').filter({ hasText: /^Abstain$/ }).waitFor();
-  assert.ok((await page.locator('.node-subtitle').allTextContents()).some(text => text.includes('exact training labels')));
-  assert.ok((await page.locator('.budget-box').allTextContents()).some(text => text.includes('training accuracy (with oracle)') && text.includes('abstention rate') && text.includes('20/20')));
+  assert.ok((await page.locator('.node-subtitle').allTextContents()).some(text => text.includes('no prediction')));
+  assert.ok((await page.locator('.budget-box').allTextContents()).some(text => text.includes('accuracy (predicted samples)') && text.includes('abstention rate') && text.includes('20/20')));
+  const accuracyRow = page.locator('.budget-box > div').filter({ has: page.locator('span', { hasText: /^accuracy \(predicted samples\)$/ }) });
+  assert.equal(await accuracyRow.locator('b').textContent(), '—');
   const meta = await page.evaluate(async sid => (await fetch('/api/meta?session_id=' + sid)).json(), sid);
   assert.equal(meta.abstain_uses_labels, true);
   assert.equal(meta.eta_defer, .25);
@@ -86,9 +89,32 @@ async function exerciseTraining(page) {
   const zero = await minimumCompletion(0);
   assert.notEqual(zero.tree.prediction, -1);
   assert.equal(zero.objective, 11);
+  assert.equal(await accuracyRow.locator('b').textContent(), '50%');
+  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Upload dataset' }).click();
+  const mixedCsv = 'group,label\n' + Array.from({ length: 20 }, (_, i) => `${i < 10 ? 0 : 1},${i < 10 ? (i < 8 ? 'no' : 'yes') : (i % 2 ? 'yes' : 'no')}`).join('\n');
+  await page.locator('.live-file input').setInputFiles({ name: 'mixed-abstain.csv', mimeType: 'text/csv', buffer: Buffer.from(mixedCsv) });
+  await page.getByLabel('Maximum depth', { exact: true }).fill('1');
+  const mixedPosted = page.waitForResponse(r => r.url().endsWith('/api/session') && r.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Start ArborEnum', exact: true }).click();
+  const mixedId = (await (await mixedPosted).json()).session_id;
+  await page.waitForFunction(sid => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.graph?.metadata?.session_id === sid, mixedId);
+  await page.locator('.split-choice').first().click();
+  await page.locator('.leaf-choice').filter({ has: page.locator('.choice-card-main', { hasText: /^(predict )?(0|no)$/ }) }).click();
+  await page.waitForFunction(() => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.graph?.metadata?.active_uid === 2);
+  await page.locator('.leaf-choice').filter({ has: page.locator('.choice-card-main', { hasText: /^Abstain$/ }) }).click();
+  await accuracyRow.waitFor();
+  assert.equal(await accuracyRow.locator('b').textContent(), '80%');
+  const mistakesRow = page.locator('.budget-box > div').filter({ has: page.locator('span', { hasText: /^mistakes$/ }) });
+  assert.equal(await mistakesRow.locator('b').textContent(), '2/10');
+  const abstentionRow = page.locator('.budget-box > div').filter({ has: page.locator('span', { hasText: /^abstention rate$/ }) });
+  assert.equal(await abstentionRow.locator('b').textContent(), '50%');
+  const selectedLoss = await page.evaluate(() => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD.graph.leaf_nodes.reduce((sum, leaf) => sum + leaf.loss, 0));
+  assert.equal(selectedLoss, 7, 'Abstention summary changes altered the objective');
+
   assert.equal(await page.evaluate(async () => (await (await fetch('/api/session')).json()).full_graph_exports), 0);
   console.log('Minimum-abstention UI finds zero when feasible and preserves the lowest possible rate under a tight budget');
-  console.log('Abstain labels, exact-label objective, oracle-aware summary, depth zero, advanced controls and native settings round-trip passed');
+  console.log('Abstain labels, exact-label objective, prediction-only accuracy including mixed and fully abstained trees, depth zero, advanced controls and native settings round-trip passed');
 }
 async function exerciseStop(page) {
   await page.getByRole('button', { name: 'Upload', exact: true }).click();

@@ -583,8 +583,9 @@ function completedTreeStats(
       totalN: number;
       leafN: number;
       deferredN: number;
+      predictedN: number;
       mistakes: number;
-      accuracy: number;
+      accuracy: number | undefined;
       deferralRate: number;
       hasDeferral: boolean;
     }
@@ -613,7 +614,7 @@ function completedTreeStats(
 
       const leafMistakes = leafMistakesRaw(graph, meta, node.leafId);
 
-      if (leafMistakes !== undefined) {
+      if (Number(leaf?.prediction) !== -1 && leafMistakes !== undefined) {
         mistakes += leafMistakes;
       }
 
@@ -634,8 +635,9 @@ function completedTreeStats(
     totalN,
     leafN,
     deferredN,
+    predictedN: totalN - deferredN,
     mistakes,
-    accuracy: (totalN - mistakes) / totalN,
+    accuracy: totalN > deferredN ? (totalN - deferredN - mistakes) / (totalN - deferredN) : undefined,
     deferralRate: deferredN / totalN,
     hasDeferral: deferredN > 0,
   };
@@ -679,7 +681,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
     b.kind === 'split'
       ? ''
       : b.kind === 'leaf'
-        ? `${leafSampleSizeLabel(graph, b.leafId)} · ${Number(b.prediction) === -1 && meta.abstain_uses_labels ? 'exact training labels' : leafMisclassificationRate(
+        ? `${leafSampleSizeLabel(graph, b.leafId)} · ${Number(b.prediction) === -1 ? 'no prediction' : leafMisclassificationRate(
             graph,
             meta,
             b.leafId,
@@ -819,7 +821,7 @@ function SplitButton({
 
         <div className="choice-card-sub">
           {leafSampleSizeLabel(graph, choice.leaf.id)} ·{' '}
-          {choice.leaf.prediction === -1 && meta.abstain_uses_labels ? 'exact training labels' : leafMisclassificationRate(graph, meta, choice.leaf.id)} · obj{' '}
+          {choice.leaf.prediction === -1 ? 'no prediction' : leafMisclassificationRate(graph, meta, choice.leaf.id)} · obj{' '}
           {formatObjective(graph, objective)}
           {!feasible ? ` · over by ${formatObjective(graph, excessValue)}` : ''}
         </div>
@@ -1155,14 +1157,14 @@ function SidePanel({
 
           <div className="budget-box">
             <div>
-              <span>{completeStats.hasDeferral && meta.abstain_uses_labels ? 'training accuracy (with oracle)' : 'accuracy'}</span>
-              <b>{stripZeros((100 * completeStats.accuracy).toFixed(2))}%</b>
+              <span>{meta.use_deferral || meta.abstain_uses_labels || completeStats.hasDeferral ? 'accuracy (predicted samples)' : 'accuracy'}</span>
+              <b title={completeStats.accuracy === undefined ? 'No samples were predicted' : undefined}>{completeStats.accuracy === undefined ? '—' : `${stripZeros((100 * completeStats.accuracy).toFixed(2))}%`}</b>
             </div>
 
             <div>
               <span>mistakes</span>
               <b>
-                {stripZeros(completeStats.mistakes.toFixed(2))}/{completeStats.totalN}
+                {stripZeros(completeStats.mistakes.toFixed(2))}/{completeStats.predictedN}
               </b>
             </div>
 
