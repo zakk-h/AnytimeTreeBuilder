@@ -109,8 +109,8 @@ async function exerciseTraining(page) {
   assert.equal(await mistakesRow.locator('b').textContent(), '2/10');
   const abstentionRow = page.locator('.budget-box > div').filter({ has: page.locator('span', { hasText: /^abstention rate$/ }) });
   assert.equal(await abstentionRow.locator('b').textContent(), '50%');
-  const selectedLoss = await page.evaluate(() => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD.graph.leaf_nodes.reduce((sum, leaf) => sum + leaf.loss, 0));
-  assert.equal(selectedLoss, 7, 'Abstention summary changes altered the objective');
+  const objectiveRow = page.locator('.metric').filter({ has: page.locator('span', { hasText: /^current lower bound$/ }) });
+  assert.equal(await objectiveRow.locator('b').textContent(), '0.35', 'Abstention summary changes altered the selected tree objective');
 
   assert.equal(await page.evaluate(async () => (await (await fetch('/api/session')).json()).full_graph_exports), 0);
   console.log('Minimum-abstention UI finds zero when feasible and preserves the lowest possible rate under a tight budget');
