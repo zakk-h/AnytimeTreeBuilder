@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <future>
 #include <queue>
+#include <deque>
 
 namespace arborenum::live {
 class QueryUnavailable : public std::runtime_error { public: using std::runtime_error::runtime_error; };
@@ -22,41 +23,45 @@ class Session {
     std::condition_variable wake_;
     std::string phase_ = "preparing", error_;
     bool ready_ = false;
-    uint64_t checkpoint_ = 0, query_count_ = 0, node_queries_ = 0, completion_queries_ = 0;
+    uint64_t checkpoint_ = 0, query_count_ = 0, node_queries_ = 0, completion_queries_ = 0, analysis_queries_ = 0;
     size_t last_visited_ = 0;
     double node_query_handler_seconds_ = 0.0;
     json meta_;
     std::queue<std::shared_ptr<Request>> requests_;
+    std::shared_ptr<Request> active_request_;
+    std::deque<std::string> cancelled_analysis_tokens_;
     std::atomic<bool> pending_{false}, cancel_search_{false};
     // The actor keeps its actual model alive after enumeration stops. Querying
     // a finished/cancelled run never requires an export or reconstruction.
     std::jthread worker_;
 
-    void pump(ArborEnum& model, const json& meta, std::stop_token lifetime) {
+    void pump(ArborEnum& model, const json& meta, const Dataset& data, std::stop_token lifetime) {
         for (int batch = 0; batch < 8; ++batch) {
             std::shared_ptr<Request> request;
             {
                 std::lock_guard lock(mutex_);
                 if (requests_.empty()) { pending_.store(false, std::memory_order_relaxed); return; }
-                request = std::move(requests_.front()); requests_.pop();
+                request = std::move(requests_.front()); requests_.pop(); active_request_ = request;
                 pending_.store(!requests_.empty(), std::memory_order_relaxed);
             }
             try {
                 const auto query_started = std::chrono::steady_clock::now();
-                GraphQueries graph(model, meta, [&] { return lifetime.stop_requested() || request->cancelled.load() || std::chrono::steady_clock::now() >= request->deadline; });
+                GraphQueries graph(model, meta, [&] { return lifetime.stop_requested() || request->cancelled.load() || std::chrono::steady_clock::now() >= request->deadline; }, &data);
                 json reply;
                 const auto& body = request->body;
                 if (request->operation == "node") reply = graph.view(body.at("tree"), body.at("active_uid"));
+                else if (request->operation == "analyze") reply = graph.analyze(body.at("tree"), body.value("options", json::object()));
                 else reply = graph.complete(body.at("tree"), body.at("active_uid"), body.at("next_uid"), body.at("mode"), body.value("constraint", json::object()), body.value("seed", std::random_device{}()));
                 const size_t visited = graph.visited();
-                if (request->operation != "node") reply["view"] = graph.view(reply.at("tree"), reply.at("active_uid"));
+                if (request->operation == "complete") reply["view"] = graph.view(reply.at("tree"), reply.at("active_uid"));
                 {
                     std::lock_guard lock(mutex_);
                     ++query_count_;
                     if (request->operation == "node") {
                         ++node_queries_;
                         node_query_handler_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - query_started).count();
-                    } else ++completion_queries_;
+                    } else if (request->operation == "analyze") ++analysis_queries_;
+                    else ++completion_queries_;
                     last_visited_ = visited;
                     reply["checkpoint"] = checkpoint_; reply["query_id"] = query_count_;
                 }
@@ -68,6 +73,7 @@ class Session {
                 }
                 request->promise.set_value(std::move(reply));
             } catch (...) { request->promise.set_exception(std::current_exception()); }
+            { std::lock_guard lock(mutex_); active_request_.reset(); }
         }
     }
     void run(Dataset data, std::stop_token lifetime) noexcept {
@@ -121,7 +127,7 @@ class Session {
                         root_announced = true;
                     }
                 }
-                if (pending_.load(std::memory_order_relaxed)) pump(model, meta, lifetime);
+                if (pending_.load(std::memory_order_relaxed)) pump(model, meta, data, lifetime);
             };
             model.live_checkpoint = [&] {
                 { std::lock_guard lock(mutex_); ++checkpoint_; ready_ = model.live_root_has_solution(); }
@@ -158,7 +164,7 @@ class Session {
             std::unique_lock lock(mutex_);
             wake_.wait(lock, [&] { return lifetime.stop_requested() || !requests_.empty(); });
             lock.unlock();
-            if (!lifetime.stop_requested()) pump(model, meta, lifetime);
+            if (!lifetime.stop_requested()) pump(model, meta, data, lifetime);
         }
         std::lock_guard lock(mutex_);
         while (!requests_.empty()) {
@@ -173,12 +179,27 @@ public:
     // The UI's Stop operation intentionally retains queries on the live model.
     void shutdown() { worker_.request_stop(); wake_.notify_all(); }
     void stop() { cancel_search_.store(true); wake_.notify_all(); }
+    void cancel_analysis(const std::string& token) {
+        std::lock_guard lock(mutex_);
+        const auto cancel = [&](const std::shared_ptr<Request>& request) {
+            if (request && request->operation == "analyze" && request->body.value("analysis_token", "") == token) request->cancelled.store(true);
+        };
+        // A browser can cancel before its analysis POST reaches the queue.
+        // Keep a small tombstone window so that race cannot start orphan work.
+        if (std::find(cancelled_analysis_tokens_.begin(), cancelled_analysis_tokens_.end(), token) == cancelled_analysis_tokens_.end()) {
+            cancelled_analysis_tokens_.push_back(token);
+            if (cancelled_analysis_tokens_.size() > 128) cancelled_analysis_tokens_.pop_front();
+        }
+        cancel(active_request_);
+        auto queued = requests_;
+        while (!queued.empty()) { cancel(queued.front()); queued.pop(); }
+    }
     bool done() const { std::lock_guard lock(mutex_); return phase_ == "finished" || phase_ == "stopped" || phase_ == "failed"; }
     json metadata() const { std::lock_guard lock(mutex_); return meta_; }
     json query(std::string operation, json body) {
         auto request = std::make_shared<Request>();
         request->operation = std::move(operation); request->body = std::move(body);
-        const auto timeout = std::chrono::seconds(request->operation == "node" ? 10 : 60);
+        const auto timeout = std::chrono::seconds(request->operation == "node" ? 10 : request->operation == "analyze" ? 300 : 60);
         request->deadline = std::chrono::steady_clock::now() + timeout;
         auto future = request->promise.get_future();
         {
@@ -186,6 +207,11 @@ public:
             if (worker_.get_stop_token().stop_requested()) throw QueryUnavailable("Native session closed");
             if (!ready_) throw QueryUnavailable("Waiting for the first feasible native tree");
             if (requests_.size() >= 32) throw QueryUnavailable("Native query queue is full; retry the latest selection");
+            if (request->operation == "analyze") {
+                const auto token = request->body.value("analysis_token", "");
+                const auto cancelled = std::find(cancelled_analysis_tokens_.begin(), cancelled_analysis_tokens_.end(), token);
+                if (cancelled != cancelled_analysis_tokens_.end()) { request->cancelled.store(true); cancelled_analysis_tokens_.erase(cancelled); }
+            }
             requests_.push(request); pending_.store(true, std::memory_order_relaxed);
         }
         wake_.notify_one();
@@ -197,7 +223,7 @@ public:
     }
     json status() const {
         std::lock_guard lock(mutex_);
-        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
+        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"analysis_queries", analysis_queries_}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
     }
 };
 }

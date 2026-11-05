@@ -1,6 +1,6 @@
 {
   "name": "anytime-tree-builder-desktop",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "private": true,
   "description": "Interactive decision trees with local, live C++ enumeration",
   "author": "Zakk Heile <zakk-h@users.noreply.github.com>",

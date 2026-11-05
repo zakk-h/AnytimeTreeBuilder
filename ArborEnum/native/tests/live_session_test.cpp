@@ -450,6 +450,113 @@ static void training_options() {
     require(session.status()["phase"] == "finished" && session.status()["ready"] == true, session.status().dump());
     require(session.metadata()["training_settings"] == advanced.as_json(), "Native training configuration was not retained");
 }
+static int predict_fixture(const json& tree, const std::vector<double>& row, const json& registry) {
+    if (tree.at("kind") == "leaf") return tree.at("prediction");
+    const auto& feature = registry.at(tree.at("feature").get<size_t>());
+    return predict_fixture(row.at(feature.at("originalFeature").get<size_t>()) <= feature.at("threshold").get<double>() ? tree.at("left") : tree.at("right"), row, registry);
+}
+static int leaves_fixture(const json& tree) {
+    return tree.at("kind") == "leaf" ? 1 : leaves_fixture(tree.at("left")) + leaves_fixture(tree.at("right"));
+}
+static bool matches_fixture(const json& tree, const json& partial) {
+    if (partial.at("kind") == "choice") return true;
+    if (tree.at("kind") != partial.at("kind")) return false;
+    if (partial.at("kind") == "leaf") return tree.at("prediction") == partial.at("prediction");
+    return tree.at("feature") == partial.at("feature") && matches_fixture(tree.at("left"), partial.at("left")) && matches_fixture(tree.at("right"), partial.at("right"));
+}
+static void profile_fixture(bool continuous) {
+    Dataset data; data.names = {"a", "b"}; data.classes = continuous ? std::vector<std::string>{"no", "yes", "third"} : std::vector<std::string>{"no", "yes"};
+    data.X = continuous ? std::vector<std::vector<double>>{{0,0},{1,1},{2,0},{3,1}} : std::vector<std::vector<double>>{{0,0},{0,1},{1,0},{1,1}};
+    data.y = continuous ? std::vector<int>{0,1,2,0} : std::vector<int>{0,1,1,0};
+    std::vector<std::vector<uint8_t>> binary, seed, proxy;
+    std::vector<std::vector<double>> numeric;
+    for (size_t i = 0; i < data.X.size(); ++i) {
+        const auto& row = data.X[i];
+        if (continuous) { binary.push_back({uint8_t(row[1] == 0)}); numeric.push_back({row[0]}); seed.push_back({uint8_t(data.y[i] == 0)}); proxy.push_back({uint8_t(row[0] <= 1)}); }
+        else binary.push_back({uint8_t(row[0] == 0), uint8_t(row[1] == 0)});
+    }
+    ArborEnum model;
+    model.prepare_continuous_data(numeric, binary, data.y, seed, proxy, -1, data.y);
+    model.fit_prepared_anytime(.25, 2, 2., 2., .1, 1, true, false, 0, false, false, true, {}, {}, 1, -1, 0, false, false, false, -1, -1, true, .25);
+    json meta = {{"root_n", 4}, {"eta_defer", .25}};
+    auto& registry = meta["featureRegistry"]; registry = json::array();
+    registry.push_back({{"internalFeature", 0}, {"originalFeature", continuous ? 1 : 0}, {"threshold", 0}});
+    if (continuous) {
+        auto starts = model.get_continuous_starts(); auto cuts = model.get_continuous_cutpoints(0);
+        for (size_t i = 0; i < cuts.size(); ++i) registry.push_back({{"internalFeature", starts.at(0) + i}, {"originalFeature", 0}, {"threshold", cuts[i]}});
+    } else registry.push_back({{"internalFeature", 1}, {"originalFeature", 1}, {"threshold", 0}});
+    const auto all = enumerate(model.result.get(), {}, json::object(), -1);
+    require(all.size() > 10, "Analysis fixture had too few trees");
+    const auto& selected = model.result->splits.front();
+    json partial = {{"uid", 0}, {"kind", "split"}, {"feature", selected.feature}, {"left", {{"uid", 1}, {"kind", "choice"}}},
+        {"right", {{"uid", 2}, {"kind", "leaf"}, {"prediction", selected.right->leaves.front().prediction}}}};
+    for (const auto& [tree, options] : std::vector<std::pair<json,json>>{{root(), json::object()}, {partial, json::object()},
+            {root(), {{"maxLeaves", 1}}}, {root(), {{"maxAbstainedSamples", 0}}}, {root(), {{"maxLeaves", 2}, {"maxAbstainedSamples", 1}}}}) {
+        GraphQueries query(model, meta, {}, &data);
+        const auto result = query.analyze(tree, options);
+        uint64_t count = 0, undefined = 0;
+        std::map<int, uint64_t> leaf_hist, abstain_hist;
+        std::vector<std::vector<uint64_t>> predictions(4, std::vector<uint64_t>(data.classes.size() + 1));
+        std::array<double, 2> low{INFINITY, INFINITY}, high{-INFINITY, -INFINITY};
+        double min_accuracy = INFINITY, max_accuracy = -INFINITY;
+        for (const auto& [candidate, objective] : all) {
+            if (!matches_fixture(candidate, tree)) continue;
+            const int leaf_count = leaves_fixture(candidate);
+            int abstain_count = 0, errors = 0;
+            std::array<int, 4> predicted;
+            for (int i = 0; i < 4; ++i) { predicted[i] = predict_fixture(candidate, data.X[i], registry); abstain_count += predicted[i] == -1; errors += predicted[i] != -1 && predicted[i] != data.y[i]; }
+            if (leaf_count > options.value("maxLeaves", INT_MAX) || abstain_count > options.value("maxAbstainedSamples", INT_MAX)) continue;
+            ++count; ++leaf_hist[leaf_count]; ++abstain_hist[abstain_count];
+            for (int i = 0; i < 4; ++i) ++predictions[i][predicted[i] == -1 ? data.classes.size() : size_t(predicted[i])];
+            if (abstain_count == 4) ++undefined;
+            else { const double accuracy = 1. - double(errors) / (4 - abstain_count); min_accuracy = std::min(min_accuracy, accuracy); max_accuracy = std::max(max_accuracy, accuracy); }
+            const double base = (errors + .25 * abstain_count) / 4;
+            for (int f = 0; f < 2; ++f) {
+                // Independently enumerate every permutation, not the donor-mask
+                // shortcut used by production. There are 4! = 24 per feature.
+                std::array<int, 4> perm{0,1,2,3}; double changed = 0; int permutations = 0;
+                do {
+                    for (int i = 0; i < 4; ++i) { auto row = data.X[i]; row[f] = data.X[perm[i]][f]; const int p = predict_fixture(candidate, row, registry); changed += p == -1 ? .25 : double(p != data.y[i]); }
+                    ++permutations;
+                } while (std::next_permutation(perm.begin(), perm.end()));
+                const double importance = changed / (4 * permutations) - base;
+                low[f] = std::min(low[f], importance); high[f] = std::max(high[f], importance);
+            }
+        }
+        require(result["tree_count"] == std::to_string(count) && count > 0, "Partial-tree exact count disagreed with exhaustive enumeration");
+        for (const auto& bin : result["leaf_distribution"]) require(bin["count"] == std::to_string(leaf_hist.at(bin["value"].get<int>())), "Leaf distribution was incorrect");
+        for (const auto& bin : result["abstention_distribution"]) require(bin["count"] == std::to_string(abstain_hist.at(bin["value"].get<int>())), "Abstention distribution was incorrect");
+        require(result["accuracy"]["undefined_count"] == std::to_string(undefined), "All-abstain trees were assigned an accuracy");
+        require(std::abs(result["accuracy"]["min"].get<double>() - min_accuracy) < 1e-12 && std::abs(result["accuracy"]["max"].get<double>() - max_accuracy) < 1e-12, "Conditional accuracy range was incorrect");
+        for (int f = 0; f < 2; ++f) require(std::abs(result["importance"][f]["min"].get<double>() - low[f]) < 1e-12 && std::abs(result["importance"][f]["max"].get<double>() - high[f]) < 1e-12, "All-permutation importance did not match exhaustive permutations");
+        for (int i = 0; i < 4; ++i) {
+            double same = 0;
+            for (size_t c = 0; c <= data.classes.size(); ++c) { require(result["disagreement"][i]["counts"][c] == std::to_string(predictions[i][c]), "Inside/outside class counts were incorrect"); const double p = double(predictions[i][c]) / count; same += p*p; }
+            require(std::abs(result["disagreement"][i]["disagreement"].get<double>() - (1-same)) < 1e-12, "Disagreement probability was incorrect");
+        }
+        auto constraint = options; constraint["mode"] = "avoid"; constraint["maxLeaves"] = options.value("maxLeaves", 4);
+        const auto filled = query.complete(tree, 0, 3, "constrained", constraint, 0);
+        require(leaves_fixture(filled["tree"]) <= constraint["maxLeaves"].get<int>(), "Completion exceeded leaf cap");
+        require(abstained(model, filled["tree"], model.live_root_mask()) <= options.value("maxAbstainedSamples", INT_MAX), "Completion exceeded abstention cap");
+        int optimal = INT_MAX;
+        for (const auto& [candidate, objective] : all) if (matches_fixture(candidate, tree) && leaves_fixture(candidate) <= constraint["maxLeaves"].get<int>() && abstained(model, candidate, model.live_root_mask()) <= options.value("maxAbstainedSamples", INT_MAX)) optimal = std::min(optimal, objective);
+        require(cost(model.result.get(), filled["tree"]) == optimal && matches_fixture(filled["tree"], tree), "Capped completion was suboptimal or changed fixed decisions");
+    }
+    for (const auto& bad : std::vector<json>{{{"maxLeaves", 0}}, {{"maxLeaves", 1.5}}, {{"maxAbstainedSamples", -1}}}) {
+        bool rejected = false; try { GraphQueries q(model, meta, {}, &data); q.analyze(root(), bad); } catch (const std::invalid_argument&) { rejected = true; }
+        require(rejected, "Invalid analysis cap was accepted");
+    }
+    std::cout << "Exact profile counts, conditional accuracy, leaf/abstention distributions, class marginals, all 24 permutations and capped completion match exhaustive trees\n";
+}
+
+static void profile_analysis() {
+
+    ExactCount big(1); for (int i = 0; i < 100; ++i) big += big;
+    require(big.str() == "1267650600228229401496703205376", "Exact count addition overflowed");
+    require((big * big).str() == "1606938044258990275541962092341162602522202993782792835301376", "Exact count multiplication overflowed");
+    require(std::abs(big.fraction(big) - 1.) < 1e-12 && (big * ExactCount()).zero(), "Exact count probability arithmetic failed");
+    profile_fixture(false); profile_fixture(true);
+}
 int main() {
     try {
         initial_root(false); initial_root(true);
@@ -457,7 +564,7 @@ int main() {
         initial_actor_queries();
         incremental_attachment(false); incremental_attachment(true);
         incremental_attachment(true, 1); incremental_attachment(true, 2);
-        native_queries(); actor_queries(); training_options(); minimum_abstention();
+        native_queries(); actor_queries(); training_options(); minimum_abstention(); profile_analysis();
         std::cout << "Incremental attachment, mid-solve queries/completions, cancellation, offline graph equivalence, native paths, exhaustive optima, concurrent actor requests, stop retention and zero exports passed\n";
         return 0;
     }

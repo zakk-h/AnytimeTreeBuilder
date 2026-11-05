@@ -39,3 +39,5 @@ Requires Node.js 22.12+, npm, CMake 3.20+ and a C++20 compiler: Visual Studio 20
 For the smaller browser-based version, run `./build.sh` and `./launch.sh`, then open `http://127.0.0.1:8765`.
 
 [Native engine and tests](ArborEnum/native/README.md) · [Frontend development](InteractiveTreeBuilder/README.md) · [Source provenance](PROVENANCE.md)
+
+**Constrained** completion supports optional leaf and abstained-sample caps. **Analyze** reports exact feature-importance and accuracy ranges, leaf/abstention distributions, and a sample-disagreement violin for completions of your current partial tree.

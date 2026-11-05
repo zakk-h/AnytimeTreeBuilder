@@ -1,5 +1,6 @@
 #pragma once
 #include "live_types.hpp"
+#include "graph_profiles.hpp"
 #include <functional>
 
 namespace arborenum::live {
@@ -8,6 +9,7 @@ namespace arborenum::live {
 class GraphQueries {
     ArborEnum& model_;
     const json& meta_;
+    const Dataset* data_;
     std::function<bool()> cancelled_;
     size_t visited_ = 0;
     static constexpr int INF = std::numeric_limits<int>::max();
@@ -238,7 +240,7 @@ class GraphQueries {
         }
     };
 public:
-    GraphQueries(ArborEnum& model, const json& meta, std::function<bool()> cancelled = {}) : model_(model), meta_(meta), cancelled_(std::move(cancelled)) {}
+    GraphQueries(ArborEnum& model, const json& meta, std::function<bool()> cancelled = {}, const Dataset* data = nullptr) : model_(model), meta_(meta), data_(data), cancelled_(std::move(cancelled)) {}
     size_t visited() const { return visited_; }
     json view(json tree, int active) {
         prepare(tree, active);
@@ -259,12 +261,24 @@ public:
         }
         return {{"root_budget", model_.result->budget}, {"root_minimum", model_.result->min_objective}, {"root_size", meta_.at("root_n")}, {"summaries", std::move(summaries)}, {"options", {{"uid", active}, {"leaves", std::move(leaves)}, {"splits", std::move(splits)}}}, {"visited_nodes", visited_}};
     }
+    json analyze(json tree, const json& options) {
+        prepare(tree, tree.at("uid").get<int>());
+        GraphProfiles profiles(model_, meta_, data_, tree, options, true, [&] { check(); });
+        auto reply = profiles.analyze(); visited_ = profiles.visited(); return reply;
+    }
     json complete(json tree, int active, int next_uid, const std::string& mode, const json& constraint, uint64_t seed) {
         if (mode != "optimal" && mode != "random" && mode != "constrained") throw std::invalid_argument("Invalid completion mode");
         if (mode != "constrained" && !constraint.empty()) throw std::invalid_argument("Constraints require constrained completion mode");
         if (mode == "constrained" && constraint.value("mode", "") != "avoid" && constraint.value("mode", "") != "sample") throw std::invalid_argument("Invalid native completion constraint");
-        prepare(tree, active, constraint);
+        const bool caps = (constraint.contains("maxLeaves") && !constraint.at("maxLeaves").is_null()) || (constraint.contains("maxAbstainedSamples") && !constraint.at("maxAbstainedSamples").is_null());
+        prepare(tree, caps ? tree.at("uid").get<int>() : active, constraint);
         if (next_uid <= *uids_.rbegin()) throw std::invalid_argument("next_uid overlaps existing displayed UIDs");
+        if (caps) {
+            GraphProfiles profiles(model_, meta_, data_, tree, constraint, false, [&] { check(); });
+            auto result = profiles.complete(next_uid, constraint.value("minimizeAbstention", false));
+            visited_ = profiles.visited(); result["active_uid"] = active; result["next_uid"] = next_uid; result["visited_nodes"] = visited_;
+            return result;
+        }
         if (constraint.value("minimizeAbstention", false)) {
             AbstentionPlanner planner(*this, constraint);
             std::unordered_map<int, const Located*> by_uid;

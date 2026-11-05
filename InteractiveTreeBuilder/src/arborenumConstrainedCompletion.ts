@@ -31,6 +31,21 @@ const BUTTON_ID = 'arborenum-constrained-completion-button';
 const MODAL_ID = 'arborenum-constrained-completion-modal';
 const ABSTENTION_ID = 'arborenum-minimize-abstention';
 const minimizeAbstention = () => (document.getElementById(ABSTENTION_ID) as HTMLInputElement | null)?.checked ?? false;
+const LIMIT_LEAVES_ID = 'arborenum-cap-leaves';
+const LIMIT_ABSTAIN_ID = 'arborenum-cap-abstained';
+function completionLimits() {
+  const result: { maxLeaves?: number; maxAbstainedSamples?: number } = {};
+  for (const [id, key, minimum] of [[LIMIT_LEAVES_ID, 'maxLeaves', 1], [LIMIT_ABSTAIN_ID, 'maxAbstainedSamples', 0]] as const) {
+    const input = document.getElementById(id) as HTMLInputElement | null;
+    if (!input?.value.trim()) continue;
+    const value = input.valueAsNumber;
+    if (!Number.isInteger(value) || value < minimum || value > 2147483647) throw new Error(`${input.labels?.[0]?.textContent} must be an integer of at least ${minimum}.`);
+    result[key] = value;
+  }
+  return result;
+}
+const hasCompletionPreference = () => minimizeAbstention() || Object.keys(completionLimits()).length > 0;
+
 
 function internalWindow() {
   return window as unknown as Window & Record<string, unknown>;
@@ -92,7 +107,7 @@ function injectStyles() {
     .constraint-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:18px 24px 0}.constraint-tabs button{border:1px solid #e0e5d7;background:#f8faf2;border-radius:10px;padding:11px 14px;font-weight:750;color:#63745a;cursor:pointer}.constraint-tabs button.active{border-color:#8ab4e2;background:#edf6ff;color:#244f7d}
     .constraint-body{padding:18px 24px 24px;display:grid;gap:16px}.constraint-subheading{font-size:12px;font-weight:850;letter-spacing:.06em;text-transform:uppercase;color:#526a47}.constraint-divider{height:1px;background:#e6e9df;margin:2px 0}
     .constraint-check-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:330px;overflow:auto;padding-right:4px}.constraint-check-row{display:flex;align-items:center;gap:9px;border:1px solid #e0e6d7;border-radius:9px;padding:9px 10px;background:#fafbf5;font-size:13px}
-    .constraint-sample-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;max-height:360px;overflow:auto;padding-right:4px}.constraint-sample-grid label,.constraint-prediction-row{display:grid;gap:5px;font-size:12px;color:#63745a}.constraint-sample-grid input,.constraint-prediction-row select{width:100%;box-sizing:border-box;border:1px solid #dce3d2;border-radius:8px;padding:9px 10px;background:white;color:#304a34;font:inherit}
+    .constraint-sample-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;max-height:360px;overflow:auto;padding-right:4px}.constraint-sample-grid label,.constraint-prediction-row{display:grid;gap:5px;font-size:12px;color:#63745a}.constraint-sample-grid input,.constraint-prediction-row select,.constraint-prediction-row input{width:100%;box-sizing:border-box;border:1px solid #dce3d2;border-radius:8px;padding:9px 10px;background:white;color:#304a34;font:inherit}
     .constraint-primary{justify-self:start;border:0;border-radius:10px;padding:11px 15px;background:#315f8f;color:white;font-weight:800;cursor:pointer}.constraint-primary:hover{filter:brightness(.97)}.constraint-message{border-radius:10px;background:#fff7ed;border:1px solid #fed7aa;color:#9a4f10;padding:10px 12px;font-size:13px;line-height:1.4}
     @media(max-width:680px){.constraint-tabs,.constraint-check-grid,.constraint-sample-grid{grid-template-columns:1fr}}
   `;
@@ -115,7 +130,7 @@ function showMessage(message: HTMLElement, text: string) {
 }
 
 async function invokeConstraint(spec: ConstraintSpec): Promise<ConstraintResult> {
-  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) return window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION({ ...spec, minimizeAbstention: minimizeAbstention() });
+  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) return window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION({ ...spec, minimizeAbstention: minimizeAbstention(), ...completionLimits() });
   const optimal = findOptimalButton();
   if (!optimal || optimal.disabled) return { ok: false, message: 'The tree has no unfinished choices to complete.' };
 
@@ -201,6 +216,7 @@ function makeSampleControls() {
   const predictionName = document.createElement('span');
   predictionName.textContent = 'Prediction to ensure';
   const select = document.createElement('select');
+  select.setAttribute('aria-label', 'Prediction to ensure');
   const blank = document.createElement('option');
   blank.value = '';
   blank.textContent = 'Choose class';
@@ -268,7 +284,8 @@ function avoidPanel(message: HTMLElement) {
   run.textContent = 'Build optimal constrained completion';
   run.onclick = () => {
     const selected = selectedOriginalFeatures(grid);
-    if (!selected.length && !minimizeAbstention()) return showMessage(message, 'Select a feature to avoid, or enable minimum abstention.');
+    try { completionLimits(); } catch (error) { return showMessage(message, String(error)); }
+    if (!selected.length && !hasCompletionPreference()) return showMessage(message, 'Select a feature to avoid, set a cap, or enable minimum abstention.');
     finish(invokeConstraint({ mode: 'avoid', forbiddenInternalFeatures: forbiddenInternalFeatures(selected) }), message);
   };
   body.append(grid, run);
@@ -317,7 +334,7 @@ function partialTreeUsesSelectedFeature(selected: number[]) {
 }
 
 async function invokeSampleWhileAvoiding(spec: SampleSpec, forbiddenFeatures: number[]): Promise<ConstraintResult> {
-  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) return window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION({ ...spec, forbiddenInternalFeatures: forbiddenFeatures, minimizeAbstention: minimizeAbstention() });
+  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) return window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION({ ...spec, forbiddenInternalFeatures: forbiddenFeatures, minimizeAbstention: minimizeAbstention(), ...completionLimits() });
   const graph = currentPayload()?.graph;
   const tries = graph?.trie_nodes;
   const splits = graph?.split_nodes;
@@ -441,6 +458,19 @@ function openModal() {
   bothTab.onclick = () => show('both');
 
   modal.append(header);
+  if (window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) {
+    const limits = document.createElement('div'); limits.className = 'constraint-body'; limits.style.paddingBottom = '0';
+    for (const [id, name, minimum] of [[LIMIT_LEAVES_ID, 'Maximum leaves', 1], [LIMIT_ABSTAIN_ID, 'Maximum abstained samples', 0]] as const) {
+      if (id === LIMIT_ABSTAIN_ID && !currentPayload()?.meta?.use_deferral) continue;
+      const label = document.createElement('label'); label.className = 'constraint-prediction-row';
+      const input = document.createElement('input'); input.id = id; input.type = 'number'; input.min = String(minimum); input.step = '1'; input.placeholder = 'No cap';
+      label.append(document.createTextNode(name), input); limits.append(label);
+    }
+    const help = document.createElement('div'); help.className = 'constraint-help';
+    help.textContent = 'Optional. Caps apply to the whole completed tree. Existing decisions stay fixed and all unfinished nodes are filled.';
+    limits.append(help); modal.append(limits);
+  }
+
   if (currentPayload()?.meta?.use_deferral && window.ARBORENUM_NATIVE_CONSTRAINED_COMPLETION) {
     const preference = document.createElement('div');
     preference.className = 'constraint-body';

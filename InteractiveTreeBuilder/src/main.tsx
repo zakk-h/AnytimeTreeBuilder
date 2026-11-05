@@ -1,3 +1,4 @@
+import { NativeAnalysis } from './NativeAnalysis';
 import {
   type CSSProperties,
   type Dispatch,
@@ -1920,6 +1921,7 @@ function App() {
   const nativeAdapter = useRef(new NativeGraphAdapter());
   const [nativeReady, setNativeReady] = useState(false);
   const [nativeBusy, setNativeBusy] = useState(false);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
   const [nativeRefresh, setNativeRefresh] = useState(0);
   const [datasetPending, setDatasetPending] = useState(false);
   const [enumerationOpen, setEnumerationOpen] = useState(false);
@@ -1930,7 +1932,7 @@ function App() {
   const nativeQueriedRefresh = useRef(0);
   const lastNativeViewSignature = useRef<string | null>(null);
   const nativeBusyRef = useRef(false);
-  nativeBusyRef.current = nativeBusy;
+  nativeBusyRef.current = nativeBusy || analysisBusy;
   const active = findNode(snapshot.root, snapshot.activeUid);
 
   const loadPayload = (raw: unknown) => {
@@ -2127,13 +2129,14 @@ function App() {
             onPrepare={prepareNative}
             onReady={readyNative}
             onRefresh={() => setNativeRefresh(value => value + 1)}
-            querying={nativeBusy}
+            querying={nativeBusy || analysisBusy}
             canRefresh={nativeReady}
           />
           {nativeBusy && <span className="native-query-status" role="status">Updating node options…</span>}
           {uploadError && <p className="upload-error workspace-error" role="alert">{uploadError}</p>}
 
           <div className="header-actions">
+            <NativeAnalysis session={liveSession.current} tree={snapshot.root} disabled={!nativeReady || datasetPending || nativeBusy} abstain={Boolean(meta.use_deferral)} onBusyChange={setAnalysisBusy}/>
             {!datasetPending && <BuilderSettingsMenu
               graph={graph}
               meta={meta}

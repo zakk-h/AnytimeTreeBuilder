@@ -329,6 +329,18 @@ int main(int argc, char** argv) {
             if (auto current = checked_session(req, res))
                 respond(res, current->query("complete", json::parse(req.body)));
         });
+        post_json("/api/cancel-query", [&](const auto& req, auto& res) {
+            if (auto current = checked_session(req, res)) {
+                const json body = json::parse(req.body);
+                const auto token = body.at("token").get<std::string>();
+                if (token.empty() || token.size() > 128) throw std::invalid_argument("Invalid query token");
+                current->cancel_analysis(token); respond(res, {{"cancel_requested", true}}, 202);
+            }
+        });
+        post_json("/api/analyze", [&](const auto& req, auto& res) {
+            if (auto current = checked_session(req, res))
+                respond(res, current->query("analyze", json::parse(req.body)));
+        });
         post_json("/api/stop", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res)) {
                 current->stop();

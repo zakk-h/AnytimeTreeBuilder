@@ -48,6 +48,34 @@ def main():
             assert call('/api/health', headers=headers)[0] == 403
         assert call('/api/session', {}, {'Content-Type': 'text/plain'})[0] == 415
         assert call('/api/session', {'settings': {'unknown': 1}})[0] == 400
+        tiny = {'feature_names': ['constant'], 'class_names': ['no', 'yes'], 'X': [[0]] * 4, 'y': [0, 1, 0, 1],
+                'settings': {'depth_budget': 0, 'lambda_reg': .25, 'allow_abstain': True, 'abstain_cost': .25, 'rashomon_mult': 2}}
+        code, tiny_status = call('/api/session', tiny)
+        assert code == 202, tiny_status
+        tiny_id = tiny_status['session_id']
+        deadline = time.monotonic() + 10
+        while call('/api/session')[1]['phase'] != 'finished':
+            assert time.monotonic() < deadline
+            time.sleep(.001)
+        tiny_tree = {'uid': 0, 'kind': 'choice'}
+        analysis_url = '/api/analyze?session_id=' + tiny_id
+        code, analysis = call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 1}})
+        assert code == 200 and analysis['exact'] and analysis['tree_count'] == '3', analysis
+        assert analysis['accuracy'] == {'min': .5, 'max': .5, 'undefined_count': '1'}, analysis
+        for row in analysis['disagreement']:
+            assert row['counts'] == ['1', '1', '1'] and abs(row['disagreement'] - 2/3) < 1e-12, row
+        assert analysis['importance'][0]['min'] == analysis['importance'][0]['max'] == 0
+        code, limited = call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 1, 'maxAbstainedSamples': 0}})
+        assert code == 200 and limited['tree_count'] == '2', limited
+        assert call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 0}})[0] == 400
+        assert call('/api/cancel-query?session_id=' + tiny_id, {'token': 'cancel-before-arrival'})[0] == 202
+        code, cancelled = call(analysis_url, {'tree': tiny_tree, 'analysis_token': 'cancel-before-arrival'})
+        assert code == 400 and 'cancelled' in cancelled['error'], cancelled
+        assert call('/api/node?session_id=' + tiny_id, {'tree': tiny_tree, 'active_uid': 0})[0] == 200
+        code, capped = call('/api/complete?session_id=' + tiny_id, {'tree': tiny_tree, 'active_uid': 0, 'next_uid': 1, 'mode': 'constrained',
+                            'constraint': {'mode': 'avoid', 'maxLeaves': 1, 'maxAbstainedSamples': 0}})
+        assert code == 200 and capped['leaves'] == 1 and capped['abstained_samples'] == 0 and capped['objective'] == 3, capped
+        assert call('/api/session')[1]['full_graph_exports'] == 0
         # A deliberately broad binary initial solve: query and cancel before
         # its first coarse checkpoint, then keep exploring the retained model.
         # Avoid the tiny cached DAG of a full binary cube on faster machines.

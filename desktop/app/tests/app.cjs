@@ -1,3 +1,4 @@
+const { exerciseAnalysis } = require('./analysis.cjs');
 const assert = require('node:assert/strict');
 const { mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
@@ -54,6 +55,7 @@ async function main() {
     assert.equal((await desktop.windows()).length, 1);
     await exerciseTraining(page);
     await exerciseStop(page);
+    await exerciseAnalysis(page);
     if (process.env.ATB_SCREENSHOT) await page.screenshot({ path: process.env.ATB_SCREENSHOT });
     assert.deepEqual(errors, []);
     const closed = desktop.waitForEvent('close', { timeout: 20_000 });
