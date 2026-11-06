@@ -1,5 +1,5 @@
 import { readNativeResponse } from './nativeResponse';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Play, RefreshCw, Square, X, Table2 } from 'lucide-react';
 import type { ArborEnumBuilderMeta } from './arborenumPayload';
 import './liveEnumeration.css';
@@ -49,6 +49,15 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   const callbacks = useRef({ onReady, onConnect, onAvailable, onRefresh }); callbacks.current = { onReady, onConnect, onAvailable, onRefresh };
   const observedBudget = useRef<{ session: string; value: number } | null>(null);
 
+  const receiveBudgetStatus = useCallback((current: Status) => {
+    setStatus(current);
+    if (!current.ready) return;
+    const value = current.requested_budget >= 0 ? current.requested_budget : current.active_budget;
+    const previous = observedBudget.current;
+    observedBudget.current = { session: current.session_id, value };
+    if (previous?.session === current.session_id && previous.value !== value) callbacks.current.onRefresh();
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement;
@@ -72,12 +81,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
         const observedSession = sessionRef.current;
         const current = await api<Status>('/api/session', undefined, controller.signal);
         if (disposed || sessionRef.current !== observedSession) return;
-        setStatus(current);
-        if (current?.ready && current.active_budget >= 0) {
-          const previous = observedBudget.current;
-          observedBudget.current = { session: current.session_id, value: current.active_budget };
-          if (previous?.session === current.session_id && previous.value !== current.active_budget) callbacks.current.onRefresh();
-        }
+        if (current) receiveBudgetStatus(current); else setStatus(current);
         if (current && !draftRef.current) {
           if (sessionRef.current !== current.session_id) {
             sessionRef.current = current.session_id; readyRef.current = false;
@@ -121,7 +125,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   return <div className="live-enumeration">
     {status && <>
       <span className="live-progress" role="status">{status.stop_requested && !finished(status) ? 'Stopping…' : status.phase} · {Math.floor(status.elapsed_seconds)}s{!status.ready && ' · waiting for first feasible tree'}</span>
-      {status.ready && status.sample_count > 0 && <BudgetControl key={status.session_id} status={status} onStatus={setStatus}/>}
+      {status.ready && status.sample_count > 0 && <BudgetControl key={status.session_id} status={status} onStatus={receiveBudgetStatus}/>}
       <button className="ghost-button" disabled={querying || !status.ready || !canRefresh} onClick={onRefresh}><RefreshCw size={15} className={querying ? 'live-spin' : ''} /> {querying ? 'Updating options…' : 'Update options'}</button>
       {running && <button className="ghost-button" disabled={status.stop_requested} onClick={async () => {
         try { const current = await api<Status>(`/api/stop?session_id=${status.session_id}`, {}); if (current) setStatus(current); }

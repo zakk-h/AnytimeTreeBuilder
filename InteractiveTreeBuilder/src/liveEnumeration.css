@@ -47,7 +47,9 @@
 .live-budget b,.live-budget output { font-variant-numeric:tabular-nums; }
 .live-budget-popover { position:absolute; top:calc(100% + 9px); left:0; z-index:50; width:275px; box-sizing:border-box; padding:18px; background:var(--panel,#fff); border:1px solid var(--line); border-radius:10px; box-shadow:0 12px 35px #182b281c; }
 .live-budget label { display:flex; justify-content:space-between; gap:12px; font-size:13px; font-weight:600; }
-.live-budget input { width:100%; margin:17px 0 5px; accent-color:var(--accent); }
+.live-budget input[type=range] { width:100%; margin:17px 0 5px; accent-color:var(--accent); }
 .live-budget-range { display:flex; justify-content:space-between; font-variant-numeric:tabular-nums; color:var(--muted); }
 .live-budget p { font-size:12px; line-height:1.5; margin:10px 0 0; color:var(--muted); }
 .live-budget [role=alert] { color:#b42318; }
+
+.live-budget-value { display:flex;align-items:center;justify-content:space-between;gap:12px; }.live-budget-value label { flex:1; }.live-budget input[type=number] { width:100px;min-width:0;box-sizing:border-box;padding:6px 8px;border:1px solid var(--line);border-radius:5px;background:var(--panel,#fff);color:var(--ink);font:inherit;font-variant-numeric:tabular-nums; }.live-budget input[type=number]:focus { outline:2px solid var(--accent);outline-offset:2px; }

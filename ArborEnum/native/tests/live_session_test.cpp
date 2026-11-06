@@ -289,6 +289,14 @@ static void initial_actor_queries() {
     require(status["checkpoint"] == 0 && status["phase"] == "running", "Actor readiness waited for the initial solve");
     auto view = session.query("node", {{"tree", root()}, {"active_uid", 0}});
     require(view["checkpoint"] == 0 && view["visited_nodes"] == 1, "Actor could not query the initial solve");
+    const int search_budget = session.status().at("active_budget").get<int>();
+    session.request_budget(0);
+    auto filtered = session.query("node", {{"tree", root()}, {"active_uid", 0}});
+    require(filtered["checkpoint"] == 0 && filtered["root_budget"] == 0, "Display budget waited for a refinement round");
+    require(filtered["options"]["leaves"].empty() && filtered["options"]["splits"].empty(), "Immediate budget did not filter choices");
+    require(session.status()["active_budget"] == search_budget, "Display budget interrupted the initial search budget");
+    session.request_budget(search_budget);
+    require(!session.query("node", {{"tree", root()}, {"active_uid", 0}})["options"]["leaves"].empty(), "Restoring the display budget lost retained leaves");
     session.stop();
     while (!session.done()) {
         require(std::chrono::steady_clock::now() < deadline, "Initial actor did not stop");

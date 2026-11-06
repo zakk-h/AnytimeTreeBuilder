@@ -46,7 +46,9 @@ class Session {
                 std::lock_guard lock(mutex_);
                 if (requests_.empty()) { pending_.store(false, std::memory_order_relaxed); return; }
                 request = std::move(requests_.front()); requests_.pop(); active_request_ = request;
-                query_budget = active_budget_ < 0 ? INT_MAX : active_budget_;
+                // Exploration follows the requested bound immediately; enumeration
+                // adopts it independently at its next refinement boundary.
+                query_budget = requested_budget_ >= 0 ? requested_budget_ : active_budget_ < 0 ? INT_MAX : active_budget_;
                 pending_.store(!requests_.empty(), std::memory_order_relaxed);
             }
             try {

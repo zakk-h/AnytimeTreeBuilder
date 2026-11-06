@@ -128,9 +128,9 @@ Constrained completion accepts `minimizeAbstention: true` alongside feature avoi
 
 ### Live objective budget
 
-The Budget slider changes the total regularized objective bound (displayed per training sample). `POST /api/budget?session_id=…` takes `{budget}` in native integer loss units. A running search applies the latest request at its next refinement boundary, outside proxy calls. Status distinguishes `requested_budget`, `active_budget`, and retained `graph_budget` capacity.
+The Budget slider and numeric input change the total regularized objective bound (displayed per training sample). `POST /api/budget?session_id=…` takes `{budget}` in native integer loss units. A running search applies the latest request at its next refinement boundary, outside proxy calls. Status distinguishes `requested_budget`, `active_budget`, and retained `graph_budget` capacity.
 
-A smaller search allowance does not shrink stored nodes or remove alternatives. Shared subproblems are revisited when reached with a larger allowance. Increasing beyond retained capacity extends the same native graph; stopped or finished sessions filter their retained alternatives without restarting enumeration. Node choices must fit the active root budget after subtracting locked leaf costs and other frontier minima. Optimal, random, constrained completions and analysis use the same active bound. If no completion fits, choices are empty and completion/analysis reports that clearly; increasing the budget reveals retained alternatives again.
+A smaller search allowance does not shrink stored nodes or remove alternatives. Shared subproblems are revisited when reached with a larger allowance. Increasing beyond retained capacity extends the same native graph; stopped or finished sessions filter their retained alternatives without restarting enumeration. Exploration immediately uses the requested budget, independently of the running search. Node choices must fit this root budget after subtracting locked leaf costs and other frontier minima. Optimal, random, constrained completions and analysis use the same requested bound. If no completion fits, choices are empty and completion/analysis reports that clearly; increasing the budget reveals retained alternatives again.
 
 ### Completion caps and partial-tree analysis
 
