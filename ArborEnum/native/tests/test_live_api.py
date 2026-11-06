@@ -61,10 +61,26 @@ def main():
         analysis_url = '/api/analyze?session_id=' + tiny_id
         code, analysis = call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 1}})
         assert code == 200 and analysis['exact'] and analysis['tree_count'] == '3', analysis
+        for phase in ('queue_seconds', 'bounds_seconds', 'counting_seconds', 'prediction_seconds', 'importance_seconds', 'total_seconds'):
+            assert analysis['timings'][phase] >= 0, analysis['timings']
+        assert len(analysis['timings']['features']) == 1
         assert analysis['accuracy'] == {'min': .5, 'max': .5, 'undefined_count': '1'}, analysis
         for row in analysis['disagreement']:
             assert row['counts'] == ['1', '1', '1'] and abs(row['disagreement'] - 2/3) < 1e-12, row
         assert analysis['importance'][0]['min'] == analysis['importance'][0]['max'] == 0
+        budget_url = '/api/budget?session_id=' + tiny_id
+        assert call(budget_url, {'budget': -1})[0] == 400
+        assert call(budget_url, {'budget': 1.5})[0] == 400
+        before_capacity = call('/api/session')[1]['graph_budget']
+        code, changed = call(budget_url, {'budget': 2})
+        assert code == 202 and changed['active_budget'] == changed['requested_budget'] == 2, changed
+        code, bounded = call(analysis_url, {'tree': tiny_tree})
+        assert code == 200 and bounded['tree_count'] == '1', bounded
+        code, options = call('/api/node?session_id=' + tiny_id, {'tree': tiny_tree, 'active_uid': 0})
+        assert code == 200 and len(options['options']['leaves']) == 1 and options['options']['leaves'][0]['prediction'] == -1, options
+        assert call(budget_url, {'budget': before_capacity})[0] == 202
+        assert call(analysis_url, {'tree': tiny_tree})[1]['tree_count'] == '3'
+        assert call('/api/session')[1]['graph_budget'] == before_capacity
         code, limited = call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 1, 'maxAbstainedSamples': 0}})
         assert code == 200 and limited['tree_count'] == '2', limited
         assert call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 0}})[0] == 400

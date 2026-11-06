@@ -13,6 +13,7 @@ class Session {
         json body;
         std::promise<json> promise;
         std::atomic<bool> cancelled{false};
+        std::chrono::steady_clock::time_point enqueued = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point deadline;
     };
     const std::string id_;
@@ -25,8 +26,10 @@ class Session {
     bool ready_ = false;
     uint64_t checkpoint_ = 0, query_count_ = 0, node_queries_ = 0, completion_queries_ = 0, analysis_queries_ = 0;
     size_t last_visited_ = 0;
+    int requested_budget_ = -1, active_budget_ = -1;
+    std::atomic<int> graph_budget_{-1}, root_minimum_{-1};
     double node_query_handler_seconds_ = 0.0;
-    json meta_;
+    json meta_ = json::object();
     std::queue<std::shared_ptr<Request>> requests_;
     std::shared_ptr<Request> active_request_;
     std::deque<std::string> cancelled_analysis_tokens_;
@@ -38,20 +41,24 @@ class Session {
     void pump(ArborEnum& model, const json& meta, const Dataset& data, std::stop_token lifetime) {
         for (int batch = 0; batch < 8; ++batch) {
             std::shared_ptr<Request> request;
+            int query_budget;
             {
                 std::lock_guard lock(mutex_);
                 if (requests_.empty()) { pending_.store(false, std::memory_order_relaxed); return; }
                 request = std::move(requests_.front()); requests_.pop(); active_request_ = request;
+                query_budget = active_budget_ < 0 ? INT_MAX : active_budget_;
                 pending_.store(!requests_.empty(), std::memory_order_relaxed);
             }
             try {
                 const auto query_started = std::chrono::steady_clock::now();
-                GraphQueries graph(model, meta, [&] { return lifetime.stop_requested() || request->cancelled.load() || std::chrono::steady_clock::now() >= request->deadline; }, &data);
+                GraphQueries graph(model, meta, [&] { return lifetime.stop_requested() || request->cancelled.load() || std::chrono::steady_clock::now() >= request->deadline; }, &data, query_budget);
                 json reply;
                 const auto& body = request->body;
                 if (request->operation == "node") reply = graph.view(body.at("tree"), body.at("active_uid"));
                 else if (request->operation == "analyze") reply = graph.analyze(body.at("tree"), body.value("options", json::object()));
                 else reply = graph.complete(body.at("tree"), body.at("active_uid"), body.at("next_uid"), body.at("mode"), body.value("constraint", json::object()), body.value("seed", std::random_device{}()));
+                if (request->operation == "analyze") reply["timings"]["queue_seconds"] =
+                    std::chrono::duration<double>(query_started - request->enqueued).count();
                 const size_t visited = graph.visited();
                 if (request->operation == "complete") reply["view"] = graph.view(reply.at("tree"), reply.at("active_uid"));
                 {
@@ -118,7 +125,16 @@ class Session {
                 for (int id : *ids) if (static_cast<size_t>(id) >= registry.size()) throw std::invalid_argument("Threshold feature ID is outside the prepared feature registry");
             meta = {{"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", static_cast<int>(std::llround(settings_.lambda * n))}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
             { std::lock_guard lock(mutex_); meta_ = meta; phase_ = "running"; }
+            model.live_round_budget = [&](int current) {
+                std::lock_guard lock(mutex_);
+                active_budget_ = requested_budget_ < 0 ? current : requested_budget_;
+                return active_budget_;
+            };
             model.live_poll = [&] {
+                if (model.result) {
+                    graph_budget_.store(model.result->budget, std::memory_order_relaxed);
+                    root_minimum_.store(model.result->min_objective, std::memory_order_relaxed);
+                }
                 if (!root_announced) {
                     model.live_refresh_in_progress();
                     if (model.live_root_has_solution()) {
@@ -158,6 +174,13 @@ class Session {
             std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); error_ = e.what(); phase_ = "failed"; ended_ = std::chrono::steady_clock::now();
         } catch (...) {
             std::lock_guard lock(mutex_); ready_ = model.live_root_has_solution(); error_ = "Unknown native enumeration error"; phase_ = "failed"; ended_ = std::chrono::steady_clock::now();
+        }
+        {
+            std::lock_guard lock(mutex_);
+            if (requested_budget_ >= 0) active_budget_ = requested_budget_;
+            if (model.result) {
+                graph_budget_.store(model.result->budget); root_minimum_.store(model.result->min_objective);
+            }
         }
         // No model access occurs on HTTP threads, including after fit completes.
         while (!lifetime.stop_requested()) {
@@ -221,9 +244,16 @@ public:
         }
         return future.get();
     }
+    void request_budget(int budget) {
+        if (budget < 0) throw std::invalid_argument("Budget must be a nonnegative integer");
+        std::lock_guard lock(mutex_);
+        if (!ready_) throw QueryUnavailable("Wait for the first feasible tree before changing its budget");
+        requested_budget_ = budget;
+        if (phase_ == "finished" || phase_ == "stopped" || phase_ == "failed") active_budget_ = budget;
+    }
     json status() const {
         std::lock_guard lock(mutex_);
-        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"analysis_queries", analysis_queries_}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
+        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"analysis_queries", analysis_queries_}, {"active_budget", active_budget_ < 0 ? graph_budget_.load() : active_budget_}, {"requested_budget", requested_budget_}, {"graph_budget", graph_budget_.load()}, {"root_minimum", root_minimum_.load()}, {"sample_count", meta_.value("root_n", size_t(0))}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
     }
 };
 }

@@ -6,10 +6,12 @@ import './liveEnumeration.css';
 import { parseCsv, toDataset } from './liveDataset';
 import { DEFAULT_TRAINING_SETTINGS, nativeTrainingSettings, trainingSettingsError } from './trainingSettings';
 import { TrainingFields } from './TrainingFields';
+import { BudgetControl } from './BudgetControl';
 
-type Status = {
+export type Status = {
   session_id: string; phase: string; error: string; stop_requested: boolean;
   checkpoint: number; ready: boolean; elapsed_seconds: number;
+  active_budget: number; requested_budget: number; graph_budget: number; root_minimum: number; sample_count: number;
 };
 const finished = (s: Status) => ['finished', 'stopped', 'failed'].includes(s.phase);
 
@@ -44,7 +46,8 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   const sessionRef = useRef(''), readyRef = useRef(false);
   const draftRef = useRef(false), fileRead = useRef(0);
   const dialog = useRef<HTMLElement>(null);
-  const callbacks = useRef({ onReady, onConnect, onAvailable }); callbacks.current = { onReady, onConnect, onAvailable };
+  const callbacks = useRef({ onReady, onConnect, onAvailable, onRefresh }); callbacks.current = { onReady, onConnect, onAvailable, onRefresh };
+  const observedBudget = useRef<{ session: string; value: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -70,6 +73,11 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
         const current = await api<Status>('/api/session', undefined, controller.signal);
         if (disposed || sessionRef.current !== observedSession) return;
         setStatus(current);
+        if (current?.ready && current.active_budget >= 0) {
+          const previous = observedBudget.current;
+          observedBudget.current = { session: current.session_id, value: current.active_budget };
+          if (previous?.session === current.session_id && previous.value !== current.active_budget) callbacks.current.onRefresh();
+        }
         if (current && !draftRef.current) {
           if (sessionRef.current !== current.session_id) {
             sessionRef.current = current.session_id; readyRef.current = false;
@@ -113,6 +121,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
   return <div className="live-enumeration">
     {status && <>
       <span className="live-progress" role="status">{status.stop_requested && !finished(status) ? 'Stopping…' : status.phase} · {Math.floor(status.elapsed_seconds)}s{!status.ready && ' · waiting for first feasible tree'}</span>
+      {status.ready && status.sample_count > 0 && <BudgetControl key={status.session_id} status={status} onStatus={setStatus}/>}
       <button className="ghost-button" disabled={querying || !status.ready || !canRefresh} onClick={onRefresh}><RefreshCw size={15} className={querying ? 'live-spin' : ''} /> {querying ? 'Updating options…' : 'Update options'}</button>
       {running && <button className="ghost-button" disabled={status.stop_requested} onClick={async () => {
         try { const current = await api<Status>(`/api/stop?session_id=${status.session_id}`, {}); if (current) setStatus(current); }

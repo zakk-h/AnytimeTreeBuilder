@@ -7,34 +7,61 @@
 #include <iomanip>
 #include <sstream>
 #include <vector>
+#include <array>
 
 namespace arborenum::live {
 // Only the nonnegative arithmetic required by inside/outside tree counting.
 // Counts never saturate at the engine's legacy uint64_t histogram limit.
 class ExactCount {
     static constexpr uint64_t base = 1000000000;
+    // Most subtree counts fit in a machine word. Promote only on overflow,
+    // avoiding heap allocation for every product in the convolution loops.
+    uint64_t small_ = 0;
     std::vector<uint32_t> digits_;
+    void promote() {
+        for (auto n = small_; n; n /= base) digits_.push_back(uint32_t(n % base));
+        small_ = 0;
+    }
 public:
-    ExactCount(uint64_t n = 0) { while (n) { digits_.push_back(uint32_t(n % base)); n /= base; } }
-    bool zero() const { return digits_.empty(); }
+    ExactCount(uint64_t n = 0) : small_(n) {}
+    bool zero() const { return digits_.empty() && small_ == 0; }
     ExactCount& operator+=(const ExactCount& b) {
-        digits_.resize(std::max(digits_.size(), b.digits_.size()), 0);
+        if (digits_.empty() && b.digits_.empty() && small_ <= UINT64_MAX - b.small_) {
+            small_ += b.small_; return *this;
+        }
+        if (digits_.empty()) promote();
+        std::array<uint32_t, 3> small_digits{}; size_t size = 0;
+        if (b.digits_.empty()) for (auto n = b.small_; n; n /= base) small_digits[size++] = uint32_t(n % base);
+        else size = b.digits_.size();
+        digits_.resize(std::max(digits_.size(), size), 0);
         uint64_t carry = 0;
         for (size_t i = 0; i < digits_.size(); ++i) {
-            const uint64_t sum = uint64_t(digits_[i]) + (i < b.digits_.size() ? b.digits_[i] : 0) + carry;
+            const uint64_t digit = i < size ? (b.digits_.empty() ? small_digits[i] : b.digits_[i]) : 0;
+            const uint64_t sum = uint64_t(digits_[i]) + digit + carry;
             digits_[i] = uint32_t(sum % base); carry = sum / base;
         }
         if (carry) digits_.push_back(uint32_t(carry));
         return *this;
     }
     friend ExactCount operator*(const ExactCount& a, const ExactCount& b) {
-        ExactCount out;
-        if (a.zero() || b.zero()) return out;
-        out.digits_.assign(a.digits_.size() + b.digits_.size(), 0);
-        for (size_t i = 0; i < a.digits_.size(); ++i) {
+        if (a.zero() || b.zero()) return ExactCount();
+        if (a.digits_.empty() && b.digits_.empty() && a.small_ <= UINT64_MAX / b.small_)
+            return ExactCount(a.small_ * b.small_);
+        std::array<uint32_t, 3> ad{}, bd{};
+        const auto view = [](const ExactCount& n, auto& scratch) {
+            size_t size = 0;
+            if (n.digits_.empty()) {
+                for (auto value = n.small_; value; value /= base) scratch[size++] = uint32_t(value % base);
+                return std::pair<const uint32_t*, size_t>{scratch.data(), size};
+            }
+            return std::pair<const uint32_t*, size_t>{n.digits_.data(), n.digits_.size()};
+        };
+        const auto [ap, an] = view(a, ad); const auto [bp, bn] = view(b, bd);
+        ExactCount out; out.digits_.assign(an + bn, 0);
+        for (size_t i = 0; i < an; ++i) {
             uint64_t carry = 0;
-            for (size_t j = 0; j < b.digits_.size() || carry; ++j) {
-                const uint64_t value = out.digits_[i + j] + carry + (j < b.digits_.size() ? uint64_t(a.digits_[i]) * b.digits_[j] : 0);
+            for (size_t j = 0; j < bn || carry; ++j) {
+                const uint64_t value = out.digits_[i + j] + carry + (j < bn ? uint64_t(ap[i]) * bp[j] : 0);
                 out.digits_[i + j] = uint32_t(value % base); carry = value / base;
             }
         }
@@ -42,13 +69,14 @@ public:
         return out;
     }
     std::string str() const {
-        if (zero()) return "0";
+        if (digits_.empty()) return std::to_string(small_);
         std::ostringstream out; out << digits_.back();
         for (size_t i = digits_.size() - 1; i > 0; --i) out << std::setw(9) << std::setfill('0') << digits_[i - 1];
         return out.str();
     }
     long double log_value() const {
         if (zero()) return -std::numeric_limits<long double>::infinity();
+        if (digits_.empty()) return std::log(static_cast<long double>(small_));
         long double leading = digits_.back();
         if (digits_.size() > 1) leading += static_cast<long double>(digits_[digits_.size() - 2]) / base;
         return std::log(leading) + (digits_.size() - 1) * std::log(static_cast<long double>(base));

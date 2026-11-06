@@ -18,7 +18,7 @@ Mac and Linux builds are available for x64 and ARM64. On Mac, choose ARM64 for A
 
 Choose **Upload → Upload dataset**, select a CSV and its target column, then start ArborEnum. Numeric, boolean and categorical features are supported. Try [bike_processed.csv](ArborEnum/examples/bike_processed.csv).
 
-Select nodes to explore splits, use **Update options** to see new alternatives, or choose **Optimal**, **Random** or **Constrained** to complete a subtree. **Stop** ends enumeration and keeps the graph available. Closing the app shuts down the engine.
+Select nodes to explore splits, use **Update options** to see new alternatives, or choose **Optimal**, **Random** or **Constrained** to complete a subtree. The **Budget** slider changes the objective bound at the next refinement round and filters exploration and analysis. **Stop** ends enumeration and keeps the graph available. Closing the app shuts down the engine.
 
 **Allow Abstain leaves** allows leaves to make no prediction, with an adjustable cost per abstained sample. Accuracy is measured only on samples with predictions. **Advanced training settings** exposes search, refinement, threshold and cache controls.
 

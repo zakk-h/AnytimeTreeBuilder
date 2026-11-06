@@ -321,6 +321,15 @@ int main(int argc, char** argv) {
         server.Get("/api/meta", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res)) respond(res, current->metadata());
         });
+        post_json("/api/budget", [&](const auto& req, auto& res) {
+            if (auto current = checked_session(req, res)) {
+                const json body = json::parse(req.body);
+                const auto& value = body.at("budget");
+                if (!value.is_number_integer() || value.get<int64_t>() < 0 || value.get<int64_t>() > INT_MAX)
+                    throw std::invalid_argument("Budget must be a nonnegative integer within the objective range");
+                current->request_budget(value.get<int>()); respond(res, current->status(), 202);
+            }
+        });
         post_json("/api/node", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res))
                 respond(res, current->query("node", json::parse(req.body)));

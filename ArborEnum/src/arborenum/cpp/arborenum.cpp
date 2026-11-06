@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <cstdint>
+#include <climits>
 #include <deque>
 #include <map>
 #include <span>
@@ -933,6 +934,7 @@ public:
     // Called exclusively on the enumeration thread, between graph mutations.
     std::function<void()> live_checkpoint;
     std::function<void()> live_poll;
+    std::function<int(int)> live_round_budget;
     bool live_forbid_graph_export = false;
     std::function<bool()> live_stop_requested;
 
@@ -5124,8 +5126,21 @@ public:
         };
         publish();
 
+        int round_budget = eps_abs;
+        const auto apply_live_budget = [&] {
+            round_budget = G_min ? G_min->budget : eps_abs;
+            if (!live_round_budget) return;
+            round_budget = live_round_budget(round_budget);
+            if (G_min && round_budget > G_min->budget) {
+                result = G_min;
+                extend_result_to_budget_(depth_budget, round_budget, root, root_pk, root_cpath, B_active);
+                G_min = result;
+            }
+        };
+        apply_live_budget();
         int refinement_round = 0;
         while (!active_contains_all_threshold_columns_(B_active)) {
+            apply_live_budget();
             if (max_refinement_rounds >= 0 &&
                 refinement_round >= max_refinement_rounds) {
                 break;
@@ -5162,7 +5177,7 @@ public:
                 G_min = construct_trie(
                     root,
                     depth_budget,
-                    eps_abs,
+                    round_budget,
                     root_pk,
                     root_cpath,
                     &B_active
@@ -5178,7 +5193,8 @@ public:
                     root_pk,
                     root_cpath,
                     B_active,
-                    visited
+                    visited,
+                    round_budget < G_min->budget ? round_budget : INT_MAX
                 );
             }
 
@@ -5235,6 +5251,11 @@ public:
                     final_budget
                 );
 
+                if (live_round_budget) {
+                    round_budget = live_round_budget(next_budget);
+                    if (round_budget <= current_budget) break;
+                    next_budget = round_budget;
+                }
                 std::cout
                     << "Extending anytime multiplier to "
                     << current_multiplier
@@ -5328,6 +5349,7 @@ public:
                     }
                 }
 
+                apply_live_budget();
                 lookahead_init = (int8_t)next_k;
 
                 if (proxy_style == 2) {
@@ -5361,7 +5383,8 @@ public:
                     root_pk,
                     root_cpath,
                     B_active,
-                    visited
+                    visited,
+                    round_budget < G_min->budget ? round_budget : INT_MAX
                 );
 
                 ++automatic_refinement_round;
@@ -5385,6 +5408,7 @@ public:
                     << "Moving continuous Lickety proxy objectives "
                     << "down one lookahead level.\n";
 
+                apply_live_budget();
                 shift_proxy_strength_down_one_();
 
                 // same two cache clears as before
@@ -5401,7 +5425,8 @@ public:
                     root_pk,
                     root_cpath,
                     B_active,
-                    visited
+                    visited,
+                    round_budget < G_min->budget ? round_budget : INT_MAX
                 );
 
                 publish();
@@ -5430,6 +5455,7 @@ public:
             }
         }
 
+        apply_live_budget();
         allowed_proxy_features = old_allowed_proxy_features;
         restrict_proxy_in_lickety = old_restrict_lickety;
         restrict_proxy_in_depthd_exact = old_restrict_depthd;
@@ -7528,7 +7554,7 @@ private:
     }
 
     using RefineVisited =
-        std::unordered_set<TreeTrieNode*>;
+        std::unordered_map<TreeTrieNode*, int>;
 
     // an implementation of RefineGraph from the paper (appendix). as in the algorithm, it takes in the visited set, which starts out empty, so this recursive graph procedure can add to it.
     void RefineGraphDfs(
@@ -7538,7 +7564,8 @@ private:
         const PathKey& pk,
         const ContinuousPath& cpath,
         const std::vector<int>& B_active,
-        RefineVisited& visited
+        RefineVisited& visited,
+        int allowance = INT_MAX
     ) {
         
         if (!G) return;
@@ -7547,16 +7574,15 @@ private:
 
         TreeTrieNode* node_ptr = G.get();
 
-        // insert returns {iterator, was_inserted}.
-        // If the node was already present, it has already been refined
-        // during this pass.
-        // budgets don't matter here because we have budget-independent subgraphs
-        // iterative budget refinement also counts and does the refinement in full
-        if (!visited.insert(node_ptr).second) {
-            return;
+        // A shared node may be reached under different live allowances. Refine
+        // it again only when the new path permits a larger search budget.
+        const int budget = std::min(G->budget, allowance);
+        const int visit_allowance = allowance == INT_MAX ? INT_MAX : budget;
+        auto [seen, inserted] = visited.emplace(node_ptr, visit_allowance);
+        if (!inserted) {
+            if (seen->second >= visit_allowance) return;
+            seen->second = visit_allowance;
         }
-
-        const int budget = G->budget;
 
         if (depth <= 0 || budget < 2 * gamma) {
             return;
@@ -7634,7 +7660,8 @@ private:
                     *pkLp,
                     *cpathLp,
                     B_active,
-                    visited
+                    visited,
+                    allowance == INT_MAX ? INT_MAX : (budget >= gamma ? budget - gamma : -1)
                 );
             }
 
@@ -7646,7 +7673,8 @@ private:
                     *pkRp,
                     *cpathRp,
                     B_active,
-                    visited
+                    visited,
+                    allowance == INT_MAX ? INT_MAX : (budget >= gamma ? budget - gamma : -1)
                 );
             }
 
@@ -8683,7 +8711,9 @@ private:
         }
 
         if (live_bind) live_bind(node);
-        node->budget = budget;
+        // Keep the stored graph a superset even when a live round searches
+        // under a smaller allowance. Query budgets are separate from capacity.
+        node->budget = live_round_budget ? std::max(node->budget, budget) : budget;
 
         // add newly feasible leaves without duplicating existing predictions.
         {

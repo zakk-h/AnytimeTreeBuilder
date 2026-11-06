@@ -28,7 +28,7 @@ static int cost(TreeTrieNode* node, const json& tree, const std::set<int>& forbi
 // Independent exhaustive fixture oracle: materialization is confined to tests.
 static std::vector<std::pair<json,int>> enumerate(TreeTrieNode* node, const std::set<int>& forbidden, const json& truth, int target) {
     std::vector<std::pair<json,int>> out;
-    for (const auto& l : node->leaves) if (target < 0 || target == l.prediction) out.push_back({json{{"kind", "leaf"}, {"prediction", l.prediction}}, l.loss});
+    for (const auto& l : node->leaves) if (l.loss <= node->budget && (target < 0 || target == l.prediction)) out.push_back({json{{"kind", "leaf"}, {"prediction", l.prediction}}, l.loss});
     for (const auto& s : node->splits) if (!forbidden.count(s.feature) && s.left && s.right) {
         int lt = target, rt = target;
         if (target >= 0 && truth.contains(std::to_string(s.feature))) { if (truth.at(std::to_string(s.feature)).get<bool>()) rt = -1; else lt = -1; }
@@ -467,7 +467,7 @@ static bool matches_fixture(const json& tree, const json& partial) {
     if (partial.at("kind") == "leaf") return tree.at("prediction") == partial.at("prediction");
     return tree.at("feature") == partial.at("feature") && matches_fixture(tree.at("left"), partial.at("left")) && matches_fixture(tree.at("right"), partial.at("right"));
 }
-static void profile_fixture(bool continuous) {
+static void profile_fixture(bool continuous, bool allow_abstain = true) {
     Dataset data; data.names = {"a", "b"}; data.classes = continuous ? std::vector<std::string>{"no", "yes", "third"} : std::vector<std::string>{"no", "yes"};
     data.X = continuous ? std::vector<std::vector<double>>{{0,0},{1,1},{2,0},{3,1}} : std::vector<std::vector<double>>{{0,0},{0,1},{1,0},{1,1}};
     data.y = continuous ? std::vector<int>{0,1,2,0} : std::vector<int>{0,1,1,0};
@@ -480,7 +480,7 @@ static void profile_fixture(bool continuous) {
     }
     ArborEnum model;
     model.prepare_continuous_data(numeric, binary, data.y, seed, proxy, -1, data.y);
-    model.fit_prepared_anytime(.25, 2, 2., 2., .1, 1, true, false, 0, false, false, true, {}, {}, 1, -1, 0, false, false, false, -1, -1, true, .25);
+    model.fit_prepared_anytime(.25, 2, 2., 2., .1, 1, true, false, 0, false, false, true, {}, {}, 1, -1, 0, false, false, false, -1, -1, allow_abstain, .25);
     json meta = {{"root_n", 4}, {"eta_defer", .25}};
     auto& registry = meta["featureRegistry"]; registry = json::array();
     registry.push_back({{"internalFeature", 0}, {"originalFeature", continuous ? 1 : 0}, {"threshold", 0}});
@@ -493,7 +493,7 @@ static void profile_fixture(bool continuous) {
     // They contribute neither options, completions nor any analysis statistics.
     {
         GraphQueries query(model, meta, {}, &data);
-        const auto before = query.analyze(root(), json::object());
+        auto before = query.analyze(root(), json::object()); before.erase("timings");
         const auto view = query.view(root(), 0);
         const auto split_count = model.result->splits.size();
         auto empty = std::make_shared<TreeTrieNode>(); empty->budget = model.result->budget;
@@ -504,13 +504,28 @@ static void profile_fixture(bool continuous) {
         model.result->splits.push_back({0, empty, valid});
         model.result->splits.push_back({0, costly, valid});
         require(query.view(root(), 0) == view, "Unfinished alternatives changed selectable options");
-        require(query.analyze(root(), json::object()) == before, "Unfinished alternatives changed analysis statistics");
+        auto after = query.analyze(root(), json::object()); after.erase("timings");
+        require(after == before, "Unfinished alternatives changed analysis statistics");
         for (const std::string mode : {"optimal", "random", "constrained"}) {
             const json constraint = mode == "constrained" ? json{{"mode", "avoid"}, {"maxLeaves", 4}} : json::object();
             auto result = query.complete(root(), 0, 1, mode, constraint, 42);
             require(cost(model.result.get(), result["tree"]) <= model.result->budget, "Completion used an infeasible alternative");
         }
         model.result->splits.resize(split_count);
+    }
+    // A cached child may represent much looser budgets than the current root.
+    // Root-derived pruning must retain every feasible shared-DAG completion.
+    {
+        const int old_budget = model.result->budget;
+        model.result->budget = model.result->min_objective + 1;
+        const auto expected = enumerate(model.result.get(), {}, json::object(), -1);
+        GraphQueries query(model, meta, {}, &data);
+        const auto actual = query.analyze(root(), json::object());
+        require(actual["tree_count"] == std::to_string(expected.size()) && !expected.empty(), "Root-derived bounds discarded a feasible completion");
+        uint64_t leaf_total = 0;
+        for (const auto& bin : actual["leaf_distribution"]) leaf_total += std::stoull(bin["count"].get<std::string>());
+        require(leaf_total == expected.size(), "Bounded subtree convolution changed exact counts");
+        model.result->budget = old_budget;
     }
     const auto all = enumerate(model.result.get(), {}, json::object(), -1);
     require(all.size() > 10, "Analysis fixture had too few trees");
@@ -569,6 +584,46 @@ static void profile_fixture(bool continuous) {
         for (const auto& [candidate, objective] : all) if (matches_fixture(candidate, tree) && leaves_fixture(candidate) <= constraint["maxLeaves"].get<int>() && abstained(model, candidate, model.live_root_mask()) <= options.value("maxAbstainedSamples", INT_MAX)) optimal = std::min(optimal, objective);
         require(cost(model.result.get(), filled["tree"]) == optimal && matches_fixture(filled["tree"], tree), "Capped completion was suboptimal or changed fixed decisions");
     }
+    if (!selected.left->splits.empty()) {
+        const auto& sub = selected.left->splits.front();
+        const auto& sibling = *std::min_element(sub.right->leaves.begin(), sub.right->leaves.end(), [](const auto& a, const auto& b) { return a.loss < b.loss; });
+        const int old = selected.left->budget;
+        selected.left->budget = sub.left->min_objective + sub.right->min_objective;
+        const json deep = {{"uid", 0}, {"kind", "split"}, {"feature", selected.feature},
+            {"left", {{"uid", 1}, {"kind", "split"}, {"feature", sub.feature}, {"left", {{"uid", 3}, {"kind", "choice"}}}, {"right", {{"uid", 4}, {"kind", "leaf"}, {"prediction", sibling.prediction}}}}},
+            {"right", {{"uid", 2}, {"kind", "leaf"}, {"prediction", selected.right->leaves.front().prediction}}}};
+        GraphQueries query(model, meta, {}, &data);
+        const auto scoped = query.view(deep, 3);
+        for (const auto& option : scoped["options"]["leaves"]) require(option["loss"].get<int>() + sibling.loss <= selected.left->budget, "Choice exceeded a locked ancestor's local budget");
+        for (const auto& option : scoped["options"]["splits"]) require(option["minimum"].get<int>() + sibling.loss <= selected.left->budget, "Split exceeded a locked ancestor's local budget");
+        selected.left->budget = old;
+    }
+    const auto retained = graph_signature(model.result.get());
+    for (int cap : {model.result->min_objective - 1, model.result->min_objective, model.result->budget, model.result->budget + 3}) {
+        for (const auto& tree : {root(), partial}) {
+            size_t expected = 0;
+            for (const auto& [candidate, objective] : all) expected += objective <= cap && matches_fixture(candidate, tree);
+            GraphQueries query(model, meta, {}, &data, cap);
+            const int active = tree.at("kind") == "choice" ? 0 : 1;
+            const auto view = query.view(tree, active);
+            const int locked = active ? cost(selected.right.get(), tree.at("right")) : 0;
+            for (const auto& option : view["options"]["leaves"]) require(option["loss"].get<int>() + locked <= cap, "Budget filter ignored a locked leaf");
+            for (const auto& option : view["options"]["splits"]) require(option["minimum"].get<int>() + locked <= cap, "Budget filter ignored the other frontier");
+            bool rejected = false;
+            try { require(query.analyze(tree, json::object())["tree_count"] == std::to_string(expected), "Budgeted analysis disagreed with exhaustive completions"); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected == (expected == 0), "Budgeted analysis incorrectly accepted/rejected an empty set");
+            for (const std::string mode : {"optimal", "random", "constrained"}) for (bool minimize : {false, true}) {
+                if (minimize && mode != "constrained") continue;
+                const json constraint = mode == "constrained" ? json{{"mode", "avoid"}, {"minimizeAbstention", minimize}} : json::object();
+                bool failed = false;
+                try { auto completion = query.complete(tree, active, 3, mode, constraint, 12); require(cost(model.result.get(), completion["tree"]) <= cap, "Completion exceeded the changed budget"); }
+                catch (const std::invalid_argument&) { failed = true; }
+                require(failed == (expected == 0), "Budgeted completion incorrectly accepted/rejected an empty set");
+            }
+        }
+    }
+    require(graph_signature(model.result.get()) == retained, "Changing query budgets mutated the retained graph");
     for (const auto& bad : std::vector<json>{{{"maxLeaves", 0}}, {{"maxLeaves", 1.5}}, {{"maxAbstainedSamples", -1}}}) {
         bool rejected = false; try { GraphQueries q(model, meta, {}, &data); q.analyze(root(), bad); } catch (const std::invalid_argument&) { rejected = true; }
         require(rejected, "Invalid analysis cap was accepted");
@@ -576,13 +631,51 @@ static void profile_fixture(bool continuous) {
     std::cout << "Exact profile counts, conditional accuracy, leaf/abstention distributions, class marginals, all 24 permutations and capped completion match exhaustive trees\n";
 }
 
+static void live_budget_rounds() {
+    ArborEnum model;
+    std::vector<std::vector<double>> X; std::vector<int> y;
+    for (int i = 0; i < 30; ++i) { X.push_back({double(i), double((i * 7) % 30)}); y.push_back((i / 4 + i % 3) % 2); }
+    model.prepare_continuous_data(X, {}, y, {}, {});
+    int calls = 0, initial = -1, capacity = -1; size_t polls = 0;
+    std::set<int> exposed;
+    model.live_round_budget = [&](int current) {
+        require(!model.live_in_proxy(), "A budget changed during a proxy call");
+        if (initial < 0) initial = current;
+        ++calls;
+        return calls == 1 ? initial : calls == 2 ? initial + 3 : calls == 3 ? initial - 2 : initial + 5;
+    };
+    model.live_poll = [&] {
+        if (!model.result) return;
+        require(model.result->budget >= capacity, "A lower search budget pruned retained graph capacity");
+        capacity = model.result->budget;
+        if ((++polls & 63U) != 0) return;
+        model.live_refresh_in_progress();
+        if (!model.live_root_has_solution()) return;
+        const json meta = {{"root_n", y.size()}};
+        GraphQueries query(model, meta);
+        auto view = query.view(root(), 0); std::set<int> offered;
+        for (const auto& option : view["options"]["splits"]) offered.insert(option["feature"].get<int>());
+        for (int feature : exposed) require(offered.count(feature), "A retained split disappeared after a budget change");
+        exposed.insert(offered.begin(), offered.end());
+    };
+    model.fit_prepared_anytime(.04, 3, .6, .6, .2, 1, true, false, 0, false, false, true, {}, {}, 1, 6, 0, true, true, false);
+    require(calls >= 4 && capacity >= initial + 5, "Live budget changes did not reach refinement boundaries");
+    graph_signature(model.result.get());
+}
+
 static void profile_analysis() {
 
+    ExactCount boundary(UINT64_MAX); boundary += ExactCount(1);
+    require(boundary.str() == "18446744073709551616", "Small-count addition did not promote on overflow");
+    ExactCount doubled(UINT64_MAX); doubled += doubled;
+    require(doubled.str() == "36893488147419103230", "Aliased small-count promotion was incorrect");
+    require((ExactCount(UINT64_MAX) * ExactCount(UINT64_MAX)).str() == "340282366920938463426481119284349108225", "Small-count multiplication overflowed");
+    require((boundary * ExactCount()).zero() && (boundary * ExactCount(1)).str() == boundary.str(), "Mixed small/big arithmetic was incorrect");
     ExactCount big(1); for (int i = 0; i < 100; ++i) big += big;
     require(big.str() == "1267650600228229401496703205376", "Exact count addition overflowed");
     require((big * big).str() == "1606938044258990275541962092341162602522202993782792835301376", "Exact count multiplication overflowed");
     require(std::abs(big.fraction(big) - 1.) < 1e-12 && (big * ExactCount()).zero(), "Exact count probability arithmetic failed");
-    profile_fixture(false); profile_fixture(true);
+    profile_fixture(false); profile_fixture(true); profile_fixture(false, false);
 }
 int main() {
     try {
@@ -591,7 +684,7 @@ int main() {
         initial_actor_queries();
         incremental_attachment(false); incremental_attachment(true);
         incremental_attachment(true, 1); incremental_attachment(true, 2);
-        native_queries(); actor_queries(); training_options(); minimum_abstention(); profile_analysis();
+        native_queries(); actor_queries(); training_options(); minimum_abstention(); profile_analysis(); live_budget_rounds();
         std::cout << "Incremental attachment, mid-solve queries/completions, cancellation, offline graph equivalence, native paths, exhaustive optima, concurrent actor requests, stop retention and zero exports passed\n";
         return 0;
     }

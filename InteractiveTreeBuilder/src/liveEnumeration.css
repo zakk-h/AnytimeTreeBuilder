@@ -40,3 +40,14 @@
 .training-advanced .live-fields { margin:12px 0 20px; padding:0; border:0; }
 .training-toggles { display:grid; gap:14px; }
 .training-advanced > button { margin-top:20px; }
+
+.live-budget { position:relative; font-size:12px; color:var(--ink); }
+.live-budget summary { display:flex; align-items:center; gap:6px; padding:7px 9px; border:1px solid var(--line); border-radius:6px; cursor:pointer; list-style:none; }
+.live-budget summary::-webkit-details-marker { display:none; }
+.live-budget b,.live-budget output { font-variant-numeric:tabular-nums; }
+.live-budget-popover { position:absolute; top:calc(100% + 9px); left:0; z-index:50; width:275px; box-sizing:border-box; padding:18px; background:var(--panel,#fff); border:1px solid var(--line); border-radius:10px; box-shadow:0 12px 35px #182b281c; }
+.live-budget label { display:flex; justify-content:space-between; gap:12px; font-size:13px; font-weight:600; }
+.live-budget input { width:100%; margin:17px 0 5px; accent-color:var(--accent); }
+.live-budget-range { display:flex; justify-content:space-between; font-variant-numeric:tabular-nums; color:var(--muted); }
+.live-budget p { font-size:12px; line-height:1.5; margin:10px 0 0; color:var(--muted); }
+.live-budget [role=alert] { color:#b42318; }

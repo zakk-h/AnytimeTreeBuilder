@@ -12,16 +12,20 @@ class GraphQueries {
     const Dataset* data_;
     std::function<bool()> cancelled_;
     size_t visited_ = 0;
+    int requested_budget_;
+    int root_budget() const { return std::min(model_.result->budget, requested_budget_); }
     static constexpr int INF = std::numeric_limits<int>::max();
     struct Located {
         TreeTrieNode* node;
         Packed mask;
         json* build;
         bool scope = false, sample = false;
+        int64_t minimum = 0, allowance = 0;
     };
     std::vector<Located> located_;
     std::set<int> uids_;
     int active_ = 0;
+    bool partial_feasible_ = true;
     const SplitNode& split(TreeTrieNode* node, int feature) {
         auto found = std::find_if(node->splits.begin(), node->splits.end(), [&](const auto& s) { return s.feature == feature && TreeTrieNode::split_has_solution(s, node->budget); });
         if (found == node->splits.end()) throw std::invalid_argument("Selected split is not present at this path");
@@ -65,6 +69,36 @@ class GraphQueries {
         visited_ = 0; located_.clear(); uids_.clear(); active_ = active;
         locate(model_.result.get(), model_.live_root_mask(), tree, 0, false, false, constraint);
         if (!uids_.count(active)) throw std::invalid_argument("Active displayed node is missing");
+        partial_feasible_ = displayed_bounds();
+    }
+    // Only the displayed tree is traversed. Propagate each ancestor's local
+    // budget as well as the user root bound, subtracting its other frontier.
+    bool displayed_bounds(const std::unordered_map<int, int>& overrides = {}) {
+        constexpr int64_t impossible = INT64_MAX / 4;
+        std::unordered_map<int, Located*> index;
+        for (auto& item : located_) index.emplace(item.build->at("uid").get<int>(), &item);
+        bool feasible = true;
+        for (auto it = located_.rbegin(); it != located_.rend(); ++it) {
+            const int uid = it->build->at("uid");
+            if (auto value = overrides.find(uid); value != overrides.end()) it->minimum = value->second;
+            else if (it->build->at("kind") == "leaf") it->minimum = leaf(it->node, it->build->at("prediction")).loss;
+            else if (it->build->at("kind") == "choice") it->minimum = it->node->min_objective;
+            else it->minimum = std::min(impossible, index.at(it->build->at("left").at("uid").get<int>())->minimum + index.at(it->build->at("right").at("uid").get<int>())->minimum);
+            if (it->minimum > it->node->budget) { feasible = false; it->minimum = impossible; }
+        }
+        located_.front().allowance = root_budget();
+        for (auto& item : located_) {
+            item.allowance = std::min(item.allowance, int64_t(item.node->budget));
+            if (overrides.contains(item.build->at("uid").get<int>()) || item.build->at("kind") != "split") continue;
+            auto* left = index.at(item.build->at("left").at("uid").get<int>());
+            auto* right = index.at(item.build->at("right").at("uid").get<int>());
+            left->allowance = item.allowance - right->minimum;
+            right->allowance = item.allowance - left->minimum;
+        }
+        return feasible && located_.front().minimum <= root_budget();
+    }
+    void require_budget_feasible() {
+        if (!partial_feasible_) throw std::invalid_argument("No completion of this partial tree fits the current budget");
     }
     struct Best {
         int objective = INF;
@@ -240,7 +274,7 @@ class GraphQueries {
         }
     };
 public:
-    GraphQueries(ArborEnum& model, const json& meta, std::function<bool()> cancelled = {}, const Dataset* data = nullptr) : model_(model), meta_(meta), data_(data), cancelled_(std::move(cancelled)) {}
+    GraphQueries(ArborEnum& model, const json& meta, std::function<bool()> cancelled = {}, const Dataset* data = nullptr, int budget = INT_MAX) : model_(model), meta_(meta), data_(data), cancelled_(std::move(cancelled)), requested_budget_(budget) {}
     size_t visited() const { return visited_; }
     json view(json tree, int active) {
         prepare(tree, active);
@@ -253,17 +287,19 @@ public:
             if (item.build->at("uid") == active) selected = &item;
         }
         if (selected && selected->build->at("kind") == "choice") {
-            for (const auto& l : selected->node->leaves) leaves.push_back({{"prediction", l.prediction}, {"loss", l.loss}});
-            for (const auto& s : selected->node->splits) if (TreeTrieNode::split_has_solution(s, selected->node->budget)) {
+            const int64_t available = partial_feasible_ ? selected->allowance : -1;
+            for (const auto& l : selected->node->leaves) if (l.loss <= available && l.loss <= selected->node->budget) leaves.push_back({{"prediction", l.prediction}, {"loss", l.loss}});
+            for (const auto& s : selected->node->splits) if (TreeTrieNode::split_has_solution(s, selected->node->budget) && int64_t(s.left->min_objective) + s.right->min_objective <= available) {
                 const auto masks = model_.live_child_masks(selected->mask, s.feature);
                 splits.push_back({{"feature", s.feature}, {"minimum", static_cast<int64_t>(s.left->min_objective) + s.right->min_objective}, {"left_minimum", s.left->min_objective}, {"right_minimum", s.right->min_objective}, {"left_size", masks.first.count()}, {"right_size", masks.second.count()}});
             }
         }
-        return {{"root_budget", model_.result->budget}, {"root_minimum", model_.result->min_objective}, {"root_size", meta_.at("root_n")}, {"summaries", std::move(summaries)}, {"options", {{"uid", active}, {"leaves", std::move(leaves)}, {"splits", std::move(splits)}}}, {"visited_nodes", visited_}};
+        return {{"root_budget", root_budget()}, {"root_minimum", model_.result->min_objective}, {"root_size", meta_.at("root_n")}, {"summaries", std::move(summaries)}, {"options", {{"uid", active}, {"leaves", std::move(leaves)}, {"splits", std::move(splits)}}}, {"visited_nodes", visited_}};
     }
     json analyze(json tree, const json& options) {
         prepare(tree, tree.at("uid").get<int>());
-        GraphProfiles profiles(model_, meta_, data_, tree, options, true, [&] { check(); });
+        require_budget_feasible();
+        GraphProfiles profiles(model_, meta_, data_, tree, options, true, [&] { check(); }, root_budget());
         auto reply = profiles.analyze(); visited_ = profiles.visited(); return reply;
     }
     json complete(json tree, int active, int next_uid, const std::string& mode, const json& constraint, uint64_t seed) {
@@ -272,9 +308,10 @@ public:
         if (mode == "constrained" && constraint.value("mode", "") != "avoid" && constraint.value("mode", "") != "sample") throw std::invalid_argument("Invalid native completion constraint");
         const bool caps = (constraint.contains("maxLeaves") && !constraint.at("maxLeaves").is_null()) || (constraint.contains("maxAbstainedSamples") && !constraint.at("maxAbstainedSamples").is_null());
         prepare(tree, caps ? tree.at("uid").get<int>() : active, constraint);
+        require_budget_feasible();
         if (next_uid <= *uids_.rbegin()) throw std::invalid_argument("next_uid overlaps existing displayed UIDs");
         if (caps) {
-            GraphProfiles profiles(model_, meta_, data_, tree, constraint, false, [&] { check(); });
+            GraphProfiles profiles(model_, meta_, data_, tree, constraint, false, [&] { check(); }, root_budget());
             auto result = profiles.complete(next_uid, constraint.value("minimizeAbstention", false));
             visited_ = profiles.visited(); result["active_uid"] = active; result["next_uid"] = next_uid; result["visited_nodes"] = visited_;
             return result;
@@ -284,7 +321,8 @@ public:
             std::unordered_map<int, const Located*> by_uid;
             for (const auto& item : located_) by_uid.emplace(item.build->at("uid").get<int>(), &item);
             size_t choices = 0;
-            const auto candidates = planner.partial(located_.front(), by_uid, choices);
+            auto candidates = planner.partial(located_.front(), by_uid, choices);
+            candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const auto& candidate) { return candidate->objective > root_budget(); }), candidates.end());
             if (!choices) throw std::invalid_argument("The selected subtree has no unfinished choices");
             if (candidates.empty()) throw std::invalid_argument("No completion satisfies these constraints and the Rashomon budget");
             // Pruned frontiers have ascending cost and strictly decreasing
@@ -296,6 +334,7 @@ public:
         }
         Planner planner(*this, constraint);
         int64_t total = 0;
+        std::unordered_map<int, int> costs;
         std::vector<Located*> frontier;
         for (auto& item : located_) {
             const std::string kind = item.build->at("kind");
@@ -305,24 +344,27 @@ public:
                 if (item.scope && item.sample && l.prediction != planner.target) throw std::invalid_argument("An existing leaf conflicts with the required prediction");
                 total += l.loss;
             } else if (kind == "choice") {
-                if (item.scope) { total += planner.best(item.node, item.sample).objective; frontier.push_back(&item); }
-                else total += item.node->min_objective;
+                const int minimum = item.scope ? planner.best(item.node, item.sample).objective : item.node->min_objective;
+                costs.emplace(item.build->at("uid").get<int>(), minimum); total += minimum;
+                if (item.scope) frontier.push_back(&item);
             }
         }
         if (frontier.empty()) throw std::invalid_argument("The selected subtree has no unfinished choices");
-        if (total > model_.result->budget) throw std::invalid_argument("No completion satisfies the Rashomon budget");
+        if (total > root_budget() || !displayed_bounds(costs)) throw std::invalid_argument("No completion satisfies these constraints and the current budget");
         std::mt19937_64 rng(seed);
         for (auto* item : frontier) {
             const int best = planner.best(item->node, item->sample).objective;
             const int old_uid = item->build->at("uid");
             json filled;
             if (mode == "random") {
-                auto result = planner.random(item->node, model_.result->budget - static_cast<int>(total - best), next_uid, rng);
+                auto result = planner.random(item->node, static_cast<int>(item->allowance), next_uid, rng);
                 total += result.second - best;
+                costs[item->build->at("uid").get<int>()] = result.second;
                 filled = std::move(result.first);
             } else filled = planner.optimal(item->node, item->sample, next_uid);
             filled["uid"] = old_uid;
             *item->build = std::move(filled);
+            if (mode == "random" && !displayed_bounds(costs)) throw std::logic_error("Random completion exceeded its propagated budget");
         }
         return {{"tree", std::move(tree)}, {"active_uid", active}, {"next_uid", next_uid}, {"visited_nodes", visited_}};
     }
