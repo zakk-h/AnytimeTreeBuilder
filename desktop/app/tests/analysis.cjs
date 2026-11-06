@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
 async function exerciseAnalysis(page) {
   await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Upload dataset' }).click();
@@ -41,10 +42,33 @@ async function exerciseAnalysis(page) {
   assert.equal(result.permutation, 'expectation_over_all_permutations');
   assert.equal(result.importance.length, 2);
   assert.equal(result.disagreement.length, 4);
-  for (const row of result.disagreement) assert.equal(row.counts.reduce((a, b) => a + BigInt(b), 0n), BigInt(result.tree_count));
+  for (const row of result.disagreement) {
+    assert.equal(row.counts.reduce((a, b) => a + BigInt(b), 0n), BigInt(result.tree_count));
+    assert.ok(Math.abs(row.disagreement - (1 - Math.max(...row.probabilities))) < 1e-12);
+  }
+  assert.equal(result.disagreement_metric, 'variation_ratio');
   await page.locator('.analysis-importance tbody tr').first().waitFor();
   assert.equal(await page.locator('.analysis-importance tbody tr').count(), 2);
   assert.equal(await page.locator('.analysis-violin').count(), 1);
+  assert.equal(await page.locator('.analysis-metrics').innerText(), `Feasible completions\n${BigInt(result.tree_count).toLocaleString()}\nAccuracy on predicted samples\n${await page.locator('.analysis-metrics b').nth(1).innerText()}\nNumber of leaves\n${result.leaf_distribution[0].value} – ${result.leaf_distribution[result.leaf_distribution.length - 1].value}`);
+  assert.equal(await page.getByText('Training samples', { exact: true }).count(), 0);
+  const leavesChart = page.locator('.analysis-distribution-leaves');
+  await leavesChart.locator('rect').first().hover();
+  const firstBin = result.leaf_distribution[0];
+  assert.ok((await leavesChart.getByRole('tooltip').innerText()).includes(`${firstBin.value} leaves · ${BigInt(firstBin.count).toLocaleString()} models`));
+  await leavesChart.locator('summary').click();
+  assert.equal(await leavesChart.locator('tbody tr').count(), result.leaf_distribution.length);
+  const abstentionChart = page.locator('.analysis-distribution-abstention');
+  await abstentionChart.locator('rect').last().focus();
+  assert.ok((await abstentionChart.getByRole('tooltip').innerText()).includes('% abstained'));
+  const downloadEvent = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export analysis', exact: true }).click();
+  const download = await downloadEvent;
+  const exported = JSON.parse(await fs.readFile(await download.path(), 'utf8'));
+  assert.deepEqual(exported, result, 'Export should retain every analysis field');
+  assert.equal(exported.partial_tree.kind, 'choice');
+  assert.ok(exported.training_settings && exported.timings && exported.objective_distribution);
+  await page.screenshot({ path: '/tmp/atb-analysis-menu.png' });
   assert.equal(await page.locator('.analysis-dialog input').count(), 0, 'Analysis should have no cap controls');
   assert.equal(await page.getByRole('button', { name: 'Calculate exact ranges', exact: true }).count(), 0);
   const requestBody = response.request().postDataJSON();
@@ -75,6 +99,7 @@ async function exerciseAnalysis(page) {
   await page.getByRole('button', { name: 'Analyze', exact: true }).click();
   const fixedResult = await (await fixed).json();
   assert.equal(fixedResult.tree_count, '1');
+  assert.deepEqual(fixedResult.leaf_distribution, [{value: 1, count: '1', probability: 1}]);
   for (const row of fixedResult.disagreement) assert.equal(row.disagreement, 0);
   await page.getByLabel('Close analysis', { exact: true }).click();
   for (const mode of ['Ensure prediction', 'Both']) {
@@ -94,6 +119,25 @@ async function exerciseAnalysis(page) {
     await page.locator('.constraint-modal').waitFor({ state: 'detached' });
   }
   assert.equal(await page.evaluate(async () => (await (await fetch('/api/session')).json()).full_graph_exports), 0);
-  console.log('Exact native analysis menu, class counts, violin, whole-tree caps and fixed-tree analysis passed');
+  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Upload dataset' }).click();
+  if (!(await page.getByRole('button', { name: 'Reset training settings', exact: true }).isVisible())) await page.locator('summary').filter({ hasText: 'Advanced training settings' }).click();
+  await page.getByRole('button', { name: 'Reset training settings', exact: true }).click();
+  await page.locator('.live-file input').setInputFiles({ name: 'multiclass.csv', mimeType: 'text/csv', buffer: Buffer.from('a,label\n0,one\n0,two\n0,three\n') });
+  await page.getByLabel('Maximum depth', { exact: true }).fill('0');
+  const started = page.waitForResponse(r => r.url().endsWith('/api/session') && r.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Start ArborEnum', exact: true }).click();
+  const newSid = (await (await started).json()).session_id;
+  await page.waitForFunction(sid => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.graph?.metadata?.session_id === sid, newSid);
+  await page.waitForFunction(async () => ['finished', 'stopped'].includes((await (await fetch('/api/session')).json()).phase));
+  const multiclass = page.waitForResponse(r => r.url().includes('/api/analyze?'));
+  await page.getByRole('button', { name: 'Analyze', exact: true }).click();
+  const multiResult = await (await multiclass).json();
+  assert.equal(multiResult.class_count, 3); assert.equal(multiResult.abstention_enabled, false);
+  await page.locator('.analysis-importance').waitFor();
+  assert.equal(await page.locator('.analysis-distribution-abstention').count(), 0);
+  assert.equal(await page.getByText('For each sample, the proportion of models differing from the most common prediction.', { exact: true }).count(), 1);
+  await page.getByLabel('Close analysis', { exact: true }).click();
+  console.log('Analysis ranges, majority disagreement, distribution hovers, conditional abstention and complete export passed');
 }
 module.exports = { exerciseAnalysis };

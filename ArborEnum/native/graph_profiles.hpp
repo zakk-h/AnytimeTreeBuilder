@@ -411,9 +411,9 @@ public:
         }
         json disagreement = json::array();
         for (size_t i = 0; i < predictions.size(); ++i) {
-            check_(); json counts = json::array(), probabilities = json::array(); double same = 0;
-            for (const auto& count : predictions[i]) { const double p = count.fraction(total); counts.push_back(count.str()); probabilities.push_back(p); same += p * p; }
-            disagreement.push_back({{"row", i + 1}, {"counts", counts}, {"probabilities", probabilities}, {"disagreement", std::clamp(1 - same, 0., 1.)}});
+            check_(); json counts = json::array(), probabilities = json::array(); double modal_probability = 0;
+            for (const auto& count : predictions[i]) { const double p = count.fraction(total); counts.push_back(count.str()); probabilities.push_back(p); modal_probability = std::max(modal_probability, p); }
+            disagreement.push_back({{"row", i + 1}, {"counts", counts}, {"probabilities", probabilities}, {"disagreement", std::clamp(1 - modal_probability, 0., 1.)}});
         }
         const double prediction_seconds = seconds_since(prediction_started);
         const auto importance_started = std::chrono::steady_clock::now();
@@ -446,8 +446,11 @@ public:
             importance_ranges.push_back({{"feature", f}, {"name", data_->names[f]}, {"min", double(low / data_->y.size())}, {"max", double(high / data_->y.size())}, {"by_objective", by_objective}});
             feature_times.push_back({{"feature", f}, {"name", data_->names[f]}, {"seconds", seconds_since(feature_started)}});
         }
-        return {{"tree_count", total.str()}, {"sample_count", data_->y.size()}, {"exact", true}, {"permutation", "expectation_over_all_permutations"},
-            {"leaf_distribution", histogram(leaves)}, {"abstention_distribution", histogram(abstentions)}, {"objective_distribution", histogram(objectives)},
+        auto abstention_distribution = histogram(abstentions);
+        for (auto& bin : abstention_distribution) bin["proportion_abstained"] = double(bin.at("value").get<int>()) / data_->y.size();
+        return {{"class_count", data_->classes.size()}, {"abstention_enabled", meta_.value("use_deferral", !ordinary_only_)},
+            {"disagreement_metric", "variation_ratio"}, {"tree_count", total.str()}, {"sample_count", data_->y.size()}, {"exact", true}, {"permutation", "expectation_over_all_permutations"},
+            {"leaf_distribution", histogram(leaves)}, {"abstention_distribution", abstention_distribution}, {"objective_distribution", histogram(objectives)},
             {"accuracy", {{"min", min_accuracy <= max_accuracy ? json(min_accuracy) : json(nullptr)}, {"max", min_accuracy <= max_accuracy ? json(max_accuracy) : json(nullptr)}, {"undefined_count", undefined_accuracy.str()}}},
             {"importance", importance_ranges}, {"prediction_labels", [&] { json labels = data_->classes; labels.push_back("Abstain"); return labels; }()},
             {"disagreement", disagreement}, {"visited_nodes", visited()},

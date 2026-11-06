@@ -532,8 +532,13 @@ static void profile_fixture(bool continuous, bool allow_abstain = true) {
     const auto& selected = model.result->splits.front();
     json partial = {{"uid", 0}, {"kind", "split"}, {"feature", selected.feature}, {"left", {{"uid", 1}, {"kind", "choice"}}},
         {"right", {{"uid", 2}, {"kind", "leaf"}, {"prediction", selected.right->leaves.front().prediction}}}};
-    for (const auto& [tree, options] : std::vector<std::pair<json,json>>{{root(), json::object()}, {partial, json::object()},
-            {root(), {{"maxLeaves", 1}}}, {root(), {{"maxAbstainedSamples", 0}}}, {root(), {{"maxLeaves", 2}, {"maxAbstainedSamples", 1}}}}) {
+    std::vector<std::pair<json,json>> cases{{root(), json::object()}, {partial, json::object()},
+            {root(), {{"maxLeaves", 1}}}, {root(), {{"maxAbstainedSamples", 0}}}, {root(), {{"maxLeaves", 2}, {"maxAbstainedSamples", 1}}}};
+    for (const auto& leaf : selected.right->leaves) if (leaf.prediction == -1) {
+        auto fixed_abstain = partial; fixed_abstain["right"]["prediction"] = -1;
+        cases.push_back({fixed_abstain, json::object()});
+    }
+    for (const auto& [tree, options] : cases) {
         GraphQueries query(model, meta, {}, &data);
         const auto result = query.analyze(tree, options);
         uint64_t count = 0, undefined = 0;
@@ -572,9 +577,9 @@ static void profile_fixture(bool continuous, bool allow_abstain = true) {
         require(std::abs(result["accuracy"]["min"].get<double>() - min_accuracy) < 1e-12 && std::abs(result["accuracy"]["max"].get<double>() - max_accuracy) < 1e-12, "Conditional accuracy range was incorrect");
         for (int f = 0; f < 2; ++f) require(std::abs(result["importance"][f]["min"].get<double>() - low[f]) < 1e-12 && std::abs(result["importance"][f]["max"].get<double>() - high[f]) < 1e-12, "All-permutation importance did not match exhaustive permutations");
         for (int i = 0; i < 4; ++i) {
-            double same = 0;
-            for (size_t c = 0; c <= data.classes.size(); ++c) { require(result["disagreement"][i]["counts"][c] == std::to_string(predictions[i][c]), "Inside/outside class counts were incorrect"); const double p = double(predictions[i][c]) / count; same += p*p; }
-            require(std::abs(result["disagreement"][i]["disagreement"].get<double>() - (1-same)) < 1e-12, "Disagreement probability was incorrect");
+            double modal_probability = 0;
+            for (size_t c = 0; c <= data.classes.size(); ++c) { require(result["disagreement"][i]["counts"][c] == std::to_string(predictions[i][c]), "Inside/outside class counts were incorrect"); const double p = double(predictions[i][c]) / count; modal_probability = std::max(modal_probability, p); }
+            require(std::abs(result["disagreement"][i]["disagreement"].get<double>() - (1-modal_probability)) < 1e-12, "Modal prediction disagreement was incorrect");
         }
         auto constraint = options; constraint["mode"] = "avoid"; constraint["maxLeaves"] = options.value("maxLeaves", 4);
         const auto filled = query.complete(tree, 0, 3, "constrained", constraint, 0);

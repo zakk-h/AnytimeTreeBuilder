@@ -300,7 +300,12 @@ public:
         prepare(tree, tree.at("uid").get<int>());
         require_budget_feasible();
         GraphProfiles profiles(model_, meta_, data_, tree, options, true, [&] { check(); }, root_budget());
-        auto reply = profiles.analyze(); visited_ = profiles.visited(); return reply;
+        auto reply = profiles.analyze(); visited_ = profiles.visited();
+        reply["partial_tree"] = tree;
+        reply["root_budget"] = root_budget();
+        reply["normalized_budget"] = double(root_budget()) / meta_.at("root_n").get<int>();
+        reply["training_settings"] = meta_.value("training_settings", json::object());
+        return reply;
     }
     json complete(json tree, int active, int next_uid, const std::string& mode, const json& constraint, uint64_t seed) {
         if (mode != "optimal" && mode != "random" && mode != "constrained") throw std::invalid_argument("Invalid completion mode");

@@ -68,6 +68,14 @@ def main():
         for row in analysis['disagreement']:
             assert row['counts'] == ['1', '1', '1'] and abs(row['disagreement'] - 2/3) < 1e-12, row
         assert analysis['importance'][0]['min'] == analysis['importance'][0]['max'] == 0
+        assert analysis['disagreement_metric'] == 'variation_ratio'
+        assert analysis['class_count'] == 2 and analysis['abstention_enabled']
+        assert analysis['partial_tree'] == tiny_tree and 'root_budget' in analysis and 'training_settings' in analysis
+        code, fixed_abstain = call(analysis_url, {'tree': {'uid': 0, 'kind': 'leaf', 'prediction': -1}})
+        assert code == 200 and fixed_abstain['tree_count'] == '1', fixed_abstain
+        assert fixed_abstain['leaf_distribution'] == [{'value': 1, 'count': '1', 'probability': 1}]
+        assert fixed_abstain['abstention_distribution'] == [{'value': 4, 'count': '1', 'probability': 1, 'proportion_abstained': 1}]
+        assert all(row['disagreement'] == 0 for row in fixed_abstain['disagreement'])
         budget_url = '/api/budget?session_id=' + tiny_id
         assert call(budget_url, {'budget': -1})[0] == 400
         assert call(budget_url, {'budget': 1.5})[0] == 400
