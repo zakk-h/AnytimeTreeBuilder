@@ -1121,9 +1121,10 @@ private:
     bool stronger_rollout = false;
     // int num_proxy_features = -1; // <=0 means use all feature. positive for feature selection
     
-    // empty means unrestricted / all features.
-    // non empty means these exact feature indices are allowed when the relevant boolean is on.
+    // Empty means unrestricted unless explicit_proxy_features_ is set.
+    // A nonempty vector restricts the enabled proxy kinds to these exact IDs.
     std::vector<int> allowed_proxy_features;
+    bool explicit_proxy_features_ = false;
     bool restrict_proxy_in_lickety = false;
     bool restrict_proxy_in_depthd_exact = false;
     bool restrict_proxy_in_greedy = false;
@@ -1233,7 +1234,7 @@ private:
 
     // we may also consider any of those 3 being restricted to a small binarization. this checks that for a given kind.
     inline bool should_restrict_proxy_features_(ProxyLoopKind kind) const {
-        if (allowed_proxy_features.empty()) return false;
+        if (allowed_proxy_features.empty() && !explicit_proxy_features_) return false;
 
         switch (kind) {
             case ProxyLoopKind::Lickety:
@@ -1249,20 +1250,20 @@ private:
     inline const std::vector<int>& proxy_features_for_(ProxyLoopKind kind) const {
         static const std::vector<int> empty;
         if (should_restrict_proxy_features_(kind)) return allowed_proxy_features;
-        return empty; // empty means use normal 0..n_features-1 loop
+        return empty; // The restriction flag distinguishes unrestricted from explicitly empty.
     }
 
     // various ways to derive what features you should give the proxy
     inline bool use_restricted_greedy_proxy_() const {
-        return !allowed_proxy_features.empty() && restrict_proxy_in_greedy;
+        return (!allowed_proxy_features.empty() || explicit_proxy_features_) && restrict_proxy_in_greedy;
     }
 
     inline bool use_restricted_depthd_exact_proxy_() const {
-        return !allowed_proxy_features.empty() && restrict_proxy_in_depthd_exact;
+        return (!allowed_proxy_features.empty() || explicit_proxy_features_) && restrict_proxy_in_depthd_exact;
     }
 
     inline bool use_restricted_lickety_proxy_() const {
-        return !allowed_proxy_features.empty() && restrict_proxy_in_lickety;
+        return (!allowed_proxy_features.empty() || explicit_proxy_features_) && restrict_proxy_in_lickety;
     }
 
     inline bool should_add_continuous_greedy_split_to_binary_lickety_() const {
@@ -2022,6 +2023,9 @@ private:
 
 
 public:
+    // A learned ensemble can have no splits. An explicitly empty proxy must
+    // remain leaf-only rather than falling back to every dataset threshold.
+    void set_explicit_proxy_features(bool value) { explicit_proxy_features_ = value; }
     // Native live queries run on the enumeration thread and use these bit masks
     // to trace a displayed path, without exporting or indexing the Rashomon DAG.
     Packed live_root_mask() const { return root_mask_(); }
@@ -13453,7 +13457,7 @@ private:
             };
 
             
-            if (feats.empty()) {
+            if (!should_restrict_proxy_features_(ProxyLoopKind::DepthDExact)) {
                 for (int f = 0; f < n_features; ++f) eval_feature(f);
             } else {
                 for (int f : feats) eval_feature(f);
@@ -13490,7 +13494,7 @@ private:
             if (sum < best_sum) best_sum = sum;
         };
 
-        if (feats.empty()) {
+        if (!should_restrict_proxy_features_(ProxyLoopKind::DepthDExact)) {
             for (int f = 0; f < n_features; ++f) eval_feature(f);
         } else {
             for (int f : feats) eval_feature(f);
@@ -13578,7 +13582,7 @@ private:
             if (sum < best_sum) best_sum = sum;
         };
 
-        if (feats.empty()) {
+        if (!should_restrict_proxy_features_(ProxyLoopKind::DepthDExact)) {
             for (int f = 0; f < n_features; ++f) eval_feature(f);
         } else {
             for (int f : feats) eval_feature(f);
@@ -13684,7 +13688,7 @@ private:
             }
         };
 
-        if (feats.empty()) {
+        if (!should_restrict_proxy_features_(ProxyLoopKind::DepthDExact)) {
             for (int f2 = 0; f2 < n_features; ++f2) {
                 eval_second_feature(f2);
 
@@ -13798,7 +13802,7 @@ private:
             );
         };
 
-        if (feats.empty()) {
+        if (!should_restrict_proxy_features_(ProxyLoopKind::DepthDExact)) {
             for (int f = 0; f < n_features; ++f) eval_feature(f);
         } else {
             for (int f : feats) eval_feature(f);
@@ -14014,7 +14018,7 @@ private:
             );
         };
 
-        if (feats.empty()) {
+        if (!should_restrict_proxy_features_(ProxyLoopKind::Lickety)) {
             for (int f = 0; f < n_features; ++f) {
                 eval_feature(f);
             }
@@ -14163,7 +14167,7 @@ private:
             
         };
 
-        if (feats.empty()) {
+        if (!should_restrict_proxy_features_(ProxyLoopKind::Lickety)) {
             for (int f = 0; f < n_features; ++f) {
                 eval_feature(f);
             }
@@ -14298,7 +14302,7 @@ private:
             }
         };
 
-        if (feats.empty()) {
+        if (!should_restrict_proxy_features_(ProxyLoopKind::Lickety)) {
             for (int f = 0; f < n_features; ++f) {
                 eval_feature(f);
             }
@@ -14397,7 +14401,7 @@ private:
                 }
             };
 
-            if (feats.empty()) {
+            if (!should_restrict_proxy_features_(ProxyLoopKind::Greedy)) {
                 for (int f = 0; f < n_features; ++f) {
                     eval_feature(f);
                 }
@@ -14473,7 +14477,7 @@ private:
             }
         };
 
-        if (feats.empty()) {
+        if (!should_restrict_proxy_features_(ProxyLoopKind::Greedy)) {
             for (int f = 0; f < n_features; ++f) {
                 eval_feature(f);
             }
@@ -14569,7 +14573,7 @@ private:
                 }
             };
 
-            if (feats.empty()) {
+            if (!should_restrict_proxy_features_(ProxyLoopKind::Greedy)) {
                 for (int f = 0; f < n_features; ++f) {
                     eval_feature(f);
                 }
@@ -14606,7 +14610,7 @@ private:
                 if (sum < best_sum) { best_sum = sum; best_f = f; }
             };
 
-            if (feats.empty()) {
+            if (!should_restrict_proxy_features_(ProxyLoopKind::Greedy)) {
                 for (int f = 0; f < n_features; ++f) {
                     eval_feature(f);
                 }

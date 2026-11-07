@@ -1,4 +1,5 @@
 export const DEFAULT_TRAINING_SETTINGS = {
+  xgboost_max_depth: 2, xgboost_estimators: 125,
   lambda_reg: .005, depth_budget: 5, rashomon_mult: .01, second_rashomon_mult: .01,
   runtime_limit_seconds: 600, memory_limit_mb: 10000, proxy_mode: 'binarized',
   allow_abstain: false, abstain_cost: .1,
@@ -27,8 +28,9 @@ export function thresholdIds(text: string): number[] {
 
 export function trainingSettingsError(s: TrainingSettings): string | undefined {
   if (Object.values(s).some(value => typeof value === 'number' && !Number.isFinite(value))) return 'Fill in all numeric settings.';
-  const integers = ['depth_budget', 'lookahead_k', 'refinement_width', 'max_refinement_rounds', 'max_number_thresholds_per_feature', 'proxy_style', 'greedy_split_mode'] as const;
+  const integers = ['xgboost_max_depth', 'xgboost_estimators', 'depth_budget', 'lookahead_k', 'refinement_width', 'max_refinement_rounds', 'max_number_thresholds_per_feature', 'proxy_style', 'greedy_split_mode'] as const;
   if (integers.some(key => !Number.isInteger(s[key]) || s[key] > 2147483647)) return 'Depth, lookahead, widths, rounds and threshold limits must be integers.';
+  if (s.xgboost_max_depth < 1 || s.xgboost_max_depth > 32 || s.xgboost_estimators < 1) return 'XGBoost depth must be between 1 and 32, with at least one estimator.';
   if (s.depth_budget < 0 || s.depth_budget > 127) return 'Maximum depth must be between 0 and 127.';
   if (s.lookahead_k < 0 || s.lookahead_k > s.depth_budget) return 'Lookahead must be between 0 and maximum depth.';
   if (s.lambda_reg < 0 || s.rashomon_mult < 0 || s.abstain_cost < 0 || s.multiplicative_slack < 0) return 'Penalties and tolerances must be nonnegative.';

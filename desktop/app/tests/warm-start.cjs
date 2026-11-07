@@ -1,0 +1,33 @@
+const assert = require('node:assert/strict');
+async function exerciseWarmStart(page) {
+  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Upload dataset' }).click();
+  await page.locator('summary').filter({ hasText: 'Advanced training settings' }).click();
+  await page.getByRole('button', { name: 'Reset training settings', exact: true }).click();
+  assert.equal(await page.getByLabel('XGBoost maximum depth', { exact: true }).inputValue(), '2');
+  assert.equal(await page.getByLabel('XGBoost estimators', { exact: true }).inputValue(), '125');
+  const csv = 'temperature,weekday,label\n' + Array.from({length: 80}, (_, i) => `${i},${i % 2},${i < 20 ? 'low' : 'high'}`).join('\n');
+  await page.locator('.live-file input').setInputFiles({name: 'warm-start.csv', mimeType: 'text/csv', buffer: Buffer.from(csv)});
+  await page.waitForFunction(() => !document.querySelector('.live-dialog .primary-button').disabled);
+  await page.getByLabel('XGBoost maximum depth', { exact: true }).fill('0');
+  assert.equal(await page.getByRole('button', { name: 'Start ArborEnum', exact: true }).isDisabled(), true);
+  await page.getByLabel('XGBoost maximum depth', { exact: true }).fill('3');
+  await page.getByLabel('XGBoost estimators', { exact: true }).fill('9');
+  await page.getByLabel('Maximum refinement rounds', { exact: true }).fill('0');
+  await page.getByLabel('Maximum depth', { exact: true }).fill('2');
+  const posted = page.waitForResponse(r => r.url().endsWith('/api/session') && r.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Start ArborEnum', exact: true }).click();
+  const sid = (await (await posted).json()).session_id;
+  await page.waitForFunction(sid => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.graph?.metadata?.session_id === sid, sid);
+  const meta = await page.evaluate(async sid => (await fetch('/api/meta?session_id=' + sid)).json(), sid);
+  assert.equal(meta.training_settings.xgboost_max_depth, 3);
+  assert.equal(meta.training_settings.xgboost_estimators, 9);
+  assert.equal(meta.warm_start.method, 'xgboost');
+  assert.equal(meta.warm_start.boosted_rounds, 9);
+  assert.equal(meta.warm_start.tree_count, 9);
+  assert.ok(meta.warm_start.thresholds.some(cut => cut.originalFeature === 0 && cut.threshold === 19));
+  assert.ok(meta.warm_start.initial_threshold_ids.length > 0);
+  assert.ok(meta.warm_start.initial_threshold_ids.every(id => meta.warm_start.proxy_threshold_ids.includes(id)));
+  console.log('Native XGBoost warm start, defaults, advanced controls and learned thresholds passed');
+}
+module.exports = { exerciseWarmStart };

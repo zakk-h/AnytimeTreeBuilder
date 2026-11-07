@@ -29,6 +29,11 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
     </div>
     <details className="training-advanced">
       <summary>Advanced training settings</summary>
+      <h3>XGBoost warm start</h3>
+      <div className="live-fields">
+        {number('xgboost_max_depth', 'XGBoost maximum depth', 'Depth of the boosted trees used to select proxy and initial enumeration thresholds.', 1, 32, 1)}
+        {number('xgboost_estimators', 'XGBoost estimators', 'Boosting rounds; multiclass training builds one tree per class in each round.', 1, undefined, 1)}
+      </div>
       <h3>Objective and search</h3>
       <div className="live-fields">
         {number('lookahead_k', 'Lookahead depth', 'Higher values improve the initial proxy at greater search cost.', 0, s.depth_budget, 1)}

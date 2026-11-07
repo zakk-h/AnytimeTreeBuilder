@@ -1,5 +1,6 @@
 #pragma once
 #include "graph_queries.hpp"
+#include "xgboost_warm_start.hpp"
 #include <condition_variable>
 #include <future>
 #include <queue>
@@ -88,6 +89,7 @@ class Session {
     void run(Dataset data, std::stop_token lifetime) noexcept {
         ArborEnum model;
         model.live_forbid_graph_export = true;
+        model.set_explicit_proxy_features(true);
         json meta;
         bool root_announced = false; // Owner-thread state for the model's lifetime.
         try {
@@ -101,19 +103,18 @@ class Session {
                 else continuous.push_back(f);
             }
             std::vector<std::vector<double>> numeric(n);
+            const auto warm = train_warm_start(data, settings_, [&] {
+                if (cancel_search_.load() || lifetime.stop_requested()) throw LiveEnumerationCancelled();
+            });
             std::vector<std::vector<uint8_t>> bin(n), seed(n), proxy(n);
             for (size_t i = 0; i < n; ++i) {
                 for (size_t f = 0; f < binary.size(); ++f) bin[i].push_back(data.X[i][binary[f]] <= binary_cuts[f]);
                 for (int f : continuous) numeric[i].push_back(data.X[i][f]);
-                if (!continuous.empty()) seed[i].push_back(data.y[i] == 0);
-            }
-            // Deterministic median seeds; continuous Lickety uses every threshold.
-            for (int f : continuous) {
-                std::vector<double> col;
-                for (const auto& row : data.X) col.push_back(row[f]);
-                std::sort(col.begin(), col.end());
-                double cut = col[(n - 1) / 2];
-                for (size_t i = 0; i < n; ++i) proxy[i].push_back(data.X[i][f] <= cut);
+                proxy[i] = bin[i];
+                for (const auto& cut : warm.thresholds) {
+                    const auto bit = static_cast<uint8_t>(data.X[i][cut.feature] <= cut.value);
+                    seed[i].push_back(bit); proxy[i].push_back(bit);
+                }
             }
             model.prepare_continuous_data(numeric, bin, data.y, seed, proxy, settings_.max_thresholds, settings_.abstain ? data.y : std::vector<int>{});
             json registry = json::array();
@@ -126,6 +127,20 @@ class Session {
             for (const auto* ids : {&settings_.proxy_features, &settings_.initial_features})
                 for (int id : *ids) if (static_cast<size_t>(id) >= registry.size()) throw std::invalid_argument("Threshold feature ID is outside the prepared feature registry");
             meta = {{"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", static_cast<int>(std::llround(settings_.lambda * n))}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
+            auto initial_features = settings_.initial_features.empty() ? map_warm_thresholds(warm, data, registry) : settings_.initial_features;
+            auto proxy_features = settings_.proxy_features;
+            if (proxy_features.empty()) {
+                proxy_features = map_warm_thresholds(warm, data, registry);
+                for (const auto& feature : registry) if (feature.at("kind") == "binary_threshold") proxy_features.push_back(feature.at("internalFeature"));
+                std::sort(proxy_features.begin(), proxy_features.end());
+                proxy_features.erase(std::unique(proxy_features.begin(), proxy_features.end()), proxy_features.end());
+            }
+            json cuts = json::array();
+            for (const auto& cut : warm.thresholds) cuts.push_back({{"originalFeature", cut.feature}, {"threshold", cut.value}});
+            meta["warm_start"] = {{"method", "xgboost"}, {"version", "3.1.3"}, {"max_depth", settings_.xgb_depth},
+                {"estimators", settings_.xgb_estimators}, {"boosted_rounds", warm.rounds}, {"tree_count", warm.trees}, {"thresholds", cuts},
+                {"initial_threshold_ids", initial_features},
+                {"proxy_threshold_ids", proxy_features}};
             { std::lock_guard lock(mutex_); meta_ = meta; phase_ = "running"; }
             model.live_round_budget = [&](int current) {
                 std::lock_guard lock(mutex_);
@@ -163,7 +178,7 @@ class Session {
             if (!model.live_stop_requested()) {
                 model.fit_prepared_anytime(settings_.lambda, settings_.depth, settings_.multiplier, settings_.second_multiplier, settings_.multiplier_step, settings_.lookahead,
                     settings_.multipass, settings_.rule_list, settings_.proxy_style, settings_.majority_only, settings_.cache_cheap, true,
-                    settings_.proxy_features, settings_.initial_features, settings_.width, settings_.max_rounds, settings_.proxy_refinement,
+                    proxy_features, initial_features, settings_.width, settings_.max_rounds, settings_.proxy_refinement,
                     settings_.continuous_lickety < 0 ? settings_.proxy_mode != "binarized" : bool(settings_.continuous_lickety),
                     settings_.continuous_exact < 0 ? settings_.proxy_mode != "binarized" : bool(settings_.continuous_exact),
                     settings_.continuous_greedy < 0 ? settings_.proxy_mode == "continuous" : bool(settings_.continuous_greedy),

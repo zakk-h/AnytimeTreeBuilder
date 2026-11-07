@@ -58,7 +58,7 @@ jobs:
             binary: AnytimeTreeBuilder
             app_binary: linux-arm64-unpacked/anytimetreebuilder
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash

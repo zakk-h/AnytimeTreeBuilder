@@ -690,8 +690,70 @@ static void profile_analysis() {
     require(std::abs(big.fraction(big) - 1.) < 1e-12 && (big * ExactCount()).zero(), "Exact count probability arithmetic failed");
     profile_fixture(false); profile_fixture(true); profile_fixture(false, false);
 }
+static void xgboost_warm_start() {
+    const Settings defaults;
+    require(defaults.xgb_depth == 2 && defaults.xgb_estimators == 125, "Wrong XGBoost warm-start defaults");
+    Dataset binary; binary.names = {"precise", "binary"}; binary.classes = {"no", "yes"};
+    for (int i = 0; i < 80; ++i) { binary.X.push_back({1. + i * 1e-12, double(i % 2)}); binary.y.push_back(i >= 20); }
+    const auto warm = train_warm_start(binary, defaults, [] {});
+    require(warm.rounds == 125 && warm.trees == 125 && !warm.thresholds.empty(), "Native XGBoost did not train the requested ensemble");
+    require(std::any_of(warm.thresholds.begin(), warm.thresholds.end(), [&](const auto& cut) { return cut.feature == 0 && cut.value == binary.X[19][0]; }), "XGBoost thresholds lost float64 precision or used the old median seed");
+    const json aliases = json::array({{{"internalFeature", 0}, {"originalFeature", 1}, {"threshold", .5}}, {{"internalFeature", 1}, {"originalFeature", 0}, {"threshold", binary.X[19][0]}}});
+    const auto mapped = map_warm_thresholds(warm, binary, aliases);
+    require(mapped == std::vector<int>{1}, "Warm-start mapping lost the original feature identity");
+    const auto repeated = train_warm_start(binary, defaults, [] {});
+    require(warm.thresholds.size() == repeated.thresholds.size(), "XGBoost warm start was nondeterministic");
+    for (size_t i = 0; i < warm.thresholds.size(); ++i)
+        require(warm.thresholds[i].feature == repeated.thresholds[i].feature && warm.thresholds[i].value == repeated.thresholds[i].value, "Repeated XGBoost thresholds differed");
+    Dataset multi = binary; multi.classes.push_back("third");
+    for (size_t i = 0; i < multi.y.size(); ++i) multi.y[i] = int(i / 27);
+    Settings custom = Settings::parse({{"xgboost_max_depth", 3}, {"xgboost_estimators", 7}});
+    auto multiclass = train_warm_start(multi, custom, [] {});
+    require(multiclass.rounds == 7 && multiclass.trees == 21 && !multiclass.thresholds.empty(), "Multiclass XGBoost rounds or tree count were wrong");
+    int polls = 0; bool cancelled = false;
+    try { train_warm_start(binary, defaults, [&] { if (++polls == 6) throw LiveEnumerationCancelled(); }); }
+    catch (const LiveEnumerationCancelled&) { cancelled = true; }
+    require(cancelled, "Warm-start training ignored cancellation");
+    for (const json& settings : {json{{"xgboost_max_depth", 0}}, json{{"xgboost_max_depth", 33}}, json{{"xgboost_estimators", 0}}, json{{"xgboost_estimators", 1.5}}}) {
+        bool rejected = false; try { Settings::parse(settings); } catch (const std::exception&) { rejected = true; }
+        require(rejected, "Invalid XGBoost settings were accepted");
+    }
+    Dataset tiny; tiny.names = {"continuous"}; tiny.classes = {"no", "yes"};
+    tiny.X = {{0}, {1}, {2}, {3}}; tiny.y = {0, 1, 0, 1};
+    require(train_warm_start(tiny, defaults, [] {}).thresholds.empty(), "Tiny fixture unexpectedly admitted an XGBoost split");
+    Settings leaf_only; leaf_only.depth = 2; leaf_only.max_rounds = 0; leaf_only.lambda = .25;
+    Session empty_proxy("empty-proxy", tiny, leaf_only);
+    const auto empty_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!empty_proxy.done()) {
+        require(std::chrono::steady_clock::now() < empty_deadline, "Empty warm-start session did not finish");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    require(empty_proxy.status()["ready"] == true, empty_proxy.status().dump());
+    const auto leaf_view = empty_proxy.query("node", {{"tree", root()}, {"active_uid", 0}});
+    require(leaf_view["options"]["splits"].empty() && !leaf_view["options"]["leaves"].empty(), "An empty learned proxy silently used all thresholds");
+    custom.depth = 2; custom.max_rounds = 0; custom.multiplier = 2.; custom.second_multiplier = 2.;
+    Session session("xgb", binary, custom);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!session.done()) {
+        require(std::chrono::steady_clock::now() < deadline, "Warm-start session did not finish");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    require(session.status()["phase"] == "finished", session.status().dump());
+    const auto meta = session.metadata();
+    require(meta["warm_start"]["boosted_rounds"] == 7 && meta["warm_start"]["max_depth"] == 3, "Warm-start settings did not reach the native session");
+    const auto& ids = meta["warm_start"]["initial_threshold_ids"];
+    require(!ids.empty(), "XGBoost did not seed enumeration");
+    for (const auto& id : ids) require(std::find(meta["warm_start"]["proxy_threshold_ids"].begin(), meta["warm_start"]["proxy_threshold_ids"].end(), id) != meta["warm_start"]["proxy_threshold_ids"].end(), "Proxy omitted a warm-start threshold");
+    const auto view = session.query("node", {{"tree", root()}, {"active_uid", 0}});
+    for (const auto& split : view["options"]["splits"]) {
+        const auto& feature = meta["featureRegistry"][split["feature"].get<size_t>()];
+        if (feature["kind"] == "binary_threshold") continue;
+        require(std::find(ids.begin(), ids.end(), split["feature"]) != ids.end(), "Initial enumeration used an unselected threshold");
+    }
+}
 int main() {
     try {
+        xgboost_warm_start();
         initial_root(false); initial_root(true);
         initial_root(true, 1); initial_root(false, 2); initial_root(true, 2);
         initial_actor_queries();

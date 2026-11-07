@@ -53,7 +53,7 @@ run('ctest', ['--test-dir', build, '-C', 'Release', '--output-on-failure']);
 // Replace only this platform's generated package, never the source or other OS builds.
 rmSync(packageDir, { recursive: true, force: true });
 mkdirSync(packageDir, { recursive: true });
-run('cmake', ['--install', build, '--config', 'Release', '--prefix', packageDir]);
+run('cmake', ['--install', build, '--config', 'Release', '--prefix', packageDir, '--component', 'Runtime']);
 if (process.platform !== 'win32') chmodSync(join(packageDir, executable), 0o755);
 if (process.platform === 'darwin') {
   writeFileSync(join(packageDir, 'Open AnytimeTreeBuilder.command'), '#!/bin/sh\ncd -- "$(dirname -- "$0")" || exit 1\nexec ./AnytimeTreeBuilder\n', { mode: 0o755 });

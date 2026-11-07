@@ -13,6 +13,7 @@ using json = nlohmann::json;
 struct Settings {
     double lambda = 0.005, multiplier = 0.01, second_multiplier = 0.01;
     double multiplier_step = 0.0025, runtime = 600, memory = 10000, abstain_cost = 0.1, slack = 0;
+    int xgb_depth = 2, xgb_estimators = 125;
     int depth = 5, lookahead = 1, width = 1, proxy_refinement = 2;
     int max_rounds = -1, max_thresholds = -1, proxy_style = 0, greedy_split = 0;
     int continuous_lickety = -1, continuous_exact = -1, continuous_greedy = -1;
@@ -24,6 +25,7 @@ struct Settings {
         const auto automatic = [](int v) -> json { return v < 0 ? json(nullptr) : json(bool(v)); };
         return {{"lambda_reg", lambda}, {"rashomon_mult", multiplier}, {"second_rashomon_mult", second_multiplier},
             {"multiplier_step_size", multiplier_step}, {"runtime_limit_seconds", runtime}, {"memory_limit_mb", memory},
+            {"xgboost_max_depth", xgb_depth}, {"xgboost_estimators", xgb_estimators},
             {"depth_budget", depth}, {"lookahead_k", lookahead}, {"refinement_width", width},
             {"proxy_mode", proxy_mode}, {"key_mode", key_mode}, {"proxy_refinement", proxy_refinement == 0 ? "off" : proxy_refinement == 1 ? "on" : "auto"},
             {"allow_abstain", abstain}, {"abstain_cost", abstain_cost}, {"max_refinement_rounds", max_rounds},
@@ -56,6 +58,7 @@ struct Settings {
             }
             if (expected.is_null() && !value.is_null() && !value.is_boolean()) throw std::invalid_argument(key + " must be automatic (null), true or false");
         }
+        s.xgb_depth = j.value("xgboost_max_depth", s.xgb_depth); s.xgb_estimators = j.value("xgboost_estimators", s.xgb_estimators);
         s.lambda = j.value("lambda_reg", s.lambda);
         s.multiplier = j.value("rashomon_mult", s.multiplier);
         s.second_multiplier = j.value("second_rashomon_mult", s.multiplier);
@@ -80,7 +83,7 @@ struct Settings {
         s.continuous_lickety = override_mode("continuous_proxy_in_lickety"); s.continuous_exact = override_mode("continuous_proxy_in_depthd_exact"); s.continuous_greedy = override_mode("continuous_proxy_in_greedy");
         for (double x : {s.lambda, s.multiplier, s.second_multiplier, s.multiplier_step, s.runtime, s.memory, s.abstain_cost, s.slack})
             if (!std::isfinite(x)) throw std::invalid_argument("Settings must be finite");
-        if (s.lambda < 0 || s.multiplier < 0 || s.second_multiplier < s.multiplier || s.multiplier_step <= 0 || (s.runtime != -1 && s.runtime <= 0) || (s.memory != -1 && s.memory <= 0) || s.depth < 0 || s.depth > 127 || s.lookahead < 0 || s.lookahead > s.depth || s.width < 1 || s.abstain_cost < 0 || s.slack < 0 || s.max_rounds < -1 || (s.max_thresholds != -1 && s.max_thresholds < 1) || (s.proxy_style != 0 && s.proxy_style != 1 && s.proxy_style != 3) || s.greedy_split < 0 || s.greedy_split > 2)
+        if (s.xgb_depth < 1 || s.xgb_depth > 32 || s.xgb_estimators < 1 || s.lambda < 0 || s.multiplier < 0 || s.second_multiplier < s.multiplier || s.multiplier_step <= 0 || (s.runtime != -1 && s.runtime <= 0) || (s.memory != -1 && s.memory <= 0) || s.depth < 0 || s.depth > 127 || s.lookahead < 0 || s.lookahead > s.depth || s.width < 1 || s.abstain_cost < 0 || s.slack < 0 || s.max_rounds < -1 || (s.max_thresholds != -1 && s.max_thresholds < 1) || (s.proxy_style != 0 && s.proxy_style != 1 && s.proxy_style != 3) || s.greedy_split < 0 || s.greedy_split > 2)
             throw std::invalid_argument("Invalid enumeration limits or objective settings");
         if (s.proxy_mode != "hybrid" && s.proxy_mode != "continuous" && s.proxy_mode != "binarized") throw std::invalid_argument("Invalid proxy_mode");
         if (s.key_mode != "hash" && s.key_mode != "hash128" && s.key_mode != "exact" && s.key_mode != "lits_exact") throw std::invalid_argument("key_mode must be hash, hash128, exact or lits_exact");
