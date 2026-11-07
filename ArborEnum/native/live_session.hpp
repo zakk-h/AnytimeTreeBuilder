@@ -34,6 +34,7 @@ class Session {
     std::queue<std::shared_ptr<Request>> requests_;
     std::shared_ptr<Request> active_request_;
     std::deque<std::string> cancelled_analysis_tokens_;
+    json analysis_progress_ = nullptr;
     std::atomic<bool> pending_{false}, cancel_search_{false};
     // The actor keeps its actual model alive after enumeration stops. Querying
     // a finished/cancelled run never requires an export or reconstruction.
@@ -58,7 +59,15 @@ class Session {
                 json reply;
                 const auto& body = request->body;
                 if (request->operation == "node") reply = graph.view(body.at("tree"), body.at("active_uid"));
-                else if (request->operation == "analyze") reply = graph.analyze(body.at("tree"), body.value("options", json::object()));
+                else if (request->operation == "analyze") {
+                    const auto token = body.value("analysis_token", "");
+                    const auto progress = [&](int stage, size_t completed, size_t total, const std::string& feature) {
+                        std::lock_guard lock(mutex_);
+                        analysis_progress_ = {{"token", token}, {"stage", stage}, {"completed_features", completed}, {"feature_count", total}, {"current_feature", feature}};
+                    };
+                    reply = graph.analyze(body.at("tree"), body.value("options", json::object()), progress);
+                    progress(4, data.names.size(), data.names.size(), "");
+                }
                 else reply = graph.complete(body.at("tree"), body.at("active_uid"), body.at("next_uid"), body.at("mode"), body.value("constraint", json::object()), body.value("seed", std::random_device{}()));
                 if (request->operation == "analyze") reply["timings"]["queue_seconds"] =
                     std::chrono::duration<double>(query_started - request->enqueued).count();
@@ -267,6 +276,11 @@ public:
         if (!ready_) throw QueryUnavailable("Wait for the first feasible tree before changing its budget");
         requested_budget_ = budget;
         if (phase_ == "finished" || phase_ == "stopped" || phase_ == "failed") active_budget_ = budget;
+    }
+    json analysis_progress(const std::string& token) const {
+        std::lock_guard lock(mutex_);
+        if (analysis_progress_.is_object() && analysis_progress_.value("token", "") == token) return analysis_progress_;
+        return {{"token", token}, {"stage", -1}, {"completed_features", 0}, {"feature_count", 0}, {"current_feature", ""}};
     }
     json status() const {
         std::lock_guard lock(mutex_);

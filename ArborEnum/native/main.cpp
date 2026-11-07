@@ -346,6 +346,14 @@ int main(int argc, char** argv) {
                 current->cancel_analysis(token); respond(res, {{"cancel_requested", true}}, 202);
             }
         });
+        post_json("/api/analysis-progress", [&](const auto& req, auto& res) {
+            if (auto current = checked_session(req, res)) {
+                const json body = json::parse(req.body);
+                const auto token = body.at("token").get<std::string>();
+                if (token.empty() || token.size() > 128) throw std::invalid_argument("Invalid analysis token");
+                respond(res, current->analysis_progress(token));
+            }
+        });
         post_json("/api/analyze", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res))
                 respond(res, current->query("analyze", json::parse(req.body)));

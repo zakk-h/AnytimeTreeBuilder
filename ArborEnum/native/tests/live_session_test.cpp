@@ -548,7 +548,13 @@ static void profile_fixture(bool continuous, bool allow_abstain = true) {
     }
     for (const auto& [tree, options] : cases) {
         GraphQueries query(model, meta, {}, &data);
-        const auto result = query.analyze(tree, options);
+        std::vector<int> stages;
+        const auto result = query.analyze(tree, options, [&](int stage, size_t completed, size_t total, const std::string& feature) {
+            if (!stages.empty()) require(stage >= stages.back(), "Analysis progress moved backwards");
+            stages.push_back(stage);
+            if (stage == 3) require(total == data.names.size() && completed < total && feature == data.names[completed], "Feature progress reported unfinished work as complete");
+        });
+        require(stages == std::vector<int>({0, 1, 2, 3, 3}), "Analysis omitted a computation stage");
         uint64_t count = 0, undefined = 0;
         std::map<int, uint64_t> leaf_hist, abstain_hist;
         std::vector<std::vector<uint64_t>> predictions(4, std::vector<uint64_t>(data.classes.size() + 1));

@@ -6,6 +6,9 @@ import type { BuildNode } from './types';
 import './nativeAnalysis.css';
 
 type Bin = { value: number; count: string; probability: number };
+type Progress = { stage: number; completed_features: number; feature_count: number; current_feature: string };
+const analysisStages = ['Checking feasible completions', 'Counting completions', 'Computing prediction disagreement', 'Computing feature importance'];
+const completedStages = ['', 'Checked feasible completions.', 'Computed completion counts.', 'Computed counts, accuracy ranges, distributions, and disagreement.'];
 type Result = {
   session_id: string; checkpoint: number; tree_count: string; sample_count: number; exact: boolean;
   leaf_distribution: Bin[]; abstention_distribution: Bin[];
@@ -43,7 +46,7 @@ function Distribution({ bins, abstention = false, sampleCount }: { bins: Bin[]; 
       <text x="320" y="240" textAnchor="middle">{label}</text>
     </svg>
     {hovered && <div className="analysis-chart-tooltip" role="tooltip">{describe(hovered)}</div>}
-    <details><summary>View distribution</summary><table><thead><tr><th>{label}</th><th>Models</th><th>Proportion of models</th></tr></thead><tbody>{bins.map(b => <tr key={b.value}><td>{valueLabel(b.value)}</td><td>{exactCount(b.count)}</td><td>{percent(b.probability)}</td></tr>)}</tbody></table></details>
+
   </div>;
 }
 function Violin({ values, outcomes }: { values: number[]; outcomes: number }) {
@@ -62,7 +65,7 @@ function Violin({ values, outcomes }: { values: number[]; outcomes: number }) {
 }
 export function NativeAnalysis({ session, tree, disabled, onBusyChange }: { session: string; tree: BuildNode; disabled: boolean; onBusyChange: (busy: boolean) => void }) {
   const [open, setOpen] = useState(false), [result, setResult] = useState<Result | null>(null), [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(''), [progress, setProgress] = useState<Progress | null>(null);
   const request = useRef<AbortController | null>(null), token = useRef(''), modal = useRef<HTMLElement>(null), previousFocus = useRef<HTMLElement | null>(null);
   const cancel = () => {
     request.current?.abort(); request.current = null;
@@ -75,12 +78,22 @@ export function NativeAnalysis({ session, tree, disabled, onBusyChange }: { sess
   useEffect(() => { if (open) modal.current?.querySelector<HTMLButtonElement>('button')?.focus(); }, [open]);
   const run = async () => {
     cancel(); const controller = new AbortController(); request.current = controller; token.current = crypto.randomUUID();
-    setBusy(true); setError(''); setResult(null);
+    setBusy(true); setError(''); setResult(null); setProgress(null);
+    const analysisToken = token.current;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const next = await nativeApi<Progress>('analysis-progress', session, { token: analysisToken }, controller.signal);
+        if (!controller.signal.aborted) setProgress(next);
+      } catch { /* The analysis request itself reports connection or computation errors. */ }
+      if (!controller.signal.aborted) pollTimer = setTimeout(poll, 400);
+    };
+    pollTimer = setTimeout(poll, 150);
     try {
       const response = await nativeApi<Result>('analyze', session, { tree, analysis_token: token.current }, controller.signal);
       if (!controller.signal.aborted) setResult(response);
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : String(e)); }
-    finally { if (request.current === controller) { setBusy(false); request.current = null; token.current = ''; } }
+    finally { controller.abort(); clearTimeout(pollTimer); if (request.current === controller) { setBusy(false); request.current = null; token.current = ''; } }
   };
   return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Open a dataset session to analyze its native graph' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); void run(); }}><BarChart3 size={16}/> Analyze</button>
     {open && createPortal(<div className="analysis-overlay" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
@@ -95,11 +108,18 @@ export function NativeAnalysis({ session, tree, disabled, onBusyChange }: { sess
       }}>
         <header><div><h2 id="analysis-title">Analyze partial tree</h2></div><button className="ghost-button" aria-label="Close analysis" onClick={close}><X size={20}/></button></header>
         {busy && <button className="ghost-button" onClick={close}>Cancel analysis</button>}
-        {busy && <p role="status">Calculating exact counts and all-permutation ranges. Enumeration pauses while analysis reads the graph.</p>}
+        {busy && <div className="analysis-progress" role="status" aria-live="polite">
+          <p>Calculating…</p>
+          <progress aria-label="Analysis stages completed" max={4} value={Math.max(0, progress?.stage ?? 0) + (progress?.stage === 3 && progress.feature_count ? progress.completed_features / progress.feature_count : 0)}/>
+          {progress && progress.stage >= 0 && progress.stage < 4 && <>
+            {completedStages[progress.stage] && <small>{completedStages[progress.stage]}</small>}
+            <span>{analysisStages[progress.stage]}{progress.stage === 3 && progress.feature_count > 0 && ` · ${progress.completed_features}/${progress.feature_count} features complete`}{progress.current_feature && ` · ${progress.current_feature}`}</span>
+          </>}
+        </div>}
         {error && <><p role="alert" className="upload-error">{error}</p><button className="primary-button" onClick={() => void run()}>Retry analysis</button></>}
         {result && <>
           <div className="analysis-metrics"><div><span>Feasible completions</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>Accuracy on predicted samples</span><b>{result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Number of leaves</span><b>{result.leaf_distribution[0]?.value.toLocaleString()} – {result.leaf_distribution[result.leaf_distribution.length - 1]?.value.toLocaleString()}</b></div></div>
-          <p className="analysis-note">Exact for the graph available when analysis began. Trees are weighted uniformly; no completed trees or permutations were sampled. {result.accuracy.undefined_count !== '0' && `${countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.`}</p>
+          {result.accuracy.undefined_count !== '0' && <p className="analysis-note">{countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.</p>}
           <section><h3>Feature importance ranges</h3><p>Expected increase in loss over all permutations of one dataset feature. Min/max over tree completions in the Rashomon set.</p>
             <table className="analysis-importance"><thead><tr><th>Feature</th><th>Minimum (<abbr title="Percentage points">pp</abbr>)</th><th>Maximum (<abbr title="Percentage points">pp</abbr>)</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{(100 * f.min).toFixed(3)}</td><td>{(100 * f.max).toFixed(3)}</td></tr>)}</tbody></table>
           </section>

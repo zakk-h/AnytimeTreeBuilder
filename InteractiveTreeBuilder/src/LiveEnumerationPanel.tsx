@@ -145,7 +145,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
         <button className="ghost-button live-close" aria-label="Close enumeration setup" disabled={busy} onClick={() => onClose()}><X size={18}/></button>
         <div className="dialog-eyebrow"><Table2 size={16} /> DATASET IMPORT</div>
         <h2 id="live-title">Build from your data.</h2>
-        <p>Choose a CSV and a classification target. TRUE/FALSE values become 1/0; other text categories become named binary indicators. Numeric columns keep their values. Node options update whenever you choose a split or select a node.</p>
+        <p>Choose a CSV and a classification target. True/False values become 1/0; other text categories become named binary indicators.</p>
         <label className="live-file">Dataset CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={async e => {
           const file = e.target.files?.[0]; if (!file) return;
           const sequence = ++fileRead.current;

@@ -97,6 +97,7 @@ class GraphProfiles {
     uint32_t work_ticks_ = 0;
     const std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
     double bounds_seconds_ = 0, counting_seconds_ = 0;
+    std::function<void(int, size_t, size_t, const std::string&)> progress_;
     void check_work() { if ((++work_ticks_ & 1023U) == 0) check_(); }
     static double seconds_since(std::chrono::steady_clock::time_point start) {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -333,9 +334,11 @@ class GraphProfiles {
     }
 public:
     GraphProfiles(ArborEnum& model, const json& meta, const Dataset* data, const json& tree,
-                  const json& options, bool statistics, std::function<void()> check, int root_budget = INT_MAX)
+                  const json& options, bool statistics, std::function<void()> check, int root_budget = INT_MAX,
+                  std::function<void(int, size_t, size_t, const std::string&)> progress = {})
         : model_(model), meta_(meta), data_(data), partial_(tree), check_(std::move(check)), statistics_(statistics),
           eta_(meta.value("eta_defer", 0.0)), root_budget_(root_budget), root_{model.result.get(), nullptr, false} {
+        progress_ = std::move(progress);
         max_leaves_ = cap(options, "maxLeaves", 1); max_abstained_ = cap(options, "maxAbstainedSamples", 0);
         if (statistics && (!data || data->y.empty())) throw std::invalid_argument("Analysis requires the training dataset from a native session");
         if (options.contains("forbiddenInternalFeatures")) for (const auto& f : options.at("forbiddenInternalFeatures")) forbidden_.insert(f.get<int>());
@@ -346,9 +349,11 @@ public:
         }
         if (options.value("mode", "") == "sample") target_ = options.at("targetPrediction").get<int>();
         root_ = key(model.result.get(), &tree, options.value("mode", "") == "sample");
+        if (progress_) progress_(0, 0, 0, "");
         bound_from_root();
         bounds_seconds_ = seconds_since(started_);
         const auto count_started = std::chrono::steady_clock::now();
+        if (progress_) progress_(1, 0, 0, "");
         inside(root_, model.live_root_mask());
         counting_seconds_ = seconds_since(count_started);
         if (inside_.at(root_).empty()) throw std::invalid_argument("No completion satisfies the partial tree, caps and objective budget");
@@ -364,6 +369,7 @@ public:
         return {{"tree", emit(cell->plan, uid, &partial_)}, {"objective", chosen->objective}, {"leaves", chosen->leaves}, {"abstained_samples", chosen->abstained}};
     }
     json analyze() {
+        if (progress_) progress_(2, 0, 0, "");
         const auto prediction_started = std::chrono::steady_clock::now();
         const auto& root_table = inside_.at(root_);
         ExactCount total, undefined_accuracy;
@@ -425,6 +431,7 @@ public:
         const auto full = model_.live_root_mask();
         for (size_t f = 0; f < data_->names.size(); ++f) {
             check_();
+            if (progress_) progress_(3, f, data_->names.size(), data_->names[f]);
             const auto feature_started = std::chrono::steady_clock::now();
             if (!used_originals.count(int(f))) {
                 json by_objective = json::array();

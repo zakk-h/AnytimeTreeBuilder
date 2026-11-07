@@ -59,8 +59,13 @@ def main():
             time.sleep(.001)
         tiny_tree = {'uid': 0, 'kind': 'choice'}
         analysis_url = '/api/analyze?session_id=' + tiny_id
-        code, analysis = call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 1}})
+        code, analysis = call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 1}, 'analysis_token': 'progress-test'})
         assert code == 200 and analysis['exact'] and analysis['tree_count'] == '3', analysis
+        progress_url = '/api/analysis-progress?session_id=' + tiny_id
+        assert call(progress_url, {'token': ''})[0] == 400
+        code, progress = call(progress_url, {'token': 'progress-test'})
+        assert code == 200 and progress['stage'] == 4 and progress['completed_features'] == progress['feature_count'] == 1, progress
+        assert call(progress_url, {'token': 'another-analysis'})[1]['stage'] == -1
         for phase in ('queue_seconds', 'bounds_seconds', 'counting_seconds', 'prediction_seconds', 'importance_seconds', 'total_seconds'):
             assert analysis['timings'][phase] >= 0, analysis['timings']
         assert len(analysis['timings']['features']) == 1

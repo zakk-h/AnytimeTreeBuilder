@@ -296,10 +296,10 @@ public:
         }
         return {{"root_budget", root_budget()}, {"root_minimum", model_.result->min_objective}, {"root_size", meta_.at("root_n")}, {"summaries", std::move(summaries)}, {"options", {{"uid", active}, {"leaves", std::move(leaves)}, {"splits", std::move(splits)}}}, {"visited_nodes", visited_}};
     }
-    json analyze(json tree, const json& options) {
+    json analyze(json tree, const json& options, std::function<void(int, size_t, size_t, const std::string&)> progress = {}) {
         prepare(tree, tree.at("uid").get<int>());
         require_budget_feasible();
-        GraphProfiles profiles(model_, meta_, data_, tree, options, true, [&] { check(); }, root_budget());
+        GraphProfiles profiles(model_, meta_, data_, tree, options, true, [&] { check(); }, root_budget(), std::move(progress));
         auto reply = profiles.analyze(); visited_ = profiles.visited();
         reply["partial_tree"] = tree;
         reply["root_budget"] = root_budget();
