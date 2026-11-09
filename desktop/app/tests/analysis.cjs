@@ -76,7 +76,12 @@ async function exerciseAnalysis(page, exportAnalysis = async () => {
   assert.equal(await page.locator('.analysis-metrics').innerText(), `Feasible completions\n${BigInt(result.tree_count).toLocaleString()}\nAccuracy on predicted samples\n${await page.locator('.analysis-metrics b').nth(1).innerText()}\nNumber of leaves\n${result.leaf_distribution[0].value} – ${result.leaf_distribution[result.leaf_distribution.length - 1].value}`);
   assert.equal(await page.getByText('Training samples', { exact: true }).count(), 0);
   const leavesChart = page.locator('.analysis-distribution-leaves');
-  await leavesChart.locator('rect').first().hover();
+  const firstBar = leavesChart.locator('rect').first();
+  await firstBar.scrollIntoViewIfNeeded();
+  const barBounds = await firstBar.boundingBox();
+  assert.ok(barBounds);
+  // The chart handles hovering on the SVG, including subpixel-height bars.
+  await page.mouse.move(barBounds.x + barBounds.width / 2, barBounds.y + barBounds.height / 2);
   const firstBin = result.leaf_distribution[0];
   assert.ok((await leavesChart.getByRole('tooltip').innerText()).includes(`${firstBin.value} leaves · ${BigInt(firstBin.count).toLocaleString()} models`));
   assert.equal(await page.getByText('View distribution', { exact: true }).count(), 0);
