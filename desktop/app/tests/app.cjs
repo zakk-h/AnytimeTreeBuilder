@@ -1,7 +1,7 @@
 const { exerciseWarmStart } = require('./warm-start.cjs');
 const { exerciseAnalysis } = require('./analysis.cjs');
 const assert = require('node:assert/strict');
-const { mkdtempSync, rmSync } = require('node:fs');
+const { mkdtempSync, rmSync, readFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const { _electron } = require('playwright-core');
@@ -56,7 +56,27 @@ async function main() {
     assert.equal((await desktop.windows()).length, 1);
     await exerciseTraining(page);
     await exerciseStop(page);
-    await exerciseAnalysis(page);
+    await exerciseAnalysis(page, async () => {
+      // Electron owns its native save dialog; Playwright's browser download
+      // event is not a reliable signal for downloads in an Electron window.
+      const path = join(profile, 'partial-tree-analysis.json');
+      await desktop.evaluate(({ session }, path) => {
+        globalThis.atbExportState = 'waiting';
+        session.defaultSession.once('will-download', (_event, item) => {
+          item.setSavePath(path);
+          item.once('done', (_event, state) => { globalThis.atbExportState = state; });
+        });
+      }, path);
+      await page.getByRole('button', { name: 'Export analysis', exact: true }).click();
+      const deadline = Date.now() + 15000;
+      for (;;) {
+        const state = await desktop.evaluate(() => globalThis.atbExportState);
+        if (state !== 'waiting') { assert.equal(state, 'completed', 'Electron export failed'); break; }
+        assert.ok(Date.now() < deadline, 'Electron export did not complete');
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      return JSON.parse(readFileSync(path, 'utf8'));
+    });
     await exerciseWarmStart(page);
     if (process.env.ATB_SCREENSHOT) await page.screenshot({ path: process.env.ATB_SCREENSHOT });
     assert.deepEqual(errors, []);

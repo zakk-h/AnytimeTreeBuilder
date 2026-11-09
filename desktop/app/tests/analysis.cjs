@@ -1,6 +1,11 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-async function exerciseAnalysis(page) {
+async function exerciseAnalysis(page, exportAnalysis = async () => {
+  const downloadEvent = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export analysis', exact: true }).click();
+  const download = await downloadEvent;
+  return JSON.parse(await fs.readFile(await download.path(), 'utf8'));
+}) {
   await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Upload dataset' }).click();
   await page.locator('summary').filter({ hasText: 'Advanced training settings' }).click();
@@ -79,10 +84,7 @@ async function exerciseAnalysis(page) {
   const abstentionChart = page.locator('.analysis-distribution-abstention');
   await abstentionChart.locator('rect').last().focus();
   assert.ok((await abstentionChart.getByRole('tooltip').innerText()).includes('% abstained'));
-  const downloadEvent = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Export analysis', exact: true }).click();
-  const download = await downloadEvent;
-  const exported = JSON.parse(await fs.readFile(await download.path(), 'utf8'));
+  const exported = await exportAnalysis();
   assert.deepEqual(exported, result, 'Export should retain every analysis field');
   assert.equal(exported.partial_tree.kind, 'choice');
   assert.ok(exported.training_settings && exported.timings && exported.objective_distribution);

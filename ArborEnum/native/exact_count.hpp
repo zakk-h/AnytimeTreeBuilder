@@ -22,6 +22,12 @@ class ExactCount {
         for (auto n = small_; n; n /= base) digits_.push_back(uint32_t(n % base));
         small_ = 0;
     }
+    static std::pair<const uint32_t*, size_t> digit_view(const ExactCount& n, std::array<uint32_t, 3>& scratch) {
+        if (!n.digits_.empty()) return {n.digits_.data(), n.digits_.size()};
+        size_t size = 0;
+        for (auto value = n.small_; value; value /= base) scratch[size++] = uint32_t(value % base);
+        return {scratch.data(), size};
+    }
 public:
     ExactCount(uint64_t n = 0) : small_(n) {}
     bool zero() const { return digits_.empty() && small_ == 0; }
@@ -48,15 +54,7 @@ public:
         if (a.digits_.empty() && b.digits_.empty() && a.small_ <= UINT64_MAX / b.small_)
             return ExactCount(a.small_ * b.small_);
         std::array<uint32_t, 3> ad{}, bd{};
-        const auto view = [](const ExactCount& n, auto& scratch) {
-            size_t size = 0;
-            if (n.digits_.empty()) {
-                for (auto value = n.small_; value; value /= base) scratch[size++] = uint32_t(value % base);
-                return std::pair<const uint32_t*, size_t>{scratch.data(), size};
-            }
-            return std::pair<const uint32_t*, size_t>{n.digits_.data(), n.digits_.size()};
-        };
-        const auto [ap, an] = view(a, ad); const auto [bp, bn] = view(b, bd);
+        const auto [ap, an] = digit_view(a, ad); const auto [bp, bn] = digit_view(b, bd);
         ExactCount out; out.digits_.assign(an + bn, 0);
         for (size_t i = 0; i < an; ++i) {
             uint64_t carry = 0;

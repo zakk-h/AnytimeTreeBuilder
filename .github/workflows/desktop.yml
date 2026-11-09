@@ -86,7 +86,7 @@ jobs:
         run: |
           mkdir -p dist/apps
           docker run --rm -v "$PWD:/src" -w /src node:22-alpine sh -ec '
-            apk add --no-cache g++ cmake make python3 git
+            apk add --no-cache g++ cmake make python3 git linux-headers
             git config --global --add safe.directory /src
             node scripts/build-desktop.mjs --ui-ready --engine-only --static
             python3 ArborEnum/native/tests/test_desktop.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
