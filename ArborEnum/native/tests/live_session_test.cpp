@@ -737,24 +737,41 @@ static void xgboost_warm_start() {
     require(empty_proxy.status()["ready"] == true, empty_proxy.status().dump());
     const auto leaf_view = empty_proxy.query("node", {{"tree", root()}, {"active_uid", 0}});
     require(leaf_view["options"]["splits"].empty() && !leaf_view["options"]["leaves"].empty(), "An empty learned proxy silently used all thresholds");
-    custom.depth = 2; custom.max_rounds = 0; custom.multiplier = 2.; custom.second_multiplier = 2.;
-    Session session("xgb", binary, custom);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!session.done()) {
-        require(std::chrono::steady_clock::now() < deadline, "Warm-start session did not finish");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    require(session.status()["phase"] == "finished", session.status().dump());
-    const auto meta = session.metadata();
-    require(meta["warm_start"]["boosted_rounds"] == 7 && meta["warm_start"]["max_depth"] == 3, "Warm-start settings did not reach the native session");
-    const auto& ids = meta["warm_start"]["initial_threshold_ids"];
-    require(!ids.empty(), "XGBoost did not seed enumeration");
-    for (const auto& id : ids) require(std::find(meta["warm_start"]["proxy_threshold_ids"].begin(), meta["warm_start"]["proxy_threshold_ids"].end(), id) != meta["warm_start"]["proxy_threshold_ids"].end(), "Proxy omitted a warm-start threshold");
-    const auto view = session.query("node", {{"tree", root()}, {"active_uid", 0}});
-    for (const auto& split : view["options"]["splits"]) {
-        const auto& feature = meta["featureRegistry"][split["feature"].get<size_t>()];
-        if (feature["kind"] == "binary_threshold") continue;
-        require(std::find(ids.begin(), ids.end(), split["feature"]) != ids.end(), "Initial enumeration used an unselected threshold");
+    custom.depth = 2; custom.max_rounds = 0; custom.lambda = .125;
+    custom.multiplier = 2.; custom.second_multiplier = 2.;
+    int override_id = -1;
+    for (const std::string mode : {"binarized", "hybrid", "continuous", "override"}) {
+        custom.proxy_mode = mode == "override" ? "binarized" : mode;
+        if (mode == "override") custom.initial_features = {override_id};
+        Session session("xgb-" + mode, binary, custom);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!session.done()) {
+            require(std::chrono::steady_clock::now() < deadline, "Proxy preparation session did not finish");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        require(session.status()["phase"] == "finished" && session.status()["ready"] == true, session.status().dump());
+        const auto meta = session.metadata();
+        require(meta["warm_start"]["boosted_rounds"] == 7 && meta["warm_start"]["max_depth"] == 3, "XGBoost settings did not reach the native session");
+        const auto& ids = meta["warm_start"]["initial_threshold_ids"];
+        require(ids == json(custom.initial_features), "XGBoost implicitly activated continuous enumeration thresholds");
+        bool continuous_proxy = false;
+        for (const auto& id : meta["warm_start"]["proxy_threshold_ids"]) if (meta["featureRegistry"][id.get<size_t>()]["kind"] == "continuous_threshold") {
+            continuous_proxy = true;
+            if (override_id < 0) override_id = id.get<int>();
+        }
+        require(continuous_proxy, "The binarized proxy lost its learned thresholds");
+        const auto view = session.query("node", {{"tree", root()}, {"active_uid", 0}});
+        bool binary_split = false, explicit_split = false;
+        for (const auto& split : view["options"]["splits"]) {
+            const auto& feature = meta["featureRegistry"][split["feature"].get<size_t>()];
+            if (feature["kind"] == "binary_threshold") binary_split = true;
+            else {
+                require(mode == "override" && split["feature"] == override_id, "Initial enumeration used a continuous threshold by default");
+                explicit_split = true;
+            }
+        }
+        require(binary_split, "The initial graph omitted original binary features");
+        if (mode == "override") require(explicit_split, "Explicit initial threshold IDs were ignored");
     }
 }
 int main() {

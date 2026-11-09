@@ -15,6 +15,8 @@ async function exerciseWarmStart(page) {
   await page.getByLabel('XGBoost estimators', { exact: true }).fill('9');
   await page.getByLabel('Maximum refinement rounds', { exact: true }).fill('0');
   await page.getByLabel('Maximum depth', { exact: true }).fill('2');
+  await page.getByLabel('Leaf penalty', { exact: true }).fill('.125');
+  await page.getByLabel('Rashomon multiplier', { exact: true }).fill('2');
   const posted = page.waitForResponse(r => r.url().endsWith('/api/session') && r.request().method() === 'POST');
   await page.getByRole('button', { name: 'Start ArborEnum', exact: true }).click();
   const sid = (await (await posted).json()).session_id;
@@ -26,8 +28,11 @@ async function exerciseWarmStart(page) {
   assert.equal(meta.warm_start.boosted_rounds, 9);
   assert.equal(meta.warm_start.tree_count, 9);
   assert.ok(meta.warm_start.thresholds.some(cut => cut.originalFeature === 0 && cut.threshold === 19));
-  assert.ok(meta.warm_start.initial_threshold_ids.length > 0);
-  assert.ok(meta.warm_start.initial_threshold_ids.every(id => meta.warm_start.proxy_threshold_ids.includes(id)));
+  assert.deepEqual(meta.warm_start.initial_threshold_ids, []);
+  assert.ok(meta.warm_start.proxy_threshold_ids.some(id => meta.featureRegistry[id].kind === 'continuous_threshold'));
+  const view = await page.evaluate(async sid => (await fetch('/api/node?session_id=' + sid, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tree:{uid:0,kind:'choice'},active_uid:0})})).json(), sid);
+  assert.ok(view.options.splits.length > 0);
+  assert.ok(view.options.splits.every(split => meta.featureRegistry[split.feature].kind === 'binary_threshold'));
   console.log('Native XGBoost warm start, defaults, advanced controls and learned thresholds passed');
 }
 module.exports = { exerciseWarmStart };

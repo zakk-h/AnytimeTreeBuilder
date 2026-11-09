@@ -105,6 +105,28 @@ def main():
                             'constraint': {'mode': 'avoid', 'maxLeaves': 1, 'maxAbstainedSamples': 0}})
         assert code == 200 and capped['leaves'] == 1 and capped['abstained_samples'] == 0 and capped['objective'] == 3, capped
         assert call('/api/session')[1]['full_graph_exports'] == 0
+        # Learned proxy thresholds must not seed a continuous-only graph.
+        # Refinement must recover it even when the initial leaf exceeds the bound.
+        cold = {'feature_names': ['continuous'], 'class_names': ['no', 'yes'],
+                'X': [[i] for i in range(80)], 'y': [int(i >= 20) for i in range(80)],
+                'settings': {'depth_budget': 1, 'lambda_reg': .005, 'runtime_limit_seconds': 10}}
+        for rounds in (0, -1):
+            cold['settings']['max_refinement_rounds'] = rounds
+            code, cold_status = call('/api/session', cold)
+            assert code == 202, cold_status
+            cold_id = cold_status['session_id']
+            deadline = time.monotonic() + 15
+            while cold_status['phase'] not in ('finished', 'failed'):
+                assert time.monotonic() < deadline, cold_status
+                time.sleep(.005)
+                cold_status = call('/api/session')[1]
+            assert cold_status['phase'] == ('finished' if rounds == -1 else 'failed') and cold_status['ready'] == (rounds == -1), cold_status
+            if rounds == -1:
+                code, cold_meta = call('/api/meta?session_id=' + cold_id)
+                assert code == 200 and cold_meta['warm_start']['initial_threshold_ids'] == [], cold_meta
+                assert cold_meta['warm_start']['proxy_threshold_ids'], cold_meta
+                code, cold_view = call('/api/node?session_id=' + cold_id, {'tree': tiny_tree, 'active_uid': 0})
+                assert code == 200 and cold_view['options']['splits'], cold_view
         # A deliberately broad binary initial solve: query and cancel before
         # its first coarse checkpoint, then keep exploring the retained model.
         # Avoid the tiny cached DAG of a full binary cube on faster machines.

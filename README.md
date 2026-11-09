@@ -40,6 +40,6 @@ For the smaller browser-based version, run `./build.sh` and `./launch.sh`, then 
 
 [Native engine and tests](ArborEnum/native/README.md) · [Frontend development](InteractiveTreeBuilder/README.md) · [Source provenance](PROVENANCE.md)
 
-Advanced settings include the native XGBoost warm start (depth 2, 125 estimators by default).
+Advanced settings include the native XGBoost proxy (depth 2, 125 estimators by default).
 
 **Constrained** completion supports optional leaf and abstained-sample caps. **Analyze** starts automatically on opening and reports exact feature-importance and accuracy ranges, leaf/abstention distributions, and a sample-disagreement violin for completions of your current partial tree.

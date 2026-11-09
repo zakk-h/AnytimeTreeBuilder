@@ -122,7 +122,7 @@ class Session {
                 proxy[i] = bin[i];
                 for (const auto& cut : warm.thresholds) {
                     const auto bit = static_cast<uint8_t>(data.X[i][cut.feature] <= cut.value);
-                    seed[i].push_back(bit); proxy[i].push_back(bit);
+                    proxy[i].push_back(bit);
                 }
             }
             model.prepare_continuous_data(numeric, bin, data.y, seed, proxy, settings_.max_thresholds, settings_.abstain ? data.y : std::vector<int>{});
@@ -136,7 +136,8 @@ class Session {
             for (const auto* ids : {&settings_.proxy_features, &settings_.initial_features})
                 for (int id : *ids) if (static_cast<size_t>(id) >= registry.size()) throw std::invalid_argument("Threshold feature ID is outside the prepared feature registry");
             meta = {{"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", static_cast<int>(std::llround(settings_.lambda * n))}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
-            auto initial_features = settings_.initial_features.empty() ? map_warm_thresholds(warm, data, registry) : settings_.initial_features;
+            // The proxy can use learned thresholds without activating them in enumeration.
+            const auto& initial_features = settings_.initial_features;
             auto proxy_features = settings_.proxy_features;
             if (proxy_features.empty()) {
                 proxy_features = map_warm_thresholds(warm, data, registry);
