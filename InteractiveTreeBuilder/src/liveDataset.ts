@@ -1,4 +1,4 @@
-type Dataset = { feature_names: string[]; class_names: string[]; X: number[][]; y: number[] };
+export type Dataset = { feature_names: string[]; class_names: string[]; X: number[][]; y: number[] };
 
 // RFC 4180 fields, including quoted commas/newlines and escaped quotes. Empty
 // cells are rejected rather than silently becoming zero.

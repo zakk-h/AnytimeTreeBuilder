@@ -46,7 +46,7 @@ import type {
   HistorySnapshot,
 } from './types';
 
-import { sampleGraph, sampleMeta } from './sampleData';
+import { sampleGraph, sampleMeta, sampleDataset } from './sampleData';
 
 import {
   annotateChoicesFor,
@@ -2136,7 +2136,7 @@ function App() {
           {uploadError && <p className="upload-error workspace-error" role="alert">{uploadError}</p>}
 
           <div className="header-actions">
-            <NativeAnalysis session={liveSession.current} tree={snapshot.root} disabled={!nativeReady || datasetPending || nativeBusy} onBusyChange={setAnalysisBusy}/>
+            <NativeAnalysis session={liveSession.current} tree={snapshot.root} graph={graph} meta={meta} initialDataset={graph === sampleGraph ? sampleDataset : undefined} disabled={(!nativeReady && !liveAvailable) || datasetPending || nativeBusy} onBusyChange={setAnalysisBusy}/>
             {!datasetPending && <BuilderSettingsMenu
               graph={graph}
               meta={meta}

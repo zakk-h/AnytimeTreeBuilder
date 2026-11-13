@@ -1,3 +1,5 @@
+import csv from '../../ArborEnum/examples/bike_processed.csv?raw';
+import { parseCsv, toDataset } from './liveDataset';
 import type { AndOrGraph, FeatureMeta } from './types';
 import payload from './samplePayload.json';
 
@@ -59,3 +61,5 @@ if (!internalWindow.ARBORENUM_CURRENT_BUILDER_PAYLOAD) {
     meta: sampleMeta,
   };
 }
+
+export const sampleDataset = toDataset(parseCsv(csv), 'label');

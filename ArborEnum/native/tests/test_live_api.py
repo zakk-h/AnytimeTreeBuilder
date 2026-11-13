@@ -61,6 +61,67 @@ def main():
         analysis_url = '/api/analyze?session_id=' + tiny_id
         code, analysis = call(analysis_url, {'tree': tiny_tree, 'options': {'maxLeaves': 1}, 'analysis_token': 'progress-test'})
         assert code == 200 and analysis['exact'] and analysis['tree_count'] == '3', analysis
+        # Imported graph analysis shares the native DP, with and without CSV data.
+        imported = {'graph': {'root_trie_id': 7,
+            'trie_nodes': [{'id': 7, 'budget': 10, 'subproblem_size': 4, 'leaf_ids': [4,5,6], 'split_ids': []}],
+            'split_nodes': [], 'leaf_nodes': [
+                {'id': 4, 'parent_trie_id': 7, 'prediction': 0, 'loss': 3, 'subproblem_size': 4},
+                {'id': 5, 'parent_trie_id': 7, 'prediction': 1, 'loss': 3, 'subproblem_size': 4},
+                {'id': 6, 'parent_trie_id': 7, 'prediction': -1, 'loss': 2, 'subproblem_size': 4}]},
+            'meta': {'root_n': 4, 'gamma': 1, 'eta_defer': .25, 'use_deferral': True, 'featureRegistry': []}}
+        imported_tree = {'uid': 0, 'kind': 'choice', 'graphTrieId': 7}
+        imported_body = {'payload': imported, 'tree': imported_tree, 'token': 'import-test'}
+        code, imported_result = call('/api/analyze-graph', imported_body)
+        assert code == 200 and imported_result['tree_count'] == '3', imported_result
+        assert imported_result['accuracy'] == analysis['accuracy']
+        assert imported_result['abstention_distribution'][-1]['value'] == 4
+        imported_body['dataset'] = {k: v for k, v in tiny.items() if k != 'settings'}
+        code, imported_result = call('/api/analyze-graph', imported_body)
+        assert code == 200, imported_result
+        for field in ('tree_count', 'accuracy', 'leaf_distribution', 'abstention_distribution', 'disagreement', 'importance'):
+            assert imported_result[field] == analysis[field], (field, imported_result[field], analysis[field])
+        imported_body['tree'] = {'uid': 0, 'kind': 'leaf', 'graphTrieId': 7, 'leafId': 6, 'prediction': -1}
+        code, fixed_result = call('/api/analyze-graph', imported_body)
+        assert code == 200 and fixed_result['tree_count'] == '1' and fixed_result['accuracy']['undefined_count'] == '1', fixed_result
+        imported_body['dataset']['y'] = [0,0,0,0]
+        assert call('/api/analyze-graph', imported_body)[0] == 400
+        imported_body.pop('dataset')
+        imported_body['tree']['leafId'] = 999
+        assert call('/api/analyze-graph', imported_body)[0] == 400
+        # Parent budgets must constrain child combinations, including fixed leaves.
+        branch_graph = {'graph': {'root_trie_id': 0, 'trie_nodes': [
+            {'id': 0, 'budget': 3, 'subproblem_size': 4, 'leaf_ids': [], 'split_ids': [0]},
+            {'id': 1, 'budget': 3, 'subproblem_size': 2, 'leaf_ids': [0,1], 'split_ids': []},
+            {'id': 2, 'budget': 3, 'subproblem_size': 2, 'leaf_ids': [2,3], 'split_ids': []}],
+            'split_nodes': [{'id': 0, 'parent_trie_id': 0, 'feature': 0, 'left_trie_id': 1, 'right_trie_id': 2}],
+            'leaf_nodes': [{'id': i, 'parent_trie_id': 1+i//2, 'prediction': i%2, 'loss': 1+i%2, 'subproblem_size': 2} for i in range(4)]},
+            'meta': {'root_n': 4, 'gamma': 1}}
+        branch_tree = {'uid': 0, 'graphTrieId': 0, 'kind': 'choice'}
+        branch_body = {'payload': branch_graph, 'tree': branch_tree, 'token': 'branch-test'}
+        code, branch_result = call('/api/analyze-graph', branch_body)
+        assert code == 200 and branch_result['tree_count'] == '3', branch_result
+        assert branch_result['leaf_distribution'] == [{'value': 2, 'count': '3', 'probability': 1.0}]
+        branch_body['tree'] = {'uid': 0, 'graphTrieId': 0, 'kind': 'split', 'feature': 0, 'splitId': 0,
+            'left': {'uid': 1, 'graphTrieId': 1, 'kind': 'leaf', 'leafId': 1, 'prediction': 1},
+            'right': {'uid': 2, 'graphTrieId': 2, 'kind': 'choice'}}
+        code, branch_result = call('/api/analyze-graph', branch_body)
+        assert code == 200 and branch_result['tree_count'] == '1', branch_result
+        assert branch_result['accuracy']['min'] == .75
+        branch_graph['graph']['trie_nodes'][0]['budget'] = 4
+        for leaf in branch_graph['graph']['leaf_nodes']:
+            leaf['loss'] = 2
+        branch_graph['meta']['featureRegistry'] = [{'internalFeature': 0, 'originalFeature': 0, 'originalName': 'a', 'threshold': .5}]
+        branch_body['tree'] = branch_tree
+        branch_body['dataset'] = {'feature_names': ['a'], 'class_names': ['no','yes'], 'X': [[0],[0],[1],[1]], 'y': [0,1,0,1]}
+        code, branch_result = call('/api/analyze-graph', branch_body)
+        assert code == 200 and branch_result['tree_count'] == '4', branch_result
+        assert branch_result['accuracy']['min'] == branch_result['accuracy']['max'] == .5
+        assert all(row['disagreement'] == .5 for row in branch_result['disagreement'])
+        assert branch_result['importance'][0]['min'] == branch_result['importance'][0]['max'] == 0
+        branch_body.pop('dataset')
+        branch_graph['graph']['split_nodes'][0]['left_trie_id'] = 0
+        branch_body['tree'] = branch_tree
+        assert call('/api/analyze-graph', branch_body)[0] == 400
         progress_url = '/api/analysis-progress?session_id=' + tiny_id
         assert call(progress_url, {'token': ''})[0] == 400
         code, progress = call(progress_url, {'token': 'progress-test'})

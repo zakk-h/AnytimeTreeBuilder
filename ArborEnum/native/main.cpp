@@ -1,4 +1,5 @@
 #include "live_session.hpp"
+#include "imported_analysis.hpp"
 #include "local_origin.hpp"
 #include "vendor/httplib.h"
 #include "desktop_launch.hpp"
@@ -353,6 +354,51 @@ int main(int argc, char** argv) {
                 if (token.empty() || token.size() > 128) throw std::invalid_argument("Invalid analysis token");
                 respond(res, current->analysis_progress(token));
             }
+        });
+        struct UploadedQuery { std::atomic<bool> cancelled{false}; json progress = nullptr; };
+        std::mutex uploaded_mutex;
+        std::map<std::pair<std::string,std::string>,std::shared_ptr<UploadedQuery>> uploaded_queries;
+        const auto uploaded_key = [&](const auto& req, const json& body) {
+            const auto token = body.at("token").template get<std::string>();
+            if (token.empty() || token.size() > 128) throw std::invalid_argument("Invalid analysis token");
+            return std::make_pair(browser_cookie(req),token);
+        };
+        post_json("/api/graph-analysis-progress", [&](const auto& req, auto& res) {
+            const auto key = uploaded_key(req,json::parse(req.body));
+            std::lock_guard lock(uploaded_mutex);
+            auto it = uploaded_queries.find(key);
+            respond(res,it == uploaded_queries.end() ? json(nullptr) : it->second->progress);
+        });
+        post_json("/api/cancel-graph-analysis", [&](const auto& req, auto& res) {
+            const auto key = uploaded_key(req,json::parse(req.body));
+            std::lock_guard lock(uploaded_mutex);
+            if (auto it=uploaded_queries.find(key); it!=uploaded_queries.end()) it->second->cancelled.store(true);
+            respond(res,{{"cancel_requested",true}});
+        });
+        post_json("/api/analyze-graph", [&](const auto& req, auto& res) {
+            const auto browser = ensure_browser(req,res);
+            const json body = json::parse(req.body);
+            const auto key = std::make_pair(browser,body.at("token").get<std::string>());
+            if (key.second.empty() || key.second.size()>128) throw std::invalid_argument("Invalid analysis token");
+            auto query = std::make_shared<UploadedQuery>();
+            {
+                std::lock_guard lock(uploaded_mutex);
+                if (uploaded_queries.size()>=8 || uploaded_queries.contains(key)) throw QueryUnavailable("Another graph analysis is running; try again shortly");
+                uploaded_queries.emplace(key,query);
+            }
+            const auto cleanup = [&] { std::lock_guard lock(uploaded_mutex); uploaded_queries.erase(key); };
+            try {
+                ImportedAnalysis analysis(body.at("payload"));
+                const auto check = [&] { if(query->cancelled.load()) throw std::runtime_error("Analysis cancelled"); };
+                const auto progress = [&](int stage,size_t completed,size_t total,const std::string& feature) {
+                    std::lock_guard lock(uploaded_mutex);
+                    query->progress={{"stage",stage},{"completed_features",completed},{"feature_count",total},{"current_feature",feature}};
+                };
+                auto result = body.contains("dataset") && !body.at("dataset").is_null()
+                    ? analysis.analyze_dataset(body.at("tree"),body.at("dataset"),check,progress)
+                    : analysis.analyze(body.at("tree"),check);
+                respond(res,result); cleanup();
+            } catch (...) { cleanup(); throw; }
         });
         post_json("/api/analyze", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res))

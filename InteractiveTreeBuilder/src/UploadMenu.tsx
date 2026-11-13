@@ -39,7 +39,7 @@ export function UploadMenu({ liveAvailable, onDataset, onGraph }: {
         <Table2 size={20} /><span><b>Upload dataset</b><small>{liveAvailable ? 'Grow a new Rashomon set from CSV' : 'Available when the live service is connected'}</small></span>
       </button>
       <button role="menuitem" onClick={() => { setOpen(false); trigger.current?.focus(); input.current?.click(); }}>
-        <FileJson size={20} /><span><b>Upload graph</b><small>Explore an existing Rashomon graph</small></span>
+        <FileJson size={20} /><span><b>Upload graph</b><small>Explore a graph; attach its CSV in Analyze</small></span>
       </button>
     </div>}
     <input ref={input} type="file" aria-label="Upload graph JSON" accept=".json,application/json" hidden onChange={event => {

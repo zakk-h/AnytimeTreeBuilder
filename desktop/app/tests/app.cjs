@@ -1,3 +1,4 @@
+const { exerciseImportedAnalysis, exerciseDefaultAnalysis } = require('./imported-analysis.cjs');
 const { exerciseWarmStart } = require('./warm-start.cjs');
 const { exerciseAnalysis } = require('./analysis.cjs');
 const assert = require('node:assert/strict');
@@ -36,6 +37,8 @@ async function main() {
       return { node: p.nodeIntegration, sandbox: p.sandbox, isolation: p.contextIsolation, security: p.webSecurity };
     });
     assert.deepEqual(preferences, { node: false, sandbox: true, isolation: true, security: true });
+    await exerciseDefaultAnalysis(page);
+    await exerciseImportedAnalysis(page);
     await page.getByRole('button', { name: 'Upload', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Upload dataset' }).click();
     await page.locator('.live-file input').setInputFiles({ name: 'dataset.csv', mimeType: 'text/csv', buffer: Buffer.from('workingday,label\n0,no\n0,no\n1,yes\n1,yes\n') });

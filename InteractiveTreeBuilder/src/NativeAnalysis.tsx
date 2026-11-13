@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { BarChart3, Download, X } from 'lucide-react';
 import { nativeApi } from './nativeGraph';
-import type { BuildNode } from './types';
+import { parseCsv, toDataset, type Dataset } from './liveDataset';
+import type { AndOrGraph, BuildNode } from './types';
 import './nativeAnalysis.css';
 
 type Bin = { value: number; count: string; probability: number };
@@ -10,6 +11,7 @@ type Progress = { stage: number; completed_features: number; feature_count: numb
 const analysisStages = ['Checking feasible completions', 'Counting completions', 'Computing prediction disagreement', 'Computing feature importance'];
 const completedStages = ['', 'Checked feasible completions.', 'Computed completion counts.', 'Computed counts, accuracy ranges, distributions, and disagreement.'];
 type Result = {
+  unavailable_reason?: string; accuracy_available?: boolean; abstention_available?: boolean;
   session_id: string; checkpoint: number; tree_count: string; sample_count: number; exact: boolean;
   leaf_distribution: Bin[]; abstention_distribution: Bin[];
   accuracy: { min: number | null; max: number | null; undefined_count: string };
@@ -63,39 +65,43 @@ function Violin({ values, outcomes }: { values: number[]; outcomes: number }) {
     <text x="150" y="273" textAnchor="middle">Sample disagreement</text>
   </svg>;
 }
-export function NativeAnalysis({ session, tree, disabled, onBusyChange }: { session: string; tree: BuildNode; disabled: boolean; onBusyChange: (busy: boolean) => void }) {
+export function NativeAnalysis({ session, tree, graph, meta, initialDataset, disabled, onBusyChange }: { session: string; tree: BuildNode; graph: AndOrGraph; meta: Record<string, unknown>; initialDataset?: Dataset; disabled: boolean; onBusyChange: (busy: boolean) => void }) {
+  const [dataset, setDataset] = useState<Dataset | undefined>(initialDataset);
+  const [csvRows, setCsvRows] = useState<string[][] | null>(null), [target, setTarget] = useState('');
+  const fileInput = useRef<HTMLInputElement>(null);
+  useEffect(() => { setDataset(initialDataset); setCsvRows(null); }, [graph, initialDataset]);
   const [open, setOpen] = useState(false), [result, setResult] = useState<Result | null>(null), [busy, setBusy] = useState(false);
   const [error, setError] = useState(''), [progress, setProgress] = useState<Progress | null>(null);
   const request = useRef<AbortController | null>(null), token = useRef(''), modal = useRef<HTMLElement>(null), previousFocus = useRef<HTMLElement | null>(null);
   const cancel = () => {
     request.current?.abort(); request.current = null;
-    if (token.current) { void nativeApi('cancel-query', session, { token: token.current }).catch(() => {}); token.current = ''; }
+    if (token.current) { void nativeApi(session ? 'cancel-query' : 'cancel-graph-analysis', session, { token: token.current }).catch(() => {}); token.current = ''; }
     setBusy(false);
   };
   const close = () => { cancel(); setOpen(false); previousFocus.current?.focus(); };
   useEffect(() => { cancel(); setOpen(false); setResult(null); return cancel; }, [session, tree]);
   useEffect(() => { onBusyChange(busy); }, [busy, onBusyChange]);
   useEffect(() => { if (open) modal.current?.querySelector<HTMLButtonElement>('button')?.focus(); }, [open]);
-  const run = async () => {
+  const run = async (attachedDataset = dataset) => {
     cancel(); const controller = new AbortController(); request.current = controller; token.current = crypto.randomUUID();
     setBusy(true); setError(''); setResult(null); setProgress(null);
     const analysisToken = token.current;
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       try {
-        const next = await nativeApi<Progress>('analysis-progress', session, { token: analysisToken }, controller.signal);
+        const next = await nativeApi<Progress | null>(session ? 'analysis-progress' : 'graph-analysis-progress', session, { token: analysisToken }, controller.signal);
         if (!controller.signal.aborted) setProgress(next);
       } catch { /* The analysis request itself reports connection or computation errors. */ }
       if (!controller.signal.aborted) pollTimer = setTimeout(poll, 400);
     };
     pollTimer = setTimeout(poll, 150);
     try {
-      const response = await nativeApi<Result>('analyze', session, { tree, analysis_token: token.current }, controller.signal);
+      const response = await nativeApi<Result>(session ? 'analyze' : 'analyze-graph', session, session ? { tree, analysis_token: token.current } : { tree, payload: { graph, meta }, dataset: attachedDataset, token: token.current }, controller.signal);
       if (!controller.signal.aborted) setResult(response);
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : String(e)); }
     finally { controller.abort(); clearTimeout(pollTimer); if (request.current === controller) { setBusy(false); request.current = null; token.current = ''; } }
   };
-  return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Open a dataset session to analyze its native graph' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); void run(); }}><BarChart3 size={16}/> Analyze</button>
+  return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Connect the native service to analyze this graph' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); void run(); }}><BarChart3 size={16}/> Analyze</button>
     {open && createPortal(<div className="analysis-overlay" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
       <section className="analysis-dialog" ref={modal} role="dialog" aria-modal="true" aria-labelledby="analysis-title" onKeyDown={e => {
         if (e.key === 'Escape') { e.stopPropagation(); close(); }
@@ -107,6 +113,25 @@ export function NativeAnalysis({ session, tree, disabled, onBusyChange }: { sess
         }
       }}>
         <header><div><h2 id="analysis-title">Analyze partial tree</h2></div><button className="ghost-button" aria-label="Close analysis" onClick={close}><X size={20}/></button></header>
+        {!session && <div className="analysis-dataset">
+          <button className="ghost-button" disabled={busy} onClick={() => fileInput.current?.click()}>{dataset ? 'Replace analysis dataset' : 'Attach dataset CSV'}</button>
+          {dataset && <span>Dataset attached · {dataset.y.length.toLocaleString()} samples</span>}
+          <input ref={fileInput} hidden type="file" accept=".csv,text/csv" aria-label="Analysis dataset CSV" onChange={async e => {
+            const file = e.target.files?.[0]; e.target.value = ''; if (!file) return;
+            try { const rows = parseCsv(await file.text()); setCsvRows(rows); setTarget(rows[0][rows[0].length - 1]); setError(''); }
+            catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+          }}/>
+          {csvRows && <><label>Classification target <select value={target} onChange={e => setTarget(e.target.value)}>{csvRows[0].map(name => <option key={name}>{name}</option>)}</select></label>
+            <button className="primary-button" disabled={busy} onClick={() => {
+              try {
+                const next = toDataset(csvRows, target);
+                const labels = Array.isArray(meta.classNames) ? meta.classNames.map(String) : [...next.class_names].sort((a,b) => Number(a)-Number(b) || a.localeCompare(b));
+                if (next.class_names.some(name => !labels.includes(name))) throw new Error('Dataset class names do not match graph.');
+                next.y = next.y.map(id => labels.indexOf(next.class_names[id])); next.class_names = labels;
+                setDataset(next); setCsvRows(null); void run(next);
+              } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+            }}>Use dataset and analyze</button></>}
+        </div>}
         {busy && <button className="ghost-button" onClick={close}>Cancel analysis</button>}
         {busy && <div className="analysis-progress" role="status" aria-live="polite">
           <p>Calculating…</p>
@@ -120,11 +145,13 @@ export function NativeAnalysis({ session, tree, disabled, onBusyChange }: { sess
         {result && <>
           <div className="analysis-metrics"><div><span>Feasible completions</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>Accuracy on predicted samples</span><b>{result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Number of leaves</span><b>{result.leaf_distribution[0]?.value.toLocaleString()} – {result.leaf_distribution[result.leaf_distribution.length - 1]?.value.toLocaleString()}</b></div></div>
           {result.accuracy.undefined_count !== '0' && <p className="analysis-note">{countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.</p>}
-          <section><h3>Feature importance ranges</h3><p>Expected increase in loss over all permutations of one dataset feature. Min/max over tree completions in the Rashomon set.</p>
+          {result.unavailable_reason && <p className="analysis-note">{result.unavailable_reason}</p>}
+          {result.accuracy_available === false && <p className="analysis-note">Accuracy requires leaf penalty metadata and matching sample counts. Attach the matching dataset to verify the graph.</p>}
+          {result.importance.length > 0 && <section><h3>Feature importance ranges</h3><p>Expected increase in loss over all permutations of one dataset feature. Min/max over tree completions in the Rashomon set.</p>
             <table className="analysis-importance"><thead><tr><th>Feature</th><th>Minimum (<abbr title="Percentage points">pp</abbr>)</th><th>Maximum (<abbr title="Percentage points">pp</abbr>)</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{(100 * f.min).toFixed(3)}</td><td>{(100 * f.max).toFixed(3)}</td></tr>)}</tbody></table>
-          </section>
-          <div className={`analysis-grid ${result.abstention_enabled ? '' : 'analysis-grid-single'}`}><section><h3>Leaves</h3><Distribution bins={result.leaf_distribution} sampleCount={result.sample_count}/></section>{result.abstention_enabled && <section><h3>Proportion abstained</h3><Distribution bins={result.abstention_distribution} abstention sampleCount={result.sample_count}/></section>}</div>
-          <section><h3>Prediction disagreement across samples</h3>{(result.class_count > 2 || result.abstention_enabled) && <p>{result.class_count > 2 && 'For each sample, the proportion of models differing from the most common prediction. '}{result.abstention_enabled && 'Abstain counts as a separate prediction.'}</p>}<Violin values={result.disagreement.map(row => row.disagreement)} outcomes={result.class_count + (result.abstention_enabled ? 1 : 0)}/></section>
+          </section>}
+          <div className={`analysis-grid ${result.abstention_enabled ? '' : 'analysis-grid-single'}`}><section><h3>Leaves</h3><Distribution bins={result.leaf_distribution} sampleCount={result.sample_count}/></section>{result.abstention_enabled && result.abstention_distribution.length > 0 && <section><h3>Proportion abstained</h3><Distribution bins={result.abstention_distribution} abstention sampleCount={result.sample_count}/></section>}</div>
+          {result.disagreement.length > 0 && <section><h3>Prediction disagreement across samples</h3>{(result.class_count > 2 || result.abstention_enabled) && <p>{result.class_count > 2 && 'For each sample, the proportion of models differing from the most common prediction. '}{result.abstention_enabled && 'Abstain counts as a separate prediction.'}</p>}<Violin values={result.disagreement.map(row => row.disagreement)} outcomes={result.class_count + (result.abstention_enabled ? 1 : 0)}/></section>}
           <button className="ghost-button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = 'partial-tree-analysis.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }}><Download size={16}/> Export analysis</button>
         </>}
       </section>

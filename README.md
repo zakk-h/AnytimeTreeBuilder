@@ -22,7 +22,7 @@ Select nodes to explore splits, use **Update options** to see new alternatives, 
 
 **Allow Abstain leaves** allows leaves to make no prediction, with an adjustable cost per abstained sample. Accuracy is measured only on samples with predictions. **Advanced training settings** exposes search, refinement, threshold and cache controls.
 
-**Upload → Upload graph** opens an existing JSON graph.
+**Upload → Upload graph** opens an existing JSON graph. In **Analyze**, attach its training CSV to calculate permutation importance and prediction disagreement. The built-in bike example includes its dataset.
 
 ## Build
 

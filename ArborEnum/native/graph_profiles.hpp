@@ -12,7 +12,8 @@ namespace arborenum::live {
 // Query-local sufficient-statistic tables over borrowed native nodes. These
 // contain no copied trie nodes, split lists, or materialized completed trees.
 class GraphProfiles {
-    ArborEnum& model_;
+    Packed root_mask_;
+    std::function<std::pair<Packed, Packed>(const Packed&, int)> child_masks_;
     const json& meta_;
     const Dataset* data_;
     const json& partial_;
@@ -220,7 +221,7 @@ class GraphProfiles {
             }
         }, [&](const SplitNode& split, const Key& left, const Key& right) {
             if (int64_t(minima_.at(left)) + minima_.at(right) > budget) return;
-            auto masks = model_.live_child_masks(mask, split.feature);
+            auto masks = child_masks_(mask, split.feature);
             const auto& ls = inside(left, masks.first); const auto& rs = inside(right, masks.second);
             for (const auto& [a, ac] : ls) for (const auto& [b, bc] : rs) {
                 check_work();
@@ -307,9 +308,9 @@ class GraphProfiles {
             if (int64_t(minima_.at(left)) + minima_.at(right) > budget) return;
             Packed lr = recipient, rr = recipient, ld = donor, rd = donor;
             if (originals.at(split.feature) == feature) {
-                auto parts = model_.live_child_masks(donor, split.feature); ld = std::move(parts.first); rd = std::move(parts.second);
+                auto parts = child_masks_(donor, split.feature); ld = std::move(parts.first); rd = std::move(parts.second);
             } else {
-                auto parts = model_.live_child_masks(recipient, split.feature); lr = std::move(parts.first); rr = std::move(parts.second);
+                auto parts = child_masks_(recipient, split.feature); lr = std::move(parts.first); rr = std::move(parts.second);
             }
             const auto& ls = importance(left, lr, ld, feature, originals, memo);
             const auto& rs = importance(right, rr, rd, feature, originals, memo);
@@ -336,8 +337,15 @@ public:
     GraphProfiles(ArborEnum& model, const json& meta, const Dataset* data, const json& tree,
                   const json& options, bool statistics, std::function<void()> check, int root_budget = INT_MAX,
                   std::function<void(int, size_t, size_t, const std::string&)> progress = {})
-        : model_(model), meta_(meta), data_(data), partial_(tree), check_(std::move(check)), statistics_(statistics),
-          eta_(meta.value("eta_defer", 0.0)), root_budget_(root_budget), root_{model.result.get(), nullptr, false} {
+        : GraphProfiles(model.result.get(), model.live_root_mask(), [&model](const Packed& mask, int feature) { return model.live_child_masks(mask, feature); },
+                        meta, data, tree, options, statistics, std::move(check), root_budget, std::move(progress)) {}
+    GraphProfiles(TreeTrieNode* root, Packed root_mask,
+                  std::function<std::pair<Packed, Packed>(const Packed&, int)> child_masks,
+                  const json& meta, const Dataset* data, const json& tree, const json& options,
+                  bool statistics, std::function<void()> check, int root_budget = INT_MAX,
+                  std::function<void(int, size_t, size_t, const std::string&)> progress = {})
+        : root_mask_(std::move(root_mask)), child_masks_(std::move(child_masks)), meta_(meta), data_(data), partial_(tree), check_(std::move(check)), statistics_(statistics),
+          eta_(meta.value("eta_defer", 0.0)), root_budget_(root_budget), root_{root, nullptr, false} {
         progress_ = std::move(progress);
         max_leaves_ = cap(options, "maxLeaves", 1); max_abstained_ = cap(options, "maxAbstainedSamples", 0);
         if (statistics && (!data || data->y.empty())) throw std::invalid_argument("Analysis requires the training dataset from a native session");
@@ -348,13 +356,13 @@ public:
             truth_.emplace(feature, value.get<bool>());
         }
         if (options.value("mode", "") == "sample") target_ = options.at("targetPrediction").get<int>();
-        root_ = key(model.result.get(), &tree, options.value("mode", "") == "sample");
+        root_ = key(root, &tree, options.value("mode", "") == "sample");
         if (progress_) progress_(0, 0, 0, "");
         bound_from_root();
         bounds_seconds_ = seconds_since(started_);
         const auto count_started = std::chrono::steady_clock::now();
         if (progress_) progress_(1, 0, 0, "");
-        inside(root_, model.live_root_mask());
+        inside(root_, root_mask_);
         counting_seconds_ = seconds_since(count_started);
         if (inside_.at(root_).empty()) throw std::invalid_argument("No completion satisfies the partial tree, caps and objective budget");
     }
@@ -428,7 +436,7 @@ public:
         for (const auto& f : meta_.at("featureRegistry")) originals.emplace(f.at("internalFeature").get<int>(), f.at("originalFeature").get<int>());
         std::set<int> used_originals;
         for (const auto& k : order_) alternatives(k, [](const LeafNode&) {}, [&](const SplitNode& split, const Key&, const Key&) { used_originals.insert(originals.at(split.feature)); });
-        const auto full = model_.live_root_mask();
+        const auto full = root_mask_;
         for (size_t f = 0; f < data_->names.size(); ++f) {
             check_();
             if (progress_) progress_(3, f, data_->names.size(), data_->names[f]);
