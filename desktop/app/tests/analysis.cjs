@@ -83,7 +83,7 @@ async function exerciseAnalysis(page, exportAnalysis = async () => {
   await page.locator('.analysis-importance tbody tr').first().waitFor();
   assert.equal(await page.locator('.analysis-importance tbody tr').count(), 2);
   assert.equal(await page.locator('.analysis-violin').count(), 1);
-  assert.equal(await page.locator('.analysis-metrics').innerText(), `${analyzedTree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}\n${BigInt(result.tree_count).toLocaleString()}\nAccuracy on predicted samples\n${await page.locator('.analysis-metrics b').nth(1).innerText()}\nNumber of leaves\n${result.leaf_distribution[0].value} – ${result.leaf_distribution[result.leaf_distribution.length - 1].value}`);
+  assert.equal(await page.locator('.analysis-metrics').innerText(), `${analyzedTree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}\n${BigInt(result.tree_count).toLocaleString()}\nAccuracy on predicted samples\n${await page.locator('.analysis-metrics b').nth(1).innerText()}\nNumber of leaves\n${result.leaf_distribution[0].value} – ${result.leaf_distribution[result.leaf_distribution.length - 1].value}\nSamples with disagreement\n${(100 * result.disagreement.filter(row => row.counts.filter(count => BigInt(count) > 0n).length > 1).length / result.disagreement.length).toFixed(2).replace(/\.?0+$/, '')}%`);
   assert.equal(await page.getByText('Training samples', { exact: true }).count(), 0);
   const leavesChart = page.locator('.analysis-distribution-leaves');
   const firstBar = leavesChart.locator('rect').first();
@@ -136,6 +136,8 @@ async function exerciseAnalysis(page, exportAnalysis = async () => {
   assert.equal(fixedResult.tree_count, '1');
   assert.deepEqual(fixedResult.leaf_distribution, [{value: 1, count: '1', probability: 1}]);
   for (const row of fixedResult.disagreement) assert.equal(row.disagreement, 0);
+  await page.locator('.analysis-metrics').getByText('Samples with disagreement', { exact: true }).waitFor();
+  assert.equal(await page.locator('.analysis-metrics b').nth(3).innerText(), '0%');
   await page.getByLabel('Close analysis', { exact: true }).click();
   for (const mode of ['Ensure prediction', 'Both']) {
     await page.locator('.arborenum-node-leaf').click();
