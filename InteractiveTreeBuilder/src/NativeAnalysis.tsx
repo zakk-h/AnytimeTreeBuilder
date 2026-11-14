@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useMemo, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { BarChart3, Download, Maximize2, Minimize2, X } from 'lucide-react';
 import { nativeApi } from './nativeGraph';
 import { parseCsv, toDataset, type Dataset } from './liveDataset';
 import type { AndOrGraph, BuildNode } from './types';
+import { summarizeDisagreement } from './disagreementSummary';
 import './nativeAnalysis.css';
 
 type Bin = { value: number; count: string; probability: number };
@@ -84,6 +85,7 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
   useEffect(() => { setDataset(initialDataset); setCsvRows(null); }, [graph, initialDataset]);
   const [open, setOpen] = useState(false), [result, setResult] = useState<Result | null>(null), [busy, setBusy] = useState(false);
   const [expandedPanel, setExpandedPanel] = useState<string | null>(null);
+  const disagreementSummary = useMemo(() => summarizeDisagreement(result?.disagreement ?? []), [result]);
   const [error, setError] = useState(''), [progress, setProgress] = useState<Progress | null>(null);
   const request = useRef<AbortController | null>(null), token = useRef(''), modal = useRef<HTMLElement>(null), previousFocus = useRef<HTMLElement | null>(null);
   const cancel = () => {
@@ -173,7 +175,7 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
         </div>}
         {error && <><p role="alert" className="upload-error">{error}</p><button className="primary-button" onClick={() => void run()}>Retry analysis</button></>}
         {result && <>
-          <div className="analysis-metrics"><div><span>{tree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>{result.abstention_enabled ? 'Accuracy on predicted samples' : 'Accuracy'}</span><b>{result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Number of leaves</span><b>{result.leaf_distribution[0]?.value.toLocaleString()} – {result.leaf_distribution[result.leaf_distribution.length - 1]?.value.toLocaleString()}</b></div>{result.disagreement.length > 0 && <div><span>Samples with disagreement</span><b>{percent(result.disagreement.filter(row => row.counts.filter(count => BigInt(count) > 0n).length > 1).length / result.disagreement.length)}</b></div>}</div>
+          <div className="analysis-metrics"><div><span>{tree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>{result.abstention_enabled ? 'Accuracy on predicted samples' : 'Accuracy'}</span><b>{result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Number of leaves</span><b>{result.leaf_distribution[0]?.value.toLocaleString()} – {result.leaf_distribution[result.leaf_distribution.length - 1]?.value.toLocaleString()}</b></div>{result.disagreement.length > 0 && <><div><span>Samples with disagreement</span><b>{percent(disagreementSummary.any)}</b></div><div><span>Samples with &gt;10% disagreement</span><b>{percent(disagreementSummary.above10)}</b></div><div><span>Samples with &gt;25% disagreement</span><b>{percent(disagreementSummary.above25)}</b></div></>}</div>
           {result.accuracy.undefined_count !== '0' && <p className="analysis-note">{countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.</p>}
           {result.unavailable_reason && <p className="analysis-note">{result.unavailable_reason}</p>}
           {result.accuracy_available === false && <p className="analysis-note">Accuracy requires leaf penalty metadata and matching sample counts. Attach the matching dataset to verify the graph.</p>}

@@ -1,3 +1,4 @@
+import { summarizeDisagreement } from '../src/disagreementSummary';
 import { readNativeResponse } from '../src/nativeResponse';
 import { nextLiveNodeRefreshAt, nativeNodeViewSignature } from '../src/liveOptionPolling';
 import test from 'node:test';
@@ -160,4 +161,14 @@ test('node polling ignores changing query counters but detects choices and budge
   assert.notEqual(nativeNodeViewSignature({ ...base, root_budget: 11 }), signature);
   assert.notEqual(nativeNodeViewSignature({ ...base, options: { ...base.options, splits: [{ feature: 3, minimum: 2, left_minimum: 1, right_minimum: 1, left_size: 6, right_size: 6 }] } }), signature);
   assert.notEqual(nativeNodeViewSignature({ ...base, summaries: [{ uid: 0, minimum: 1, sample_size: 12 }] }), signature);
+});
+
+test('sample disagreement summaries use strict exact thresholds, including very small minorities', () => {
+  const huge = 10n ** 100n;
+  assert.deepEqual(summarizeDisagreement([
+    { counts: ['10', '0'] }, { counts: ['9', '1'] },
+    { counts: ['3', '1'] }, { counts: ['7', '3'] },
+    { counts: [(huge - 1n).toString(), '1'] },
+  ]), { any: 4 / 5, above10: 2 / 5, above25: 1 / 5 });
+  assert.deepEqual(summarizeDisagreement([]), { any: 0, above10: 0, above25: 0 });
 });
