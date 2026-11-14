@@ -7,6 +7,19 @@ async function exerciseDefaultAnalysis(page) {
   assert.ok(Number(await dialog.locator('.analysis-metrics b').first().textContent()) > 0);
   assert.equal(await dialog.locator('.analysis-importance tbody tr').count(), 12);
   await dialog.getByRole('heading', { name: 'Prediction disagreement across samples' }).waitFor();
+  const leaves = dialog.locator('.analysis-panel-leaves');
+  const before = await leaves.boundingBox();
+  await dialog.getByRole('button', { name: 'Expand Leaves', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Collapse Leaves', exact: true }).waitFor();
+  assert.ok((await leaves.boundingBox()).width > before.width);
+  assert.equal(await dialog.locator('.analysis-panel-importance').isVisible(), false);
+  await dialog.getByRole('button', { name: 'Collapse Leaves', exact: true }).click();
+  assert.equal(await dialog.locator('.analysis-panel-importance').isVisible(), true);
+  await dialog.locator('.analysis-panel-disagreement .analysis-violin').click();
+  await dialog.getByRole('button', { name: 'Collapse Prediction disagreement across samples', exact: true }).waitFor();
+  await page.keyboard.press('Escape');
+  assert.equal(await dialog.isVisible(), true);
+  assert.equal(await dialog.locator('.analysis-panel-importance').isVisible(), true);
   await dialog.getByRole('button', { name: 'Close analysis' }).click();
 }
 async function exerciseImportedAnalysis(page) {

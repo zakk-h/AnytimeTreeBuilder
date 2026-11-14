@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { BarChart3, Download, X } from 'lucide-react';
+import { BarChart3, Download, Maximize2, Minimize2, X } from 'lucide-react';
 import { nativeApi } from './nativeGraph';
 import { parseCsv, toDataset, type Dataset } from './liveDataset';
 import type { AndOrGraph, BuildNode } from './types';
@@ -65,12 +65,25 @@ function Violin({ values, outcomes }: { values: number[]; outcomes: number }) {
     <text x="150" y="273" textAnchor="middle">Sample disagreement</text>
   </svg>;
 }
+function AnalysisPanel({ id, title, expanded, onExpand, children }: {
+  id: string; title: string; expanded: boolean; onExpand: (id: string | null) => void; children: ReactNode;
+}) {
+  const expandControl = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (expanded) expandControl.current?.focus(); }, [expanded]);
+  return <section className={`analysis-panel analysis-panel-${id}${expanded ? ' analysis-panel-expanded' : ''}`} onClick={() => { if (!expanded) onExpand(id); }}>
+    <div className="analysis-panel-heading"><h3>{title}</h3><button ref={expandControl} type="button" className="analysis-expand" aria-label={expanded ? `Collapse ${title}` : `Expand ${title}`} aria-expanded={expanded} onClick={e => { e.stopPropagation(); onExpand(expanded ? null : id); }}>
+      {expanded ? <Minimize2 size={17}/> : <Maximize2 size={17}/>}
+    </button></div>
+    {children}
+  </section>;
+}
 export function NativeAnalysis({ session, tree, graph, meta, initialDataset, disabled, onBusyChange }: { session: string; tree: BuildNode; graph: AndOrGraph; meta: Record<string, unknown>; initialDataset?: Dataset; disabled: boolean; onBusyChange: (busy: boolean) => void }) {
   const [dataset, setDataset] = useState<Dataset | undefined>(initialDataset);
   const [csvRows, setCsvRows] = useState<string[][] | null>(null), [target, setTarget] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
   useEffect(() => { setDataset(initialDataset); setCsvRows(null); }, [graph, initialDataset]);
   const [open, setOpen] = useState(false), [result, setResult] = useState<Result | null>(null), [busy, setBusy] = useState(false);
+  const [expandedPanel, setExpandedPanel] = useState<string | null>(null);
   const [error, setError] = useState(''), [progress, setProgress] = useState<Progress | null>(null);
   const request = useRef<AbortController | null>(null), token = useRef(''), modal = useRef<HTMLElement>(null), previousFocus = useRef<HTMLElement | null>(null);
   const cancel = () => {
@@ -84,7 +97,7 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
   useEffect(() => { if (open) modal.current?.querySelector<HTMLButtonElement>('button')?.focus(); }, [open]);
   const run = async (attachedDataset = dataset) => {
     cancel(); const controller = new AbortController(); request.current = controller; token.current = crypto.randomUUID();
-    setBusy(true); setError(''); setResult(null); setProgress(null);
+    setExpandedPanel(null); setBusy(true); setError(''); setResult(null); setProgress(null);
     const analysisToken = token.current;
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
@@ -104,7 +117,7 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
   return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Connect the native service to analyze this graph' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); void run(); }}><BarChart3 size={16}/> Analyze</button>
     {open && createPortal(<div className="analysis-overlay" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
       <section className="analysis-dialog" ref={modal} role="dialog" aria-modal="true" aria-labelledby="analysis-title" onKeyDown={e => {
-        if (e.key === 'Escape') { e.stopPropagation(); close(); }
+        if (e.key === 'Escape') { e.stopPropagation(); if (expandedPanel) setExpandedPanel(null); else close(); }
         if (e.key === 'Tab') {
           const controls = [...modal.current!.querySelectorAll<HTMLElement>('button:not(:disabled), input, summary, [tabindex="0"]')].filter(el => el.getClientRects().length);
           const first = controls[0], last = controls[controls.length - 1];
@@ -147,11 +160,22 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
           {result.accuracy.undefined_count !== '0' && <p className="analysis-note">{countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.</p>}
           {result.unavailable_reason && <p className="analysis-note">{result.unavailable_reason}</p>}
           {result.accuracy_available === false && <p className="analysis-note">Accuracy requires leaf penalty metadata and matching sample counts. Attach the matching dataset to verify the graph.</p>}
-          {result.importance.length > 0 && <section><h3>Feature importance ranges</h3><p>Expected increase in loss over all permutations of one dataset feature. Min/max over tree completions in the Rashomon set.</p>
-            <table className="analysis-importance"><thead><tr><th>Feature</th><th>Minimum (<abbr title="Percentage points">pp</abbr>)</th><th>Maximum (<abbr title="Percentage points">pp</abbr>)</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{(100 * f.min).toFixed(3)}</td><td>{(100 * f.max).toFixed(3)}</td></tr>)}</tbody></table>
-          </section>}
-          <div className={`analysis-grid ${result.abstention_enabled ? '' : 'analysis-grid-single'}`}><section><h3>Leaves</h3><Distribution bins={result.leaf_distribution} sampleCount={result.sample_count}/></section>{result.abstention_enabled && result.abstention_distribution.length > 0 && <section><h3>Proportion abstained</h3><Distribution bins={result.abstention_distribution} abstention sampleCount={result.sample_count}/></section>}</div>
-          {result.disagreement.length > 0 && <section><h3>Prediction disagreement across samples</h3>{(result.class_count > 2 || result.abstention_enabled) && <p>{result.class_count > 2 && 'For each sample, the proportion of models differing from the most common prediction. '}{result.abstention_enabled && 'Abstain counts as a separate prediction.'}</p>}<Violin values={result.disagreement.map(row => row.disagreement)} outcomes={result.class_count + (result.abstention_enabled ? 1 : 0)}/></section>}
+          <div className={`analysis-panels${result.importance.some(f => f.name.length > 24) ? ' analysis-panels-long-labels' : ''}${result.abstention_enabled && result.abstention_distribution.length > 0 ? ' analysis-panels-with-abstention' : ''}${expandedPanel ? ' analysis-panels-focused' : ''}`}>
+            {result.importance.length > 0 && <AnalysisPanel id="importance" title="Feature importance ranges" expanded={expandedPanel === 'importance'} onExpand={setExpandedPanel}>
+              <p>Expected increase in loss over all permutations of one dataset feature. Min/max over tree completions in the Rashomon set.</p>
+              <table className="analysis-importance"><thead><tr><th>Feature</th><th>Min (<abbr title="Percentage points">pp</abbr>)</th><th>Max (<abbr title="Percentage points">pp</abbr>)</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{(100 * f.min).toFixed(3)}</td><td>{(100 * f.max).toFixed(3)}</td></tr>)}</tbody></table>
+            </AnalysisPanel>}
+            <AnalysisPanel id="leaves" title="Leaves" expanded={expandedPanel === 'leaves'} onExpand={setExpandedPanel}>
+              <Distribution bins={result.leaf_distribution} sampleCount={result.sample_count}/>
+            </AnalysisPanel>
+            {result.disagreement.length > 0 && <AnalysisPanel id="disagreement" title="Prediction disagreement across samples" expanded={expandedPanel === 'disagreement'} onExpand={setExpandedPanel}>
+              {(result.class_count > 2 || result.abstention_enabled) && <p>{result.class_count > 2 && 'For each sample, the proportion of models differing from the most common prediction. '}{result.abstention_enabled && 'Abstain counts as a separate prediction.'}</p>}
+              <Violin values={result.disagreement.map(row => row.disagreement)} outcomes={result.class_count + (result.abstention_enabled ? 1 : 0)}/>
+            </AnalysisPanel>}
+            {result.abstention_enabled && result.abstention_distribution.length > 0 && <AnalysisPanel id="abstention" title="Proportion abstained" expanded={expandedPanel === 'abstention'} onExpand={setExpandedPanel}>
+              <Distribution bins={result.abstention_distribution} abstention sampleCount={result.sample_count}/>
+            </AnalysisPanel>}
+          </div>
           <button className="ghost-button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = 'partial-tree-analysis.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }}><Download size={16}/> Export analysis</button>
         </>}
       </section>

@@ -990,8 +990,8 @@ function SidePanel({
         // Compare actual cut values: numeric collation of labels treats the
         // fractional parts as integers (placing 0.4 before 0.32).
         const aFeature = a.choice.split.feature, bFeature = b.choice.split.feature;
-        const aThreshold = Number(meta.thresholds?.[aFeature] ?? thresholdLabel(aFeature, meta));
-        const bThreshold = Number(meta.thresholds?.[bFeature] ?? thresholdLabel(bFeature, meta));
+        const aThreshold = Number((Array.isArray(meta.thresholds) ? meta.thresholds[aFeature] : meta.thresholds?.[String(aFeature)]) ?? thresholdLabel(aFeature, meta));
+        const bThreshold = Number((Array.isArray(meta.thresholds) ? meta.thresholds[bFeature] : meta.thresholds?.[String(bFeature)]) ?? thresholdLabel(bFeature, meta));
         if (Number.isFinite(aThreshold) && Number.isFinite(bThreshold)) {
           return aThreshold - bThreshold || aFeature - bFeature;
         }
