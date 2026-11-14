@@ -39,24 +39,24 @@ jobs:
         include:
           - runner: windows-2022
             platform: windows-x64
-            binary: AnytimeTreeBuilder.exe
-            app_binary: win-unpacked/AnytimeTreeBuilder.exe
+            binary: ArborExplorer.exe
+            app_binary: win-unpacked/ArborExplorer.exe
           - runner: macos-15
             platform: macos-arm64
-            binary: AnytimeTreeBuilder
-            app_binary: mac-arm64/AnytimeTreeBuilder.app/Contents/MacOS/AnytimeTreeBuilder
+            binary: ArborExplorer
+            app_binary: mac-arm64/ArborExplorer.app/Contents/MacOS/ArborExplorer
           - runner: macos-15-intel
             platform: macos-x64
-            binary: AnytimeTreeBuilder
-            app_binary: mac/AnytimeTreeBuilder.app/Contents/MacOS/AnytimeTreeBuilder
+            binary: ArborExplorer
+            app_binary: mac/ArborExplorer.app/Contents/MacOS/ArborExplorer
           - runner: ubuntu-24.04
             platform: linux-x64
-            binary: AnytimeTreeBuilder
-            app_binary: linux-unpacked/anytimetreebuilder
+            binary: ArborExplorer
+            app_binary: linux-unpacked/arborexplorer
           - runner: ubuntu-24.04-arm
             platform: linux-arm64
-            binary: AnytimeTreeBuilder
-            app_binary: linux-arm64-unpacked/anytimetreebuilder
+            binary: ArborExplorer
+            app_binary: linux-arm64-unpacked/arborexplorer
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -89,8 +89,8 @@ jobs:
             apk add --no-cache g++ cmake make python3 git linux-headers
             git config --global --add safe.directory /src
             node scripts/build-desktop.mjs --ui-ready --engine-only --static
-            python3 ArborEnum/native/tests/test_desktop.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
-            python3 ArborEnum/native/tests/test_live_api.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+            python3 ArborEnum/native/tests/test_desktop.py dist/desktop/ArborExplorer-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+            python3 ArborEnum/native/tests/test_live_api.py dist/desktop/ArborExplorer-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
           '
       - uses: actions/setup-python@v5
         if: runner.os != 'Linux'
@@ -99,10 +99,10 @@ jobs:
       - name: Test standalone application and live HTTP API
         if: runner.os != 'Linux'
         run: |
-          python ArborEnum/native/tests/test_desktop.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
-          python ArborEnum/native/tests/test_live_api.py dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+          python ArborEnum/native/tests/test_desktop.py dist/desktop/ArborExplorer-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
+          python ArborEnum/native/tests/test_live_api.py dist/desktop/ArborExplorer-${{ matrix.platform }}/${{ matrix.binary }} InteractiveTreeBuilder/dist/index.html
       - name: Verify engine ownership and crash cleanup
-        run: node desktop/app/tests/engine.cjs dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}/${{ matrix.binary }}
+        run: node desktop/app/tests/engine.cjs dist/desktop/ArborExplorer-${{ matrix.platform }}/${{ matrix.binary }}
       - name: Build native desktop window and installers
         run: node scripts/build-app.mjs
       - name: Exercise packaged Windows/macOS window
@@ -117,7 +117,7 @@ jobs:
         run: xvfb-run -a node desktop/app/tests/app.cjs "dist/apps/${{ matrix.app_binary }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: AnytimeTreeBuilder-App-${{ matrix.platform }}
+          name: ArborExplorer-App-${{ matrix.platform }}
           path: |
             dist/apps/*.exe
             dist/apps/*.dmg
@@ -130,9 +130,9 @@ jobs:
           retention-days: 90
       - uses: actions/upload-artifact@v4
         with:
-          name: AnytimeTreeBuilder-${{ matrix.platform }}
+          name: ArborExplorer-${{ matrix.platform }}
           path: |
-            dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}.zip
-            dist/desktop/AnytimeTreeBuilder-${{ matrix.platform }}.zip.sha256
+            dist/desktop/ArborExplorer-${{ matrix.platform }}.zip
+            dist/desktop/ArborExplorer-${{ matrix.platform }}.zip.sha256
           if-no-files-found: error
           retention-days: 90

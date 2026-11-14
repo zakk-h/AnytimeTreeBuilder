@@ -2,7 +2,7 @@ const { app, BrowserWindow, dialog, Menu, screen, session } = require('electron'
 const { join } = require('node:path');
 const { NativeEngine } = require('./engine.cjs');
 
-app.setName('AnytimeTreeBuilder');
+app.setName('ArborExplorer');
 app.enableSandbox();
 let window;
 let engine;
@@ -11,7 +11,7 @@ let cleanedUp = false;
 
 async function fail(error) {
   if (quitting) return;
-  dialog.showErrorBox('AnytimeTreeBuilder', `${error.message}\n\n${engine?.logs.slice(-12).join('\n') ?? ''}`);
+  dialog.showErrorBox('ArborExplorer', `${error.message}\n\n${engine?.logs.slice(-12).join('\n') ?? ''}`);
   app.quit();
 }
 
@@ -31,7 +31,7 @@ if (!app.requestSingleInstanceLock()) {
     Promise.resolve(engine?.stop()).finally(() => { cleanedUp = true; app.quit(); });
   });
   app.whenReady().then(async () => {
-    const executable = process.platform === 'win32' ? 'AnytimeTreeBuilder.exe' : 'AnytimeTreeBuilder';
+    const executable = process.platform === 'win32' ? 'ArborExplorer.exe' : 'ArborExplorer';
     const resources = app.isPackaged ? process.resourcesPath : join(__dirname, '..');
     engine = new NativeEngine(join(resources, 'native', executable));
     engine.on('exit', ({ code, signal }) => {
@@ -46,7 +46,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     const area = screen.getPrimaryDisplay().workAreaSize;
     window = new BrowserWindow({
-      title: 'AnytimeTreeBuilder',
+      title: 'ArborExplorer',
       width: Math.min(1600, area.width), height: Math.min(1050, area.height),
       minWidth: Math.min(960, area.width), minHeight: Math.min(640, area.height),
       backgroundColor: '#f7f8fa', show: false, autoHideMenuBar: process.platform !== 'darwin',

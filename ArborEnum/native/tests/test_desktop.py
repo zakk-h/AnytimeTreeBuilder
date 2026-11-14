@@ -55,7 +55,7 @@ def start(binary, cwd, args, env):
 def main():
     binary, html = (Path(arg).resolve() for arg in sys.argv[1:3])
     expected = html.read_bytes()
-    with tempfile.TemporaryDirectory(prefix='Anytime Tree Builder ') as tmp:
+    with tempfile.TemporaryDirectory(prefix='ArborExplorer ') as tmp:
         directory = Path(tmp)
         moved = directory / binary.name
         shutil.copy2(binary, moved)

@@ -1,6 +1,6 @@
 {
-  "name": "anytime-tree-builder-desktop",
-  "version": "0.4.9",
+  "name": "arborexplorer-desktop",
+  "version": "0.4.10",
   "private": true,
   "description": "Interactive decision trees with local, live C++ enumeration",
   "author": "Zakk Heile <zakk-h@users.noreply.github.com>",
@@ -18,7 +18,7 @@
   },
   "build": {
     "appId": "io.github.zakk-h.anytimetreebuilder",
-    "productName": "AnytimeTreeBuilder",
+    "productName": "ArborExplorer",
     "directories": {
       "output": "../../dist/apps",
       "buildResources": "."
@@ -36,7 +36,7 @@
       }
     ],
     "asar": true,
-    "artifactName": "AnytimeTreeBuilder-${version}-${os}-${arch}.${ext}",
+    "artifactName": "ArborExplorer-${version}-${os}-${arch}.${ext}",
     "mac": {
       "category": "public.app-category.education",
       "icon": "icon.png",
@@ -61,7 +61,7 @@
     },
     "linux": {
       "icon": "icon.png",
-      "executableName": "anytimetreebuilder",
+      "executableName": "arborexplorer",
       "syncDesktopName": true,
       "category": "Education",
       "target": [

@@ -55,7 +55,7 @@ class NativeEngine extends EventEmitter {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
-    console.log(`AnytimeTreeBuilder engine pid=${this.child.pid}`);
+    console.log(`ArborExplorer engine pid=${this.child.pid}`);
     return this.url;
   }
 

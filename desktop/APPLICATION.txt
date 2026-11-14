@@ -1,4 +1,4 @@
-AnytimeTreeBuilder
+ArborExplorer
 
 Windows: run the .exe installer, or extract the portable ZIP and open its .exe.
 Mac: open the DMG and drag the app into Applications.

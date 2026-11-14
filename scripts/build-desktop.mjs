@@ -11,13 +11,13 @@ const flags = new Set(process.argv.slice(2));
 for (const flag of flags) if (!['--ui-ready', '--static', '--engine-only'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
 const platform = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
 if (!platform || !['x64', 'arm64'].includes(process.arch)) throw new Error('Supported builds: Windows, macOS and Linux on x64/arm64.');
-const name = `AnytimeTreeBuilder-${platform}-${process.arch}`;
+const name = `ArborExplorer-${platform}-${process.arch}`;
 const build = join(root, 'build', `desktop-${platform}-${process.arch}`);
 const output = join(root, 'dist', 'desktop');
 const packageDir = join(output, name);
 const frontend = join(root, 'InteractiveTreeBuilder');
 const ui = join(frontend, 'dist', 'index.html');
-const executable = process.platform === 'win32' ? 'AnytimeTreeBuilder.exe' : 'AnytimeTreeBuilder';
+const executable = process.platform === 'win32' ? 'ArborExplorer.exe' : 'ArborExplorer';
 
 function run(command, args, cwd = root) {
   console.log(`\n> ${command} ${args.join(' ')}`);
@@ -56,7 +56,7 @@ mkdirSync(packageDir, { recursive: true });
 run('cmake', ['--install', build, '--config', 'Release', '--prefix', packageDir, '--component', 'Runtime']);
 if (process.platform !== 'win32') chmodSync(join(packageDir, executable), 0o755);
 if (process.platform === 'darwin') {
-  writeFileSync(join(packageDir, 'Open AnytimeTreeBuilder.command'), '#!/bin/sh\ncd -- "$(dirname -- "$0")" || exit 1\nexec ./AnytimeTreeBuilder\n', { mode: 0o755 });
+  writeFileSync(join(packageDir, 'Open ArborExplorer.command'), '#!/bin/sh\ncd -- "$(dirname -- "$0")" || exit 1\nexec ./ArborExplorer\n', { mode: 0o755 });
   // Ad-hoc signing is sufficient for local executable integrity. This is not
   // Developer ID signing/notarization and the package does not claim otherwise.
   run('/usr/bin/codesign', ['--force', '--sign', '-', join(packageDir, executable)]);

@@ -1,10 +1,10 @@
-# AnytimeTreeBuilder
+# ArborExplorer
 
 Build decision trees interactively while [ArborEnum](https://github.com/zakk-h/ArborEnum) enumerates alternatives in the background. Start with a CSV or an existing Rashomon graph. Live enumeration and completions run in C++; datasets stay on your computer.
 
 ## Download
 
-Open the latest successful [Desktop applications build](https://github.com/zakk-h/AnytimeTreeBuilder/actions/workflows/desktop.yml) and download an **AnytimeTreeBuilder-App-…** artifact for your system. Extract the download, then:
+Open the latest successful [Desktop applications build](https://github.com/zakk-h/AnytimeTreeBuilder/actions/workflows/desktop.yml) and download an **ArborExplorer-App-…** artifact for your system. Extract the download, then:
 
 | System | Open |
 | --- | --- |

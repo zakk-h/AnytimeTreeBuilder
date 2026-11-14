@@ -1,6 +1,6 @@
 # Interactive Tree Builder
 
-The React interface for [AnytimeTreeBuilder](../README.md). Upload a CSV for live ArborEnum enumeration or a JSON Rashomon graph to explore an existing set.
+The React interface for [ArborExplorer](../README.md). Upload a CSV for live ArborEnum enumeration or a JSON Rashomon graph to explore an existing set.
 
 Live queries and completions use the native C++ service. **Update options** refreshes the selected node without resetting the tree. CSV features can be numeric, boolean or categorical; blank cells are rejected.
 

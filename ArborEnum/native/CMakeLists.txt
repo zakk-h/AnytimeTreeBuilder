@@ -47,7 +47,7 @@ if(ARBORENUM_EMBED_UI)
 endif()
 if(ARBORENUM_DESKTOP)
   target_compile_definitions(arborenum-builder PRIVATE ARBORENUM_DESKTOP)
-  set_target_properties(arborenum-builder PROPERTIES OUTPUT_NAME AnytimeTreeBuilder)
+  set_target_properties(arborenum-builder PROPERTIES OUTPUT_NAME ArborExplorer)
 endif()
 
 include(CTest)

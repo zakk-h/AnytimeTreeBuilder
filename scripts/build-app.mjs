@@ -7,13 +7,13 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const platform = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
-const source = join(root, 'dist', 'desktop', `AnytimeTreeBuilder-${platform}-${process.arch}`);
+const source = join(root, 'dist', 'desktop', `ArborExplorer-${platform}-${process.arch}`);
 const app = join(root, 'desktop', 'app');
 const staging = join(root, 'desktop', 'native');
 const manifest = JSON.parse(readFileSync(join(source, 'build-info.json'), 'utf8'));
 if (manifest.platform !== platform || manifest.architecture !== process.arch)
   throw new Error('Build the native engine for this platform before packaging the application.');
-const binary = process.platform === 'win32' ? 'AnytimeTreeBuilder.exe' : 'AnytimeTreeBuilder';
+const binary = process.platform === 'win32' ? 'ArborExplorer.exe' : 'ArborExplorer';
 const sha = file => createHash('sha256').update(readFileSync(file)).digest('hex');
 if (sha(join(source, binary)) !== manifest.executable_sha256) throw new Error('Native engine checksum mismatch. Rebuild it first.');
 function run(command, args) {
@@ -24,7 +24,7 @@ function run(command, args) {
 rmSync(staging, { recursive: true, force: true });
 mkdirSync(staging, { recursive: true });
 cpSync(source, staging, { recursive: true });
-if (process.platform === 'darwin') rmSync(join(staging, 'Open AnytimeTreeBuilder.command'));
+if (process.platform === 'darwin') rmSync(join(staging, 'Open ArborExplorer.command'));
 cpSync(join(root, 'desktop', 'APPLICATION.txt'), join(staging, 'README.txt'));
 run('npm', ['ci']);
 run('npm', ['run', 'package', '--', `--${{ win32: 'win', darwin: 'mac', linux: 'linux' }[process.platform]}`, `--${process.arch}`]);

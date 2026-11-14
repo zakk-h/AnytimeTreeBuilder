@@ -1,6 +1,6 @@
 # Source provenance
 
-AnytimeTreeBuilder combines these projects by Zakk Heile:
+ArborExplorer combines these projects by Zakk Heile:
 
 | Component | Upstream | Original base | Integrated source revision |
 | --- | --- | --- | --- |

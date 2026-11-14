@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
             else if (arg == "--managed") { managed = true; open_browser = false; }
             else if (arg == "--open-browser") open_browser = true;
             else if (arg == "--help") {
-                std::cout << "AnytimeTreeBuilder [--ui /path/to/index.html] [--port 0..65535] [--no-browser | --open-browser]\n"
+                std::cout << "ArborExplorer [--ui /path/to/index.html] [--port 0..65535] [--no-browser | --open-browser]\n"
                           << "Desktop builds include the UI; port 0 selects a free local port.\n"
                           << "--managed exits cooperatively when its parent closes the stdin pipe.\n";
                 return 0;

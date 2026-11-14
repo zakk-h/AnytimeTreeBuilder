@@ -2119,7 +2119,7 @@ function App() {
       <header className="canvas-header">
           <div className="workspace-brand">
             <span className="workspace-mark"><Network size={19} /></span>
-            <h1>AnytimeTreeBuilder</h1>
+            <h1>ArborExplorer</h1>
           </div>
           <LiveEnumerationPanel
             open={enumerationOpen}

@@ -1,9 +1,9 @@
-AnytimeTreeBuilder — browser version
+ArborExplorer — browser version
 
 Extract the download, then open:
-  Windows: AnytimeTreeBuilder.exe
-  Mac: Open AnytimeTreeBuilder.command
-  Linux: ./AnytimeTreeBuilder
+  Windows: ArborExplorer.exe
+  Mac: Open ArborExplorer.command
+  Linux: ./ArborExplorer
 
 Your browser opens automatically. Choose Upload > Upload dataset and select
 example.csv or your own CSV. Keep the application running; Ctrl+C stops it.

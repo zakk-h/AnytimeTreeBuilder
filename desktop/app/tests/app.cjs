@@ -9,7 +9,7 @@ const { _electron } = require('playwright-core');
 const { exerciseTraining, exerciseStop } = require('./training.cjs');
 
 async function main() {
-  const profile = mkdtempSync(join(tmpdir(), 'Anytime Tree Builder '));
+  const profile = mkdtempSync(join(tmpdir(), 'ArborExplorer '));
   let desktop;
   let child;
   let output = '';

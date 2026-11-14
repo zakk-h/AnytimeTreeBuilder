@@ -110,7 +110,7 @@ Initial-root tests cover leaf and split-only first completions, rejection of emp
 
 ## Embedded desktop build
 
-The portable app uses the same HTTP service, owner thread, graph queries, cancellation and native completions. Configure `-DARBORENUM_DESKTOP=ON -DARBORENUM_EMBED_UI=/absolute/path/to/dist/index.html` to embed the UI as exact UTF-8 bytes and name the binary `AnytimeTreeBuilder`. CMake tracks the HTML as a build dependency. The root `build-desktop` launchers handle the frontend build, compilation, native tests, packaging and notices.
+The portable app uses the same HTTP service, owner thread, graph queries, cancellation and native completions. Configure `-DARBORENUM_DESKTOP=ON -DARBORENUM_EMBED_UI=/absolute/path/to/dist/index.html` to embed the UI as exact UTF-8 bytes and name the binary `ArborExplorer`. CMake tracks the HTML as a build dependency. The root `build-desktop` launchers handle the frontend build, compilation, native tests, packaging and notices.
 
 Desktop builds select a free IPv4 loopback port and open the generated URL through ShellExecute on Windows, `open` on macOS, or `xdg-open` on Linux, without a shell. They ignore hosting environment configuration and keep the existing Host/Origin and per-browser cookie checks. `--no-browser` suppresses opening; `--port 0` explicitly requests a free port. Windows uses a static MSVC runtime. Official Linux packages use static musl linking.
 
