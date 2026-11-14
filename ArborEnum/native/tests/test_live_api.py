@@ -122,6 +122,34 @@ def main():
         branch_graph['graph']['split_nodes'][0]['left_trie_id'] = 0
         branch_body['tree'] = branch_tree
         assert call('/api/analyze-graph', branch_body)[0] == 400
+        # Analysis jobs return promptly and retain exact results for polling.
+        start_url = '/api/analysis-start?session_id=' + tiny_id
+        result_url = '/api/analysis-result?session_id=' + tiny_id
+        assert call(start_url, {'tree': tiny_tree, 'analysis_token': ''})[0] == 400
+        code, job = call(start_url, {'tree': tiny_tree, 'analysis_token': 'background-test'})
+        assert code == 202 and job['state'] == 'queued', job
+        deadline = time.monotonic() + 10
+        while True:
+            code, job = call(result_url, {'token': 'background-test'})
+            assert code == 200 and job['state'] != 'failed', job
+            if job['state'] == 'complete': break
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        for key in ('tree_count','accuracy','importance','disagreement','leaf_distribution'):
+            assert job['result'][key] == analysis[key], key
+        assert call(result_url, {'token': 'background-test'})[1] == job
+        assert call(result_url, {'token': 'unknown'})[0] == 400
+        assert call(start_url, {'tree': tiny_tree, 'analysis_token': 'background-test'})[0] == 400
+        assert call('/api/cancel-query?session_id=' + tiny_id, {'token': 'cancel-before-start'})[0] == 202
+        assert call(start_url, {'tree': tiny_tree, 'analysis_token': 'cancel-before-start'})[0] == 202
+        deadline = time.monotonic() + 10
+        while True:
+            code, cancelled_job = call(result_url, {'token': 'cancel-before-start'})
+            if cancelled_job['state'] == 'failed': break
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        assert 'cancelled' in cancelled_job['error'].lower(), cancelled_job
+        call(analysis_url, {'tree': tiny_tree, 'analysis_token': 'progress-test'})
         progress_url = '/api/analysis-progress?session_id=' + tiny_id
         assert call(progress_url, {'token': ''})[0] == 400
         code, progress = call(progress_url, {'token': 'progress-test'})

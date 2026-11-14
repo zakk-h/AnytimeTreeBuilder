@@ -109,9 +109,25 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
     };
     pollTimer = setTimeout(poll, 150);
     try {
-      const response = await nativeApi<Result>(session ? 'analyze' : 'analyze-graph', session, session ? { tree, analysis_token: token.current } : { tree, payload: { graph, meta }, dataset: attachedDataset, token: token.current }, controller.signal);
-      if (!controller.signal.aborted) setResult(response);
-    } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : String(e)); }
+      if (session) {
+        await nativeApi('analysis-start', session, { tree, analysis_token: analysisToken }, controller.signal);
+        while (!controller.signal.aborted) {
+          const status = await nativeApi<{ state: string; result?: Result; error?: string }>('analysis-result', session, { token: analysisToken }, controller.signal);
+          if (controller.signal.aborted) break;
+          if (status.state === 'failed') throw new Error(status.error ?? 'Analysis failed');
+          if (status.state === 'complete' && status.result) { setResult(status.result); break; }
+          await new Promise(resolve => setTimeout(resolve, 400));
+        }
+      } else {
+        const response = await nativeApi<Result>('analyze-graph', session, { tree, payload: { graph, meta }, dataset: attachedDataset, token: analysisToken }, controller.signal);
+        if (!controller.signal.aborted) setResult(response);
+      }
+    } catch (e) {
+      if (!controller.signal.aborted) {
+        if (session) void nativeApi('cancel-query', session, { token: analysisToken }).catch(() => {});
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    }
     finally { controller.abort(); clearTimeout(pollTimer); if (request.current === controller) { setBusy(false); request.current = null; token.current = ''; } }
   };
   return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Connect the native service to analyze this graph' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); void run(); }}><BarChart3 size={16}/> Analyze</button>
@@ -148,6 +164,7 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
         {busy && <button className="ghost-button" onClick={close}>Cancel analysis</button>}
         {busy && <div className="analysis-progress" role="status" aria-live="polite">
           <p>Calculating…</p>
+          {session && (!progress || progress.stage < 0) && <small>Waiting for enumeration to reach a query checkpoint…</small>}
           <progress aria-label="Analysis stages completed" max={4} value={Math.max(0, progress?.stage ?? 0) + (progress?.stage === 3 && progress.feature_count ? progress.completed_features / progress.feature_count : 0)}/>
           {progress && progress.stage >= 0 && progress.stage < 4 && <>
             {completedStages[progress.stage] && <small>{completedStages[progress.stage]}</small>}

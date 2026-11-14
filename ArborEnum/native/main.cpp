@@ -347,6 +347,16 @@ int main(int argc, char** argv) {
                 current->cancel_analysis(token); respond(res, {{"cancel_requested", true}}, 202);
             }
         });
+        post_json("/api/analysis-start", [&](const auto& req, auto& res) {
+            if (auto current = checked_session(req, res))
+                respond(res, current->start_analysis(json::parse(req.body)), 202);
+        });
+        post_json("/api/analysis-result", [&](const auto& req, auto& res) {
+            if (auto current = checked_session(req, res)) {
+                const json body = json::parse(req.body);
+                respond(res, current->analysis_result(body.at("token").get<std::string>()));
+            }
+        });
         post_json("/api/analysis-progress", [&](const auto& req, auto& res) {
             if (auto current = checked_session(req, res)) {
                 const json body = json::parse(req.body);

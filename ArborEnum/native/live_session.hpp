@@ -13,6 +13,8 @@ class Session {
         std::string operation;
         json body;
         std::promise<json> promise;
+        std::shared_future<json> future = promise.get_future().share();
+        std::atomic<bool> started{false};
         std::atomic<bool> cancelled{false};
         std::chrono::steady_clock::time_point enqueued = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point deadline;
@@ -33,6 +35,7 @@ class Session {
     json meta_ = json::object();
     std::queue<std::shared_ptr<Request>> requests_;
     std::shared_ptr<Request> active_request_;
+    std::map<std::string, std::shared_ptr<Request>> analysis_jobs_;
     std::deque<std::string> cancelled_analysis_tokens_;
     json analysis_progress_ = nullptr;
     std::atomic<bool> pending_{false}, cancel_search_{false};
@@ -40,6 +43,21 @@ class Session {
     // a finished/cancelled run never requires an export or reconstruction.
     std::jthread worker_;
 
+    void enqueue(const std::shared_ptr<Request>& request) {
+        {
+            std::lock_guard lock(mutex_);
+            if (worker_.get_stop_token().stop_requested()) throw QueryUnavailable("Native session closed");
+            if (!ready_) throw QueryUnavailable("Waiting for the first feasible native tree");
+            if (requests_.size() >= 32) throw QueryUnavailable("Native query queue is full; retry the latest selection");
+            if (request->operation == "analyze") {
+                const auto token = request->body.value("analysis_token", "");
+                const auto cancelled = std::find(cancelled_analysis_tokens_.begin(), cancelled_analysis_tokens_.end(), token);
+                if (cancelled != cancelled_analysis_tokens_.end()) { request->cancelled.store(true); cancelled_analysis_tokens_.erase(cancelled); }
+            }
+            requests_.push(request); pending_.store(true, std::memory_order_relaxed);
+        }
+        wake_.notify_one();
+    }
     void pump(ArborEnum& model, const json& meta, const Dataset& data, std::stop_token lifetime) {
         for (int batch = 0; batch < 8; ++batch) {
             std::shared_ptr<Request> request;
@@ -54,6 +72,8 @@ class Session {
                 pending_.store(!requests_.empty(), std::memory_order_relaxed);
             }
             try {
+                request->started.store(true);
+                if (request->cancelled.load()) throw std::runtime_error("Native query cancelled");
                 const auto query_started = std::chrono::steady_clock::now();
                 GraphQueries graph(model, meta, [&] { return lifetime.stop_requested() || request->cancelled.load() || std::chrono::steady_clock::now() >= request->deadline; }, &data, query_budget);
                 json reply;
@@ -251,25 +271,48 @@ public:
         request->operation = std::move(operation); request->body = std::move(body);
         const auto timeout = std::chrono::seconds(request->operation == "node" ? 10 : request->operation == "analyze" ? 300 : 60);
         request->deadline = std::chrono::steady_clock::now() + timeout;
-        auto future = request->promise.get_future();
-        {
-            std::lock_guard lock(mutex_);
-            if (worker_.get_stop_token().stop_requested()) throw QueryUnavailable("Native session closed");
-            if (!ready_) throw QueryUnavailable("Waiting for the first feasible native tree");
-            if (requests_.size() >= 32) throw QueryUnavailable("Native query queue is full; retry the latest selection");
-            if (request->operation == "analyze") {
-                const auto token = request->body.value("analysis_token", "");
-                const auto cancelled = std::find(cancelled_analysis_tokens_.begin(), cancelled_analysis_tokens_.end(), token);
-                if (cancelled != cancelled_analysis_tokens_.end()) { request->cancelled.store(true); cancelled_analysis_tokens_.erase(cancelled); }
-            }
-            requests_.push(request); pending_.store(true, std::memory_order_relaxed);
-        }
-        wake_.notify_one();
+        auto future = request->future;
+        enqueue(request);
         if (future.wait_for(timeout) != std::future_status::ready) {
             request->cancelled.store(true);
             throw QueryUnavailable("Native query timed out; retry the latest selection");
         }
         return future.get();
+    }
+    // Analysis is an owner-thread job. HTTP only submits or polls it, so long
+    // exact calculations have no wall-clock expiry and keep cancellation checks.
+    json start_analysis(json body) {
+        const auto token = body.at("analysis_token").get<std::string>();
+        if (token.empty() || token.size() > 128) throw std::invalid_argument("Invalid analysis token");
+        auto request = std::make_shared<Request>();
+        request->operation = "analyze"; request->body = std::move(body);
+        request->deadline = std::chrono::steady_clock::time_point::max();
+        {
+            std::lock_guard lock(mutex_);
+            if (analysis_jobs_.contains(token)) throw std::invalid_argument("Analysis token already used");
+            for (auto it = analysis_jobs_.begin(); analysis_jobs_.size() >= 4 && it != analysis_jobs_.end();) {
+                if (it->second->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) it = analysis_jobs_.erase(it);
+                else ++it;
+            }
+            if (analysis_jobs_.size() >= 4) throw QueryUnavailable("Too many pending analyses; cancel an existing analysis first");
+            analysis_jobs_.emplace(token, request);
+        }
+        try { enqueue(request); }
+        catch (...) { std::lock_guard lock(mutex_); analysis_jobs_.erase(token); throw; }
+        return {{"token", token}, {"state", "queued"}};
+    }
+    json analysis_result(const std::string& token) const {
+        std::shared_ptr<Request> request;
+        {
+            std::lock_guard lock(mutex_);
+            auto found = analysis_jobs_.find(token);
+            if (found == analysis_jobs_.end()) throw std::invalid_argument("Unknown analysis token");
+            request = found->second;
+        }
+        if (request->future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return {{"state", request->started.load() ? "running" : "queued"}};
+        try { return {{"state", "complete"}, {"result", request->future.get()}}; }
+        catch (const std::exception& error) { return {{"state", "failed"}, {"error", error.what()}}; }
     }
     void request_budget(int budget) {
         if (budget < 0) throw std::invalid_argument("Budget must be a nonnegative integer");

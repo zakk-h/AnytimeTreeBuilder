@@ -45,21 +45,31 @@ async function exerciseAnalysis(page, exportAnalysis = async () => {
   await page.waitForFunction(async () => { const s = await (await fetch('/api/session')).json(); return s.active_budget === s.graph_budget; });
   let releaseAnalysis;
   const held = new Promise(resolve => { releaseAnalysis = resolve; });
-  const holdResponse = async route => { const response = await route.fetch(); await held; await route.fulfill({ response }); };
+  const holdResponse = async route => {
+    let response;
+    for (;;) {
+      response = await route.fetch();
+      if ((await response.json()).state === 'complete') break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    await held; await route.fulfill({ response });
+  };
   const reportProgress = route => route.fulfill({ json: { stage: 3, completed_features: 1, feature_count: 2, current_feature: 'b' } });
-  await page.route('**/api/analyze?*', holdResponse);
+  await page.route('**/api/analysis-result?*', holdResponse);
   await page.route('**/api/analysis-progress?*', reportProgress);
-  const analysis = page.waitForResponse(r => r.url().includes('/api/analyze?'));
+  const analysisStarted = page.waitForRequest(r => r.url().includes('/api/analysis-start?'));
+  const analysis = page.waitForResponse(r => r.url().includes('/api/analysis-result?'));
   await page.getByRole('button', { name: 'Analyze', exact: true }).click();
   await page.getByText('Computing feature importance · 1/2 features complete · b', { exact: true }).waitFor();
   assert.equal(await page.getByRole('progressbar', { name: 'Analysis stages completed' }).getAttribute('value'), '3.5');
   assert.equal(await page.getByText('Calculating…', { exact: true }).count(), 1);
   releaseAnalysis();
   const response = await analysis;
-  await page.unroute('**/api/analyze?*', holdResponse);
+  await page.unroute('**/api/analysis-result?*', holdResponse);
   await page.unroute('**/api/analysis-progress?*', reportProgress);
   assert.equal(response.status(), 200, await response.text());
-  const result = await response.json();
+  const result = (await response.json()).result;
+  const analyzedTree = (await analysisStarted).postDataJSON().tree;
   assert.equal(result.exact, true);
   assert.ok(BigInt(result.tree_count) > 1n);
   assert.equal(result.permutation, 'expectation_over_all_permutations');
@@ -73,7 +83,7 @@ async function exerciseAnalysis(page, exportAnalysis = async () => {
   await page.locator('.analysis-importance tbody tr').first().waitFor();
   assert.equal(await page.locator('.analysis-importance tbody tr').count(), 2);
   assert.equal(await page.locator('.analysis-violin').count(), 1);
-  assert.equal(await page.locator('.analysis-metrics').innerText(), `${response.request().postDataJSON().tree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}\n${BigInt(result.tree_count).toLocaleString()}\nAccuracy on predicted samples\n${await page.locator('.analysis-metrics b').nth(1).innerText()}\nNumber of leaves\n${result.leaf_distribution[0].value} – ${result.leaf_distribution[result.leaf_distribution.length - 1].value}`);
+  assert.equal(await page.locator('.analysis-metrics').innerText(), `${analyzedTree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}\n${BigInt(result.tree_count).toLocaleString()}\nAccuracy on predicted samples\n${await page.locator('.analysis-metrics b').nth(1).innerText()}\nNumber of leaves\n${result.leaf_distribution[0].value} – ${result.leaf_distribution[result.leaf_distribution.length - 1].value}`);
   assert.equal(await page.getByText('Training samples', { exact: true }).count(), 0);
   const leavesChart = page.locator('.analysis-distribution-leaves');
   const firstBar = leavesChart.locator('rect').first();
@@ -120,9 +130,9 @@ async function exerciseAnalysis(page, exportAnalysis = async () => {
   const filled = await filledResponse.json();
   assert.equal(filled.leaves, 1); assert.equal(filled.abstained_samples, 0); assert.equal(filled.tree.kind, 'leaf');
   await page.locator('.constraint-modal').waitFor({ state: 'detached' });
-  const fixed = page.waitForResponse(r => r.url().includes('/api/analyze?'));
+  const fixed = page.waitForResponse(async r => r.url().includes('/api/analysis-result?') && (await r.json()).state === 'complete');
   await page.getByRole('button', { name: 'Analyze', exact: true }).click();
-  const fixedResult = await (await fixed).json();
+  const fixedResult = (await (await fixed).json()).result;
   assert.equal(fixedResult.tree_count, '1');
   assert.deepEqual(fixedResult.leaf_distribution, [{value: 1, count: '1', probability: 1}]);
   for (const row of fixedResult.disagreement) assert.equal(row.disagreement, 0);
@@ -155,9 +165,9 @@ async function exerciseAnalysis(page, exportAnalysis = async () => {
   const newSid = (await (await started).json()).session_id;
   await page.waitForFunction(sid => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.graph?.metadata?.session_id === sid, newSid);
   await page.waitForFunction(async () => ['finished', 'stopped'].includes((await (await fetch('/api/session')).json()).phase));
-  const multiclass = page.waitForResponse(r => r.url().includes('/api/analyze?'));
+  const multiclass = page.waitForResponse(async r => r.url().includes('/api/analysis-result?') && (await r.json()).state === 'complete');
   await page.getByRole('button', { name: 'Analyze', exact: true }).click();
-  const multiResult = await (await multiclass).json();
+  const multiResult = (await (await multiclass).json()).result;
   assert.equal(multiResult.class_count, 3); assert.equal(multiResult.abstention_enabled, false);
   await page.locator('.analysis-importance').waitFor();
   assert.equal(await page.locator('.analysis-distribution-abstention').count(), 0);
