@@ -144,7 +144,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
       }}>
         <button className="ghost-button live-close" aria-label="Close enumeration setup" disabled={busy} onClick={() => onClose()}><X size={18}/></button>
         <div className="dialog-eyebrow"><Table2 size={16} /> DATASET IMPORT</div>
-        <h2 id="live-title">Build from your data.</h2>
+        <h2 id="live-title">Explore the Rashomon set as it grows.</h2>
         <p>Choose a CSV and a classification target. True/False values become 1/0; other text categories become named binary indicators.</p>
         <label className="live-file">Dataset CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={async e => {
           const file = e.target.files?.[0]; if (!file) return;

@@ -15,11 +15,11 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
   const continuous = (key: Key, label: string) => <label key={key}>{label}<select aria-label={label} value={s[key] === null ? 'auto' : String(s[key])} onChange={e => change(key, e.target.value === 'auto' ? null : e.target.value === 'true')}><option value="auto">Follow proxy mode</option><option value="false">Binarized</option><option value="true">Continuous</option></select></label>;
   return <>
     <div className="live-fields">
-      {number('lambda_reg', 'Leaf penalty', 'Penalty per leaf, scaled by the training sample count.', 0, undefined, .001)}
+      {number('lambda_reg', 'Leaf penalty', 'Penalty per leaf.', 0, undefined, .001)}
       {number('depth_budget', 'Maximum depth', undefined, 0, 127, 1)}
       {number('rashomon_mult', 'Rashomon multiplier')}
       {number('second_rashomon_mult', 'Expand multiplier to')}
-      {number('runtime_limit_seconds', 'Runtime limit (seconds)', '-1 for unlimited. Limits apply after the initial restricted solve.', -1)}
+      {number('runtime_limit_seconds', 'Runtime limit (seconds)', '-1 for unlimited.', -1)}
       {number('memory_limit_mb', 'Memory limit (MB)', '-1 for unlimited.', -1)}
       {select('proxy_mode', 'Proxy mode', [['binarized', 'Binarized'], ['hybrid', 'Hybrid'], ['continuous', 'Continuous']])}
     </div>
@@ -66,7 +66,7 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
       <h3>Caching</h3>
       <div className="training-toggles">
         {toggle('trie_cache', 'Cache graph subproblems', 'Reuse native trie nodes across matching subproblems.')}
-        {toggle('cache_cheap_subproblems', 'Cache cheap subproblems', 'Also cache inexpensive proxy evaluations. Proxy objective caching is always enabled by the anytime engine.')}
+        {toggle('cache_cheap_subproblems', 'Cache cheap subproblems', 'Also cache inexpensive proxy evaluations. Proxy objective caching is always enabled by the anytime algorithm.')}
       </div>
       <button className="ghost-button" type="button" onClick={() => onChange({ ...DEFAULT_TRAINING_SETTINGS })}>Reset training settings</button>
     </details>
