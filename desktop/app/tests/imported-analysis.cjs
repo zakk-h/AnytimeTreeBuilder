@@ -20,7 +20,7 @@ async function exerciseImportedAnalysis(page) {
   await page.waitForFunction(() => window.ARBORENUM_CURRENT_BUILDER_PAYLOAD?.graph?.root_trie_id === 7);
   await page.getByRole('button', { name: 'Analyze', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Analyze partial tree' });
-  await dialog.getByText('Feasible completions', { exact: true }).waitFor();
+  await dialog.getByText('Number of trees', { exact: true }).waitFor();
   assert.equal(await dialog.locator('.analysis-metrics b').first().textContent(), '3');
   await dialog.getByText(/Permutation importance and sample disagreement require/).waitFor();
   await dialog.getByLabel('Analysis dataset CSV').setInputFiles({ name: 'data.csv', mimeType: 'text/csv', buffer: Buffer.from('constant,label\n0,no\n0,yes\n0,no\n0,yes\n') });
