@@ -297,7 +297,7 @@ function samplePanel(message: HTMLElement) {
   body.className = 'constraint-body';
   const help = document.createElement('div');
   help.className = 'constraint-help';
-  help.textContent = 'Enter any feature values you know and leave the rest blank. Blank means unknown: the completed tree must produce the requested prediction for every full sample consistent with the values you entered. If an unknown feature is used by a split, both branches are constrained.';
+  help.textContent = 'Enter values for some but not all features. Find the best tree that will always predict a given class when those feature values are true, no matter what the unset values are.';
   body.appendChild(help);
 
   const controls = makeSampleControls();
@@ -365,7 +365,7 @@ function bothPanel(message: HTMLElement) {
   body.className = 'constraint-body';
   const help = document.createElement('div');
   help.className = 'constraint-help';
-  help.textContent = 'Apply both constraints at once: avoid the selected features everywhere in the completed tree while also guaranteeing the requested prediction for every full sample consistent with the entered values. The result is the optimal completion satisfying both constraints and the Rashomon bound.';
+  help.textContent = 'Find the best tree that doesn’t use certain features and will always predict a certain class when specific feature values are true.';
   body.appendChild(help);
 
   const grid = makeAvoidSelector();
@@ -467,7 +467,7 @@ function openModal() {
       label.append(document.createTextNode(name), input); limits.append(label);
     }
     const help = document.createElement('div'); help.className = 'constraint-help';
-    help.textContent = 'Optional. Caps apply to the whole completed tree. Existing decisions stay fixed and all unfinished nodes are filled.';
+    help.textContent = 'Optional, cap applies to the whole completed tree.';
     limits.append(help); modal.append(limits);
   }
 
