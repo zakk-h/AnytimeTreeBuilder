@@ -987,6 +987,14 @@ function SidePanel({
       const sorted = [...choices].sort((a, b) => {
         if (a.choice.kind !== 'split' || b.choice.kind !== 'split') return 0;
 
+        // Compare actual cut values: numeric collation of labels treats the
+        // fractional parts as integers (placing 0.4 before 0.32).
+        const aFeature = a.choice.split.feature, bFeature = b.choice.split.feature;
+        const aThreshold = Number(meta.thresholds?.[aFeature] ?? thresholdLabel(aFeature, meta));
+        const bThreshold = Number(meta.thresholds?.[bFeature] ?? thresholdLabel(bFeature, meta));
+        if (Number.isFinite(aThreshold) && Number.isFinite(bThreshold)) {
+          return aThreshold - bThreshold || aFeature - bFeature;
+        }
         return prettyThresholdLabel(a.choice.split.feature, meta, thresholdDecimals).localeCompare(
           prettyThresholdLabel(b.choice.split.feature, meta, thresholdDecimals),
           undefined,
