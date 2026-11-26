@@ -85,7 +85,7 @@ function originalFeatures() {
 
 function predictions() {
   const names = currentPayload()?.meta?.classNames;
-  if (Array.isArray(names)) return [...names.map((_, index) => index), ...(currentPayload()?.meta?.use_deferral ? [-1] : [])];
+  if (currentPayload()?.meta?.task !== 'regression' && Array.isArray(names)) return [...names.map((_, index) => index), ...(currentPayload()?.meta?.use_deferral ? [-1] : [])];
   return Array.from(
     new Set(
       (currentPayload()?.graph?.leaf_nodes ?? [])
@@ -215,8 +215,11 @@ function makeSampleControls() {
   predictionLabel.className = 'constraint-prediction-row';
   const predictionName = document.createElement('span');
   predictionName.textContent = 'Prediction to ensure';
-  const select = document.createElement('select');
+  const regression = currentPayload()?.meta?.task === 'regression';
+  const select = regression ? document.createElement('input') : document.createElement('select');
   select.setAttribute('aria-label', 'Prediction to ensure');
+  if (select instanceof HTMLInputElement) { select.type = 'number'; select.step = 'any'; select.placeholder = 'Prediction value'; }
+  if (!regression) {
   const blank = document.createElement('option');
   blank.value = '';
   blank.textContent = currentPayload()?.meta?.task === 'regression' ? 'Choose prediction' : 'Choose class';
@@ -225,8 +228,9 @@ function makeSampleControls() {
     const option = document.createElement('option');
     option.value = String(prediction);
     const names = currentPayload()?.meta?.classNames;
-    option.textContent = prediction === -1 && currentPayload()?.meta?.task !== 'regression' ? 'Abstain' : Array.isArray(names) ? String(names[prediction]) : `${currentPayload()?.meta?.task === 'regression' ? 'predict' : 'class'} ${prediction}`;
+    option.textContent = prediction === Number(currentPayload()?.meta?.task === 'regression' ? currentPayload()?.meta?.defer_prediction : -1) ? 'Abstain' : Array.isArray(names) ? String(names[prediction]) : `${currentPayload()?.meta?.task === 'regression' ? 'predict' : 'class'} ${prediction}`;
     select.appendChild(option);
+  }
   }
   predictionLabel.append(predictionName, select);
   root.append(grid, predictionLabel);

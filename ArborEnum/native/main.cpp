@@ -97,7 +97,7 @@ static std::string browser_cookie(const httplib::Request& req) {
 }
 
 struct BrowserSession {
-    std::shared_ptr<Session> session;
+    std::shared_ptr<arborenum::service::SessionApi> session;
     std::chrono::steady_clock::time_point last_access;
 };
 
@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
             return key;
         };
 
-        auto get_session = [&](const std::string& key) -> std::shared_ptr<Session> {
+        auto get_session = [&](const std::string& key) -> std::shared_ptr<arborenum::service::SessionApi> {
             if (key.empty()) return {};
             std::lock_guard lock(session_mutex);
             const auto it = sessions.find(key);
@@ -202,7 +202,7 @@ int main(int argc, char** argv) {
         // Reap abandoned sessions outside the global mutex, because destroying
         // Session can join its native worker thread.
         auto reap_idle = [&] {
-            std::vector<std::shared_ptr<Session>> expired;
+            std::vector<std::shared_ptr<arborenum::service::SessionApi>> expired;
             const auto now = std::chrono::steady_clock::now();
             {
                 std::lock_guard lock(session_mutex);
@@ -217,7 +217,7 @@ int main(int argc, char** argv) {
         };
 
         auto stop_all = [&] {
-            std::vector<std::shared_ptr<Session>> existing;
+            std::vector<std::shared_ptr<arborenum::service::SessionApi>> existing;
             {
                 std::lock_guard lock(session_mutex);
                 for (const auto& [key, slot] : sessions) existing.push_back(slot.session);
@@ -272,10 +272,10 @@ int main(int argc, char** argv) {
         post_json("/api/session", [&](const auto& req, auto& res) {
             const auto key = ensure_browser(req, res);
             auto body = json::parse(req.body);
-            auto settings = Settings::parse(body.value("settings", json::object()));
-            auto data = Dataset::parse(body);
-            std::shared_ptr<Session> current;
-            std::shared_ptr<Session> previous;
+            const auto task = body.value("task", std::string("classification"));
+            if (task != "classification" && task != "regression") throw std::invalid_argument("Unknown training task");
+            std::shared_ptr<arborenum::service::SessionApi> current;
+            std::shared_ptr<arborenum::service::SessionApi> previous;
             {
                 std::lock_guard lock(session_mutex);
                 auto it = sessions.find(key);
@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
                     respond(res, {{"error", "Server is at its session limit. Try again after an idle session expires."}}, 503);
                     return;
                 }
-                current = std::make_shared<Session>(std::to_string(next_id++), std::move(data), settings);
+                current = task == "regression" ? arborenum::service::make_regression_session(std::to_string(next_id++), body) : std::make_shared<Session>(std::to_string(next_id++), Dataset::parse(body), Settings::parse(body.value("settings", json::object())));
                 if (it == sessions.end()) {
                     sessions.emplace(key, BrowserSession{current, std::chrono::steady_clock::now()});
                 } else {
@@ -300,7 +300,7 @@ int main(int argc, char** argv) {
             respond(res, current->status(), 202);
         });
 
-        auto checked_session = [&](const httplib::Request& req, httplib::Response& res) -> std::shared_ptr<Session> {
+        auto checked_session = [&](const httplib::Request& req, httplib::Response& res) -> std::shared_ptr<arborenum::service::SessionApi> {
             const auto key = browser_cookie(req);
             if (key.empty()) {
                 respond(res, {{"error", "No browser session cookie; reload the page"}}, 401);
@@ -326,9 +326,9 @@ int main(int argc, char** argv) {
             if (auto current = checked_session(req, res)) {
                 const json body = json::parse(req.body);
                 const auto& value = body.at("budget");
-                if (!value.is_number_integer() || value.get<int64_t>() < 0 || value.get<int64_t>() > INT_MAX)
+                if (!value.is_number() || !std::isfinite(value.get<double>()) || value.get<double>() < 0)
                     throw std::invalid_argument("Budget must be a nonnegative integer within the objective range");
-                current->request_budget(value.get<int>()); respond(res, current->status(), 202);
+                current->request_budget(value.get<double>()); respond(res, current->status(), 202);
             }
         });
         post_json("/api/node", [&](const auto& req, auto& res) {

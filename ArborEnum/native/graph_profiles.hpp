@@ -8,7 +8,7 @@
 #include <compare>
 #include <unordered_map>
 
-namespace arborenum::live {
+namespace ARBORENUM_LIVE_NAMESPACE {
 // Query-local sufficient-statistic tables over borrowed native nodes. These
 // contain no copied trie nodes, split lists, or materialized completed trees.
 class GraphProfiles {
@@ -19,19 +19,21 @@ class GraphProfiles {
     const json& partial_;
     std::function<void()> check_;
     bool statistics_;
-    int max_leaves_ = INT_MAX, max_abstained_ = INT_MAX, target_ = -1;
+    int max_leaves_ = INT_MAX, max_abstained_ = INT_MAX;
+    Prediction target_ = DEFER_PREDICTION;
     double eta_;
-    int root_budget_;
+    Objective root_budget_;
     std::set<int> forbidden_;
     std::map<int, bool> truth_;
     struct State {
-        int objective = 0, leaves = 0, abstained = 0, mistakes = 0;
+        Objective objective = 0; int leaves = 0, abstained = 0; Objective mistakes = 0;
         auto operator<=>(const State&) const = default;
     };
     struct StateHash {
         size_t operator()(const State& s) const {
-            size_t h = size_t(s.objective);
-            for (int v : {s.leaves, s.abstained, s.mistakes}) h = h * 1000003u ^ size_t(v);
+            size_t h = std::hash<Objective>{}(s.objective);
+            for (int v : {s.leaves, s.abstained}) h = h * 1000003u ^ size_t(v);
+            h = h * 1000003u ^ std::hash<Objective>{}(s.mistakes);
             return h;
         }
     };
@@ -62,14 +64,14 @@ class GraphProfiles {
     // allocation and a generic spill map keep unusual and abstaining states
     // exact without allocating an unbounded dense tensor.
     template<class Value> class Accumulator {
-        int base_;
+        Objective base_;
         size_t width_;
         std::vector<Value> dense_;
-        std::vector<int> mistakes_;
+        std::vector<Objective> mistakes_;
         std::unordered_map<State, Value, StateHash> spilled_;
     public:
-        Accumulator(int base, size_t width, size_t height, bool enabled) : base_(base), width_(width) {
-            if (enabled && height && width <= 262144 && height <= 262144 / width) {
+        Accumulator(Objective base, size_t width, size_t height, bool enabled) : base_(base), width_(width) {
+            if (!regression_objective && enabled && height && width <= 262144 && height <= 262144 / width) {
                 dense_.resize(width * height); mistakes_.assign(dense_.size(), -1);
             }
         }
@@ -92,7 +94,8 @@ class GraphProfiles {
             return out;
         }
     };
-    std::map<Key, int> minima_, budgets_, leaf_limits_;
+    std::map<Key, Objective> minima_, budgets_;
+    std::map<Key, int> leaf_limits_;
     bool ordinary_only_ = true;
     std::vector<Key> bound_order_;
     uint32_t work_ticks_ = 0;
@@ -120,18 +123,18 @@ class GraphProfiles {
         if (fixed && fixed->at("kind") == "choice") fixed = nullptr;
         return {node, fixed, sample};
     }
-    bool allowed(const State& s, int budget) const {
+    bool allowed(const State& s, Objective budget) const {
         return s.objective <= budget && s.leaves <= max_leaves_ && s.abstained <= max_abstained_;
     }
-    std::optional<State> sum(const State& a, const State& b, int budget) const {
-        if (int64_t(a.objective) + b.objective > budget || int64_t(a.leaves) + b.leaves > max_leaves_ || int64_t(a.abstained) + b.abstained > max_abstained_) return {};
+    std::optional<State> sum(const State& a, const State& b, Objective budget) const {
+        if (SumObjective(a.objective) + b.objective > budget || int64_t(a.leaves) + b.leaves > max_leaves_ || int64_t(a.abstained) + b.abstained > max_abstained_) return {};
         return State{a.objective + b.objective, a.leaves + b.leaves, a.abstained + b.abstained, a.mistakes + b.mistakes};
     }
     template<class LeafFn, class SplitFn> void alternatives(const Key& k, LeafFn leaf_fn, SplitFn split_fn) const {
         check_();
         const std::string kind = k.fixed ? k.fixed->at("kind").get<std::string>() : "choice";
         if (kind != "split") for (const auto& leaf : k.node->leaves) {
-            if (kind == "leaf" && leaf.prediction != k.fixed->at("prediction").get<int>()) continue;
+            if (kind == "leaf" && leaf.prediction != native_prediction(k.fixed->at("prediction").get<Prediction>())) continue;
             if (k.sample && leaf.prediction != target_) continue;
             if (leaf.loss <= k.node->budget) leaf_fn(leaf);
         }
@@ -151,16 +154,16 @@ class GraphProfiles {
     // reached from the root. Cached native nodes may have much larger budgets
     // than any completion of this partial tree can use. For shared DAG children
     // take the maximum allowance over ALL parents, in topological order.
-    int minimum(const Key& k) {
+    Objective minimum(const Key& k) {
         if (auto found = minima_.find(k); found != minima_.end()) return found->second;
-        int best = INT_MAX, leaves = 0;
+        Objective best = std::numeric_limits<Objective>::max(); int leaves = 0;
         alternatives(k, [&](const LeafNode& leaf) {
             best = std::min(best, leaf.loss); leaves = std::max(leaves, 1);
-            if (leaf.prediction == -1) ordinary_only_ = false;
+            if (leaf.prediction == DEFER_PREDICTION) ordinary_only_ = false;
         },
             [&](const SplitNode&, const Key& left, const Key& right) {
-                const int lo = minimum(left), ro = minimum(right);
-                if (int64_t(lo) + ro <= k.node->budget) {
+                const Objective lo = minimum(left), ro = minimum(right);
+                if (SumObjective(lo) + ro <= k.node->budget) {
                     best = std::min(best, lo + ro);
                     leaves = std::max(leaves, int(std::min(int64_t(INT_MAX), int64_t(leaf_limits_.at(left)) + leaf_limits_.at(right))));
                 }
@@ -175,24 +178,24 @@ class GraphProfiles {
         for (auto it = bound_order_.rbegin(); it != bound_order_.rend(); ++it) {
             const auto& k = *it;
             auto found = budgets_.find(k); if (found == budgets_.end()) continue;
-            const int allowance = found->second;
+            const Objective allowance = found->second;
             alternatives(k, [](const LeafNode&) {}, [&](const SplitNode&, const Key& left, const Key& right) {
-                const int lo = minima_.at(left), ro = minima_.at(right);
-                if (int64_t(lo) + ro > allowance) return;
-                const auto offer = [&](const Key& child, int cap) {
+                const Objective lo = minima_.at(left), ro = minima_.at(right);
+                if (SumObjective(lo) + ro > allowance) return;
+                const auto offer = [&](const Key& child, Objective cap) {
                     cap = std::min(cap, child.node->budget);
                     auto [where, added] = budgets_.emplace(child, cap);
                     if (!added) where->second = std::max(where->second, cap);
                 };
-                offer(left, allowance - ro); offer(right, allowance - lo);
+                offer(left, objective_remainder(allowance, ro)); offer(right, objective_remainder(allowance, lo));
             });
         }
     }
     template<class Value> Accumulator<Value> accumulator(const Key& k, bool enabled) const {
-        const int base = minima_.at(k), budget = budgets_.at(k);
+        const Objective base = minima_.at(k), budget = budgets_.at(k);
         const size_t width = size_t(std::min(max_leaves_, leaf_limits_.at(k))) + 1;
-        const size_t height = base <= budget ? size_t(budget - base) + 1 : 0;
-        return Accumulator<Value>(base, width, height, enabled && ordinary_only_ && !k.node->splits.empty());
+        const size_t height = !regression_objective && base <= budget ? size_t(budget - base) + 1 : 0;
+        return Accumulator<Value>(base, width, height, enabled && !regression_objective && ordinary_only_ && !k.node->splits.empty());
     }
     const std::vector<size_t>& label_histogram(const Packed& mask) const {
         if (auto found = label_histograms_.find(mask.w); found != label_histograms_.end()) return found->second;
@@ -200,9 +203,17 @@ class GraphProfiles {
         rows(mask, [&](size_t i) { ++counts.at(data_->y.at(i)); });
         return label_histograms_.emplace(mask.w, std::move(counts)).first->second;
     }
+    Objective squared_error(const Packed& mask, Prediction prediction) const {
+        long double loss = 0;
+        rows(mask, [&](size_t row) { const long double delta = static_cast<long double>(data_->y.at(row)) - prediction; loss += delta * delta; });
+        return static_cast<Objective>(loss);
+    }
     State leaf_state(const LeafNode& leaf, const Packed& mask) const {
-        State s{leaf.loss, 1, leaf.prediction == -1 ? int(mask.count()) : 0, 0};
-        if (statistics_ && leaf.prediction != -1) s.mistakes = int(mask.count() - label_histogram(mask).at(leaf.prediction));
+        State s{leaf.loss, 1, leaf.prediction == DEFER_PREDICTION ? int(mask.count()) : 0, 0};
+        if (statistics_ && leaf.prediction != DEFER_PREDICTION) {
+            if constexpr (regression_objective) s.mistakes = squared_error(mask, leaf.prediction);
+            else s.mistakes = int(mask.count() - label_histogram(mask).at(leaf.prediction));
+        }
         return s;
     }
     const Table& inside(const Key& k, const Packed& mask) {
@@ -211,7 +222,7 @@ class GraphProfiles {
         masks_.emplace(k, mask);
         const auto allowance = budgets_.find(k);
         if (allowance == budgets_.end()) return inside_.emplace(k, Table{}).first->second;
-        const int budget = allowance->second;
+        const Objective budget = allowance->second;
         auto accumulated = accumulator<Cell>(k, statistics_);
         alternatives(k, [&](const LeafNode& leaf) {
             const auto state = leaf_state(leaf, mask);
@@ -220,14 +231,14 @@ class GraphProfiles {
                 if (!statistics_ && !cell.plan) cell.plan = std::make_shared<Plan>(Plan{&leaf, nullptr, {}, {}});
             }
         }, [&](const SplitNode& split, const Key& left, const Key& right) {
-            if (int64_t(minima_.at(left)) + minima_.at(right) > budget) return;
+            if (SumObjective(minima_.at(left)) + minima_.at(right) > budget) return;
             auto masks = child_masks_(mask, split.feature);
             const auto& ls = inside(left, masks.first); const auto& rs = inside(right, masks.second);
             for (const auto& [a, ac] : ls) for (const auto& [b, bc] : rs) {
                 check_work();
                 // Tables are ordered by objective; every later right state
                 // also exceeds the allowance once this pair does.
-                if (int64_t(a.objective) + b.objective > budget) break;
+                if (SumObjective(a.objective) + b.objective > budget) break;
                 if (auto state = sum(a, b, budget)) {
                     auto& cell = accumulated[*state]; if (statistics_) cell.count += ac.count * bc.count;
                     if (!statistics_ && !cell.plan) cell.plan = std::make_shared<Plan>(Plan{nullptr, &split, ac.plan, bc.plan});
@@ -250,7 +261,7 @@ class GraphProfiles {
     json emit(const std::shared_ptr<const Plan>& plan, int& uid, const json* fixed) const {
         check_();
         const int current = fixed ? fixed->at("uid").get<int>() : uid++;
-        if (plan->leaf) return {{"uid", current}, {"kind", "leaf"}, {"prediction", plan->leaf->prediction}};
+        if (plan->leaf) return {{"uid", current}, {"kind", "leaf"}, {"prediction", wire_prediction(plan->leaf->prediction)}};
         const bool fixed_split = fixed && fixed->at("kind") == "split";
         auto left = emit(plan->left, uid, fixed_split ? &fixed->at("left") : nullptr);
         auto right = emit(plan->right, uid, fixed_split ? &fixed->at("right") : nullptr);
@@ -297,15 +308,16 @@ class GraphProfiles {
             const auto state = leaf_state(leaf, native_mask);
             if (!inside_.at(k).contains(state)) return;
             const auto donor_n = donor.count(), recipient_n = recipient.count();
-            const long double changed = leaf.prediction == -1
-                ? static_cast<long double>(eta_) * recipient_n * donor_n
-                : static_cast<long double>(recipient_n - label_histogram(recipient).at(leaf.prediction)) * donor_n;
-            const long double baseline = leaf.prediction == -1 ? static_cast<long double>(eta_) * state.abstained : state.mistakes;
+            long double changed;
+            if (leaf.prediction == DEFER_PREDICTION) changed = static_cast<long double>(eta_) * recipient_n * donor_n;
+            else if constexpr (regression_objective) changed = static_cast<long double>(squared_error(recipient, leaf.prediction)) * donor_n;
+            else changed = static_cast<long double>(recipient_n - label_histogram(recipient).at(leaf.prediction)) * donor_n;
+            const long double baseline = leaf.prediction == DEFER_PREDICTION ? static_cast<long double>(eta_) * state.abstained : state.mistakes;
             const long double delta = changed / data_->y.size() - baseline;
             extend(state, {delta, delta});
         }, [&](const SplitNode& split, const Key& left, const Key& right) {
-            const int budget = budgets_.at(k);
-            if (int64_t(minima_.at(left)) + minima_.at(right) > budget) return;
+            const Objective budget = budgets_.at(k);
+            if (SumObjective(minima_.at(left)) + minima_.at(right) > budget) return;
             Packed lr = recipient, rr = recipient, ld = donor, rd = donor;
             if (originals.at(split.feature) == feature) {
                 auto parts = child_masks_(donor, split.feature); ld = std::move(parts.first); rd = std::move(parts.second);
@@ -316,7 +328,7 @@ class GraphProfiles {
             const auto& rs = importance(right, rr, rd, feature, originals, memo);
             for (const auto& [a, av] : ls) for (const auto& [b, bv] : rs) {
                 check_work();
-                if (int64_t(a.objective) + b.objective > budget) break;
+                if (SumObjective(a.objective) + b.objective > budget) break;
                 // Each child range corresponds to an inside state for this
                 // same split. Every budget-feasible sum is already represented
                 // at the parent; no per-pair membership lookup is necessary.
@@ -335,14 +347,14 @@ class GraphProfiles {
     }
 public:
     GraphProfiles(ArborEnum& model, const json& meta, const Dataset* data, const json& tree,
-                  const json& options, bool statistics, std::function<void()> check, int root_budget = INT_MAX,
+                  const json& options, bool statistics, std::function<void()> check, Objective root_budget = std::numeric_limits<Objective>::max(),
                   std::function<void(int, size_t, size_t, const std::string&)> progress = {})
         : GraphProfiles(model.result.get(), model.live_root_mask(), [&model](const Packed& mask, int feature) { return model.live_child_masks(mask, feature); },
                         meta, data, tree, options, statistics, std::move(check), root_budget, std::move(progress)) {}
     GraphProfiles(TreeTrieNode* root, Packed root_mask,
                   std::function<std::pair<Packed, Packed>(const Packed&, int)> child_masks,
                   const json& meta, const Dataset* data, const json& tree, const json& options,
-                  bool statistics, std::function<void()> check, int root_budget = INT_MAX,
+                  bool statistics, std::function<void()> check, Objective root_budget = std::numeric_limits<Objective>::max(),
                   std::function<void(int, size_t, size_t, const std::string&)> progress = {})
         : root_mask_(std::move(root_mask)), child_masks_(std::move(child_masks)), meta_(meta), data_(data), partial_(tree), check_(std::move(check)), statistics_(statistics),
           eta_(meta.value("eta_defer", 0.0)), root_budget_(root_budget), root_{root, nullptr, false} {
@@ -355,7 +367,7 @@ public:
             if (feature < 0 || consumed != f.size() || std::to_string(feature) != f) throw std::invalid_argument("Invalid featureTruth key");
             truth_.emplace(feature, value.get<bool>());
         }
-        if (options.value("mode", "") == "sample") target_ = options.at("targetPrediction").get<int>();
+        if (options.value("mode", "") == "sample") target_ = native_prediction(options.at("targetPrediction").get<Prediction>());
         root_ = key(root, &tree, options.value("mode", "") == "sample");
         if (progress_) progress_(0, 0, 0, "");
         bound_from_root();
@@ -381,21 +393,26 @@ public:
         const auto prediction_started = std::chrono::steady_clock::now();
         const auto& root_table = inside_.at(root_);
         ExactCount total, undefined_accuracy;
-        std::map<int, ExactCount> leaves, abstentions, objectives;
+        std::map<int, ExactCount> leaves, abstentions;
+        std::map<Objective, ExactCount> objectives;
         double min_accuracy = 1, max_accuracy = 0;
+        double min_mse = std::numeric_limits<double>::infinity(), max_mse = 0;
         for (const auto& [s, c] : root_table) {
             check_(); total += c.count; leaves[s.leaves] += c.count; abstentions[s.abstained] += c.count; objectives[s.objective] += c.count;
             const auto predicted = data_->y.size() - s.abstained;
             if (!predicted) undefined_accuracy += c.count;
+            else if constexpr (regression_objective) { const double mse = double(s.mistakes) / predicted; min_mse = std::min(min_mse, mse); max_mse = std::max(max_mse, mse); }
             else { const double accuracy = 1.0 - double(s.mistakes) / predicted; min_accuracy = std::min(min_accuracy, accuracy); max_accuracy = std::max(max_accuracy, accuracy); }
         }
-        const auto histogram = [&](const std::map<int, ExactCount>& values) {
+        const auto histogram = [&](const auto& values) {
             json out = json::array();
             for (const auto& [value, count] : values) out.push_back({{"value", value}, {"count", count.str()}, {"probability", count.fraction(total)}});
             return out;
         };
         // Outside messages count compatible sibling/ancestor completions. All
         // rows' class marginals are accumulated together on the leaf masks.
+        json disagreement = json::array();
+        if constexpr (!regression_objective) {
         using Weights = std::unordered_map<State, ExactCount, StateHash>;
         std::map<Key, Weights> outside;
         for (const auto& [s, c] : root_table) outside[root_][s] = ExactCount(1);
@@ -408,26 +425,26 @@ public:
             alternatives(k, [&](const LeafNode& leaf) {
                 const auto state = leaf_state(leaf, masks_.at(k));
                 if (auto w = weights.find(state); w != weights.end()) rows(masks_.at(k), [&](size_t i) {
-                    predictions.at(i).at(leaf.prediction == -1 ? classes : size_t(leaf.prediction)) += w->second;
+                    predictions.at(i).at(leaf.prediction == DEFER_PREDICTION ? classes : size_t(leaf.prediction)) += w->second;
                 });
             }, [&](const SplitNode& split, const Key& left, const Key& right) {
-                const int budget = budgets_.at(k);
-                if (int64_t(minima_.at(left)) + minima_.at(right) > budget) return;
+                const Objective budget = budgets_.at(k);
+                if (SumObjective(minima_.at(left)) + minima_.at(right) > budget) return;
                 auto& left_weights = outside[left]; auto& right_weights = outside[right];
                 for (const auto& [a, ac] : inside_.at(left)) for (const auto& [b, bc] : inside_.at(right)) {
                     check_work();
-                    if (int64_t(a.objective) + b.objective > budget) break;
+                    if (SumObjective(a.objective) + b.objective > budget) break;
                     if (auto state = sum(a, b, budget)) if (auto w = weights.find(*state); w != weights.end()) {
                         left_weights[a] += w->second * bc.count; right_weights[b] += w->second * ac.count;
                     }
                 }
             });
         }
-        json disagreement = json::array();
         for (size_t i = 0; i < predictions.size(); ++i) {
             check_(); json counts = json::array(), probabilities = json::array(); double modal_probability = 0;
             for (const auto& count : predictions[i]) { const double p = count.fraction(total); counts.push_back(count.str()); probabilities.push_back(p); modal_probability = std::max(modal_probability, p); }
             disagreement.push_back({{"row", i + 1}, {"counts", counts}, {"probabilities", probabilities}, {"disagreement", std::clamp(1 - modal_probability, 0., 1.)}});
+        }
         }
         const double prediction_seconds = seconds_since(prediction_started);
         const auto importance_started = std::chrono::steady_clock::now();
@@ -451,7 +468,7 @@ public:
             std::map<EvalKey, Ranges> memo;
             const auto& ranges = importance(root_, full, full, int(f), originals, memo);
             long double low = std::numeric_limits<long double>::infinity(), high = -low;
-            json by_objective = json::array(); std::map<int, Range> grouped;
+            json by_objective = json::array(); std::map<Objective, Range> grouped;
             for (const auto& [s, range] : ranges) if (root_table.contains(s)) {
                 low = std::min(low, range.low); high = std::max(high, range.high);
                 auto [g, added] = grouped.emplace(s.objective, range);
@@ -463,7 +480,7 @@ public:
         }
         auto abstention_distribution = histogram(abstentions);
         for (auto& bin : abstention_distribution) bin["proportion_abstained"] = double(bin.at("value").get<int>()) / data_->y.size();
-        return {{"class_count", data_->classes.size()}, {"abstention_enabled", meta_.value("use_deferral", !ordinary_only_)},
+        return {{"task", regression_objective ? "regression" : "classification"}, {"mse", regression_objective && std::isfinite(min_mse) ? json{{"min", min_mse}, {"max", max_mse}} : json(nullptr)}, {"class_count", data_->classes.size()}, {"abstention_enabled", meta_.value("use_deferral", !ordinary_only_)},
             {"disagreement_metric", "variation_ratio"}, {"tree_count", total.str()}, {"sample_count", data_->y.size()}, {"exact", true}, {"permutation", "expectation_over_all_permutations"},
             {"leaf_distribution", histogram(leaves)}, {"abstention_distribution", abstention_distribution}, {"objective_distribution", histogram(objectives)},
             {"accuracy", {{"min", min_accuracy <= max_accuracy ? json(min_accuracy) : json(nullptr)}, {"max", min_accuracy <= max_accuracy ? json(max_accuracy) : json(nullptr)}, {"undefined_count", undefined_accuracy.str()}}},

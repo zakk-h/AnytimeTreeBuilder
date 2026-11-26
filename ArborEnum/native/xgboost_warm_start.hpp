@@ -4,7 +4,7 @@
 #include <functional>
 #include <limits>
 
-namespace arborenum::live {
+namespace ARBORENUM_LIVE_NAMESPACE {
 struct WarmStart {
     struct Threshold { int feature; double value; };
     std::vector<Threshold> thresholds;
@@ -19,7 +19,7 @@ inline void xgb_check(int code) {
 // subprocess, model file, or graph export is involved.
 inline WarmStart train_warm_start(const Dataset& data, const Settings& settings, const std::function<void()>& check) {
     WarmStart result;
-    if (std::set<int>(data.y.begin(), data.y.end()).size() < 2) return result;
+    if (std::set<Prediction>(data.y.begin(), data.y.end()).size() < 2) return result;
     const size_t n = data.X.size(), p = data.names.size();
     std::vector<std::vector<double>> values(p);
     bool has_continuous = false;
@@ -57,8 +57,8 @@ inline WarmStart train_warm_start(const Dataset& data, const Settings& settings,
     param("booster", "gbtree"); param("tree_method", "hist"); param("device", "cpu");
     param("nthread", "1"); param("seed", "0"); param("verbosity", "0");
     param("max_depth", std::to_string(settings.xgb_depth));
-    param("objective", data.classes.size() == 2 ? "binary:logistic" : "multi:softprob");
-    if (data.classes.size() > 2) param("num_class", std::to_string(data.classes.size()));
+    param("objective", regression_objective ? "reg:squarederror" : data.classes.size() == 2 ? "binary:logistic" : "multi:softprob");
+    if (!regression_objective && data.classes.size() > 2) param("num_class", std::to_string(data.classes.size()));
     for (int round = 0; round < settings.xgb_estimators; ++round) {
         check(); xgb_check(XGBoosterUpdateOneIter(booster.value, round, dtrain.value)); ++result.rounds;
     }

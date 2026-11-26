@@ -177,10 +177,14 @@ function makeDefaultUi(): BuilderUi {
   };
 }
 
+function isAbstention(prediction: unknown, meta: Record<string, unknown>) {
+  return meta.task === 'regression' ? meta.use_deferral === true && Number(prediction) === Number(meta.defer_prediction) : Number(prediction) === -1;
+}
+
 function predictionLabel(prediction: number | undefined, ui: BuilderUi, meta: FeatureMeta & Record<string, unknown>): string {
   if (prediction === undefined || prediction === null) return 'predict —';
 
-  if ((Number(prediction) === -1 && meta.task !== 'regression')) return 'Abstain';
+  if (isAbstention(prediction, meta)) return 'Abstain';
 
   const custom = ui.labelNames[String(prediction)]?.trim();
   return custom || `predict ${prediction}`;
@@ -569,9 +573,9 @@ function leafMistakesRaw(
     return undefined;
   }
 
-  if ((Number(leaf.prediction) === -1 && meta.task !== 'regression')) {
+  if (isAbstention(leaf.prediction, meta)) {
     const eta = etaDeferRaw(meta);
-    return Math.max(0, loss - gamma - llroundNonnegative(eta * n));
+    return Math.max(0, loss - gamma - (meta.task === 'regression' ? eta * n : llroundNonnegative(eta * n)));
   }
 
   return Math.max(0, loss - gamma);
@@ -610,14 +614,14 @@ function completedTreeStats(
       if (n !== undefined) {
         leafN += n;
 
-        if ((Number(leaf?.prediction) === -1 && meta.task !== 'regression')) {
+        if (isAbstention(leaf?.prediction, meta)) {
           deferredN += n;
         }
       }
 
       const leafMistakes = leafMistakesRaw(graph, meta, node.leafId);
 
-      if ((Number(leaf?.prediction) !== -1 || meta.task === 'regression') && leafMistakes !== undefined) {
+      if (!isAbstention(leaf?.prediction, meta) && leafMistakes !== undefined) {
         mistakes += leafMistakes;
       }
 
@@ -685,7 +689,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
     b.kind === 'split'
       ? ''
       : b.kind === 'leaf'
-        ? `${leafSampleSizeLabel(graph, b.leafId)} · ${(Number(b.prediction) === -1 && meta.task !== 'regression') ? 'no prediction' : leafMisclassificationRate(
+        ? `${leafSampleSizeLabel(graph, b.leafId)} · ${isAbstention(b.prediction, meta) ? 'no prediction' : leafMisclassificationRate(
             graph,
             meta,
             b.leafId,
@@ -701,7 +705,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
   const nodeStyle = {
     width: label.width,
     ...(b.kind === 'leaf' ? {
-      '--leaf-node-bg': ui.colors.leafNodesByClass[String(b.prediction)] || ((Number(b.prediction) === -1 && meta.task !== 'regression') ? '#fff8eb' : ui.colors.leafNode),
+      '--leaf-node-bg': ui.colors.leafNodesByClass[String(b.prediction)] || (isAbstention(b.prediction, meta) ? '#fff8eb' : ui.colors.leafNode),
     } : {}),
   } as CSSProperties;
 
@@ -713,7 +717,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
       <Handle type="target" position={Position.Top} className="handle" />
 
       <div className="node-copy">
-        <div className="node-eyebrow">{b.kind === 'split' ? 'Split rule' : b.kind === 'leaf' ? (Number(b.prediction) === -1 && meta.task !== 'regression') ? 'Abstention' : 'Prediction' : 'Decision point'}<span>#{b.uid}</span></div>
+        <div className="node-eyebrow">{b.kind === 'split' ? 'Split rule' : b.kind === 'leaf' ? isAbstention(b.prediction, meta) ? 'Abstention' : 'Prediction' : 'Decision point'}<span>#{b.uid}</span></div>
         <div
           className="node-title"
           ref={label.ref}
@@ -825,7 +829,7 @@ function SplitButton({
 
         <div className="choice-card-sub">
           {leafSampleSizeLabel(graph, choice.leaf.id)} ·{' '}
-          {(choice.leaf.prediction === -1 && meta.task !== 'regression') ? 'no prediction' : leafMisclassificationRate(graph, meta, choice.leaf.id)} · obj{' '}
+          {isAbstention(choice.leaf.prediction, meta) ? 'no prediction' : leafMisclassificationRate(graph, meta, choice.leaf.id)} · obj{' '}
           {formatObjective(graph, objective)}
           {!feasible ? ` · over by ${formatObjective(graph, excessValue)}` : ''}
         </div>
@@ -1170,7 +1174,7 @@ function SidePanel({
           <div className="budget-box">
             <div>
               <span>{meta.task === 'regression' ? 'mean squared error' : meta.use_deferral || meta.abstain_uses_labels || completeStats.hasDeferral ? 'accuracy (predicted samples)' : 'accuracy'}</span>
-              <b title={completeStats.accuracy === undefined ? 'No samples were predicted' : undefined}>{meta.task === 'regression' ? stripZeros((completeStats.mistakes / completeStats.totalN).toFixed(6)) : completeStats.accuracy === undefined ? '—' : `${stripZeros((100 * completeStats.accuracy).toFixed(2))}%`}</b>
+              <b title={completeStats.accuracy === undefined ? 'No samples were predicted' : undefined}>{meta.task === 'regression' ? completeStats.totalN > completeStats.deferredN ? stripZeros((completeStats.mistakes / (completeStats.totalN - completeStats.deferredN)).toFixed(6)) : '—' : completeStats.accuracy === undefined ? '—' : `${stripZeros((100 * completeStats.accuracy).toFixed(2))}%`}</b>
             </div>
 
             <div>

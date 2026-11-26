@@ -172,3 +172,23 @@ test('sample disagreement summaries use strict exact thresholds, including very 
   ]), { any: 4 / 5, above10: 2 / 5, above25: 1 / 5 });
   assert.deepEqual(summarizeDisagreement([]), { any: 0, above10: 0, above25: 0 });
 });
+
+test('regression targets retain fractional and negative values', () => {
+  const data = toDataset(parseCsv('x,y\n0,-1\n1,.125\n2,2.75'), 'y', 'regression');
+  assert.deepEqual(data.y, [-1, .125, 2.75]);
+  assert.deepEqual(data.class_names, []);
+  assert.throws(() => toDataset(parseCsv('x,y\n0,text'), 'y', 'regression'));
+});
+
+test('training settings preserve disabled sparsification and validate depth probabilities', async () => {
+  const { DEFAULT_TRAINING_SETTINGS, nativeTrainingSettings, trainingSettingsError } = await import('../src/trainingSettings');
+  const defaults = nativeTrainingSettings(DEFAULT_TRAINING_SETTINGS);
+  assert.deepEqual(defaults.sparsification_probability, []);
+  assert.equal(defaults.proxy_delta, 0);
+  assert.equal('task' in defaults, false);
+  const sparse = { ...DEFAULT_TRAINING_SETTINGS, depth_budget: 2, task: 'regression', proxy_delta: 2, sparsification_probability: '.5,1', sparsification_seed: 7 };
+  assert.equal(trainingSettingsError(sparse), undefined);
+  assert.deepEqual(nativeTrainingSettings(sparse).sparsification_probability, [.5, 1]);
+  for (const probabilities of ['.5', '.5,1,0', '.5,', 'NaN,0', '-.1,0', '0,1.1']) assert.ok(trainingSettingsError({ ...sparse, sparsification_probability: probabilities }));
+  assert.ok(trainingSettingsError({ ...sparse, depth_budget: 127 }));
+});

@@ -1,5 +1,8 @@
 // this file is the implementation of our continuous rashomon set methods.
 #include <vector>
+#include <bit>
+#include <iterator>
+#include <type_traits>
 #include <unordered_map>
 #include <algorithm>
 #include <cmath>
@@ -37,6 +40,11 @@
 #endif
 
 using namespace std;
+
+#include "objective.hpp"
+#include "regression_objective.hpp"
+#include "regression_threshold.hpp"
+
 
 // fast bitvector computations used throughout. the names are reasonably self-explanatory. popcount of a bitvector, doing bitwise and with a popcount, etc.
 #if defined(_MSC_VER)
@@ -318,7 +326,7 @@ static inline bool any_words(const uint64_t* a, int n_words) {
 
 using Lit = uint32_t; // 32-bit literal = 2*feat + sign
 using PathKey = std::vector<Lit>;
-static constexpr int DEFER_PREDICTION = -1;
+static constexpr Prediction DEFER_PREDICTION = regression_objective ? -std::numeric_limits<double>::infinity() : -1;
 
 // struct ContinuousPathEntry {
 //     int threshold_index = -1; // actual binarized threshold-column index
@@ -493,14 +501,14 @@ struct PackedPredMulti {
 
 // bucket by objective
 struct ObjBucketMulti {
-    int obj;
+    Objective obj;
     std::vector<PackedPredMulti> preds; // one entry per tree at this objective
 };
 
 // predictions attached to objective. these methods are useful in extraction or for variable importance.
 // not part of our continuous-feature contribution
 struct PredPackWithObj {
-    int obj;
+    Objective obj;
     PackedPredMulti pred;
 };
 
@@ -580,7 +588,7 @@ struct K2 {
 struct K3 {
     uint64_t k; // hash or interned-id
     int depth;
-    int budget;
+    Objective budget;
     bool operator==(const K3& o) const { return k == o.k && depth == o.depth && budget == o.budget; }
     struct Hash {
         size_t operator()(const K3& x) const noexcept {
@@ -614,7 +622,7 @@ struct KLA {
 // this can be used in continuous features if greedy is ever allowed to use more features than licketysplit. then, it is the analog to how we add a licketysplit feature to the enumeration loop in the anytime algorithm.
 // we do not perform experiments with this, so it is not part of our contribution.
 struct GreedyObjFirstSplit {
-    int obj = std::numeric_limits<int>::max();
+    Objective obj = std::numeric_limits<Objective>::max();
     int first_feat = -1;
 };
 
@@ -638,13 +646,13 @@ struct KContProxy {
     };
 };
 
-using ProxyCompletionTree = std::map<int, std::pair<int,int>>;
+using ProxyCompletionTree = std::map<int, std::pair<Objective,Objective>>;
 
 
 
 // existing data structures for storing the Rashomon set - not part of our contribution.
 struct HistEntry {
-    int obj;
+    Objective obj;
     uint64_t cnt;
 };
 static inline bool hist_less(const HistEntry& a, const HistEntry& b){ return a.obj < b.obj; } // helper for sorting
@@ -655,8 +663,8 @@ struct TreeTrieNode; // fwd
 struct LeafNode {
     // 0..C-1 means predict that class.
     // DEFER_PREDICTION means defer to the black-box model.
-    int prediction;
-    int loss;       // gamma + miscls + blackboxpenalty
+    Prediction prediction;
+    Objective loss;       // gamma + miscls + blackboxpenalty
 };
 
 // these correspond to AND nodes in our paper.
@@ -670,8 +678,8 @@ struct SplitNode {
 struct ExportLeafNode {
     int id = -1;
     int parent_trie_id = -1;
-    int prediction = -1;
-    int loss = 0;
+    Prediction prediction = -1;
+    Objective loss = 0;
     int subproblem_size = 0;
 };
 
@@ -686,14 +694,14 @@ struct ExportSplitNode {
     int right_trie_id = -1;
 
     // best completion objective if this split is chosen.
-    int min_objective = std::numeric_limits<int>::max();
+    Objective min_objective = std::numeric_limits<Objective>::max();
 };
 
 struct ExportTreeTrieNode {
     int id = -1;
 
-    int budget = 0;
-    int min_objective = std::numeric_limits<int>::max();
+    Objective budget = 0;
+    Objective min_objective = std::numeric_limits<Objective>::max();
     int subproblem_size = 0;
 
     std::vector<int> leaf_ids;
@@ -712,11 +720,12 @@ struct ExportANDORGraph {
 // by budget independent, they still will store a budget, but there will not exist multiple different nodes for the same subproblem and remaining depth, but with different budgets.
 // the largest budget which we solve it with is useful metadata, as illustrated in the paper.
 struct TreeTrieNode {
-    int budget = 0;
-    int min_objective = numeric_limits<int>::max();
+    Objective budget = 0;
+    Objective min_objective = numeric_limits<Objective>::max();
     vector<LeafNode> leaves; // (prediction,loss) for as many [<=2 in binary classification] if within budget
     vector<SplitNode> splits; // stores splitnodes which have the feature they split on and left and right trienodes
     vector<HistEntry> hist; // sorted ascending by obj; counts aggregated (obj, count) are elements
+    bool proxy_pending = false;
     bool hist_built = false; // wait until the end to build the histograms because we don't know if they'll be used in the final trie because of multipass
 
     uint64_t count_trees() const {
@@ -726,7 +735,7 @@ struct TreeTrieNode {
         return s;
     }
 
-    uint64_t count_leq(int objective) const {
+    uint64_t count_leq(Objective objective) const {
         ensure_hist_built();
         if (hist.empty()) return 0ULL;
         uint64_t total = 0ULL;
@@ -737,19 +746,19 @@ struct TreeTrieNode {
         return total;
     }
 
-    void add_hist(int obj, uint64_t add_cnt = 1) {
+    void add_hist(Objective obj, uint64_t add_cnt = 1) {
         auto it = lower_bound(hist.begin(), hist.end(), HistEntry{obj,0}, hist_less); // find the first poisition in hist where obj could be inserted without breaking sort order
         if (it != hist.end() && it->obj == obj) it->cnt += add_cnt; // if it already exists, just increment
         else hist.insert(it, HistEntry{obj, add_cnt}); // otherwise, add
         if (obj < min_objective) min_objective = obj; // keep min_objective fresh
     }
     
-    void add_leaf(int prediction, int loss) {
+    void add_leaf(Prediction prediction, Objective loss) {
         leaves.push_back(LeafNode{prediction, loss});
         if (loss < min_objective) min_objective = loss;
     }
     
-    void add_leaf_and_build(int prediction, int loss) { // assumes you call within budget
+    void add_leaf_and_build(Prediction prediction, Objective loss) { // assumes you call within budget
         leaves.push_back(LeafNode{prediction, loss});
         add_hist(loss, 1);
     }
@@ -757,11 +766,11 @@ struct TreeTrieNode {
     // A live split may be attached before its children have any solutions.
     // Only finite, budget-feasible pairs are usable by readers or contribute
     // to their parent's objective. Empty placeholders are never solutions.
-    static bool split_has_solution(const SplitNode& s, int parent_budget) {
-        const int inf = numeric_limits<int>::max();
+    static bool split_has_solution(const SplitNode& s, Objective parent_budget) {
+        const Objective inf = numeric_limits<Objective>::max();
         return s.left && s.right &&
             s.left->min_objective != inf && s.right->min_objective != inf &&
-            static_cast<int64_t>(s.left->min_objective) + s.right->min_objective <= parent_budget;
+            static_cast<std::conditional_t<regression_objective, double, int64_t>>(s.left->min_objective) + s.right->min_objective <= parent_budget;
     }
 
     void refresh_live_minimum() {
@@ -790,9 +799,9 @@ struct TreeTrieNode {
         s.num_valid_trees = 0; // will be filled in post-processing
 
         if (L && R) {
-            int min_sum = (L->min_objective == numeric_limits<int>::max() ||
-                        R->min_objective == numeric_limits<int>::max())
-                        ? numeric_limits<int>::max()
+            Objective min_sum = (L->min_objective == numeric_limits<Objective>::max() ||
+                        R->min_objective == numeric_limits<Objective>::max())
+                        ? numeric_limits<Objective>::max()
                         : (L->min_objective + R->min_objective);
             if (min_sum < min_objective) min_objective = min_sum;
         }
@@ -814,26 +823,31 @@ struct TreeTrieNode {
         s.left  = L;
         s.right = R;
 
-        int min_sum = L->min_objective + R->min_objective;
+        Objective min_sum = L->min_objective + R->min_objective;
         if (min_sum < min_objective)
             min_objective = min_sum;
 
         if ((L && !L->hist.empty()) && (R && !R->hist.empty())) {
-            unordered_map<int, uint64_t> sum_counts; // make a temporary map to map obj -> count until we know how they distribute in full to then transfer to the vector-based histogram
+            unordered_map<Objective, uint64_t> sum_counts; // make a temporary map to map obj -> count until we know how they distribute in full to then transfer to the vector-based histogram
             sum_counts.reserve(L->hist.size() * 2); // 2x is a good starting estimate
 
             uint64_t valid = 0;
-            vector<int> R_objs; R_objs.reserve(R->hist.size()); // split (obj, cnt) into two parallel ararys, just for R due to the binary search needs in the future
+            vector<Objective> R_objs; R_objs.reserve(R->hist.size()); // split (obj, cnt) into two parallel ararys, just for R due to the binary search needs in the future
             vector<uint64_t> R_cnts; R_cnts.reserve(R->hist.size());
             for (auto &e : R->hist) { R_objs.push_back(e.obj); R_cnts.push_back(e.cnt); }
 
             for (const auto& le : L->hist) {
                 if (le.obj > budget) break; // should never happen by invariant but if we do lossy caching/more heuristics
-                int rem = budget - le.obj; // R cannot exceed
-                auto it_end = upper_bound(R_objs.begin(), R_objs.end(), rem); // find the first index strictly greater than rim
+                Objective rem = budget - le.obj; // R cannot exceed
+                auto it_end = [&] {
+                    if constexpr (regression_objective) {
+                        return upper_bound(R_objs.begin(), R_objs.end(), budget,
+                            [left = le.obj](Objective limit, Objective right) { return limit < left + right; });
+                    } else return upper_bound(R_objs.begin(), R_objs.end(), rem);
+                }();
                 int idx_end = (int)distance(R_objs.begin(), it_end); // gets the index of it_end (it_end is an iterator)
                 for (int j = 0; j < idx_end; ++j) { // go until the last index that doesn't exceed rem
-                    int tot = le.obj + R_objs[j];
+                    Objective tot = le.obj + R_objs[j];
                     uint64_t addc = le.cnt * R_cnts[j];
                     sum_counts[tot] += addc;
                     valid += addc;
@@ -907,7 +921,7 @@ struct TreeTrieNode {
 
 struct PredNode {
     int feature;  // -1 for leaf
-    int prediction; // only meaningful if feature == -1
+    Prediction prediction; // only meaningful if feature == -1
     shared_ptr<PredNode> left;
     shared_ptr<PredNode> right;
 };
@@ -928,13 +942,21 @@ struct EvalCtx {
 
 
 class LiveEnumerationCancelled : public std::exception {};
+struct EvalTargets : std::vector<Packed> {
+    using std::vector<Packed>::vector;
+#if defined(ARBORENUM_REGRESSION)
+    std::vector<Prediction> targets;
+    std::vector<Prediction> bb_predictions;
+#endif
+};
 
 class ArborEnum {
+    friend struct RegressionEngineTest;
 public:
     // Called exclusively on the enumeration thread, between graph mutations.
     std::function<void()> live_checkpoint;
     std::function<void()> live_poll;
-    std::function<int(int)> live_round_budget;
+    std::function<Objective(Objective)> live_round_budget;
     bool live_forbid_graph_export = false;
     std::function<bool()> live_stop_requested;
 
@@ -949,7 +971,7 @@ public:
     bool live_in_proxy() const { return live_proxy_depth_ != 0; }
 
     bool live_root_has_solution() const {
-        return result && result->min_objective != numeric_limits<int>::max() &&
+        return result && result->min_objective != numeric_limits<Objective>::max() &&
             result->min_objective <= result->budget;
     }
 
@@ -961,6 +983,61 @@ public:
         BINARY = 0,
         NUMERICAL = 1
     };
+
+    int proxy_delta_ = 0;
+
+    void set_proxy_delta(int value) {
+        if (value < 0 || value > 127) throw std::invalid_argument("proxy_delta must be an integer between 0 and 127.");
+        proxy_delta_ = value;
+    }
+
+    int8_t proxy_total_depth_(int8_t depth) const {
+        if (depth < 0 || static_cast<int>(depth) + proxy_delta_ > 127)
+            throw std::invalid_argument("depth_budget + proxy_delta must be between 0 and 127.");
+        return static_cast<int8_t>(depth + proxy_delta_);
+    }
+
+    void set_regression_options(bool equivalent_points, bool continuous_kmeans, int kmeans_min_remaining_depth = 2) {
+#if defined(ARBORENUM_REGRESSION)
+        regression_equivalent_points_ = equivalent_points;
+        regression_continuous_kmeans_ = continuous_kmeans;
+        regression_kmeans_min_depth_ = std::max(0, kmeans_min_remaining_depth);
+        regression_lower_bounds_.clear();
+        regression_equivalence_ids_.clear();
+        regression_equivalence_scratch_.clear();
+        regression_equivalence_active_.clear();
+#endif
+    }
+
+    void set_regression_movement_options(int mode, std::size_t cache_bytes) {
+#if defined(ARBORENUM_REGRESSION)
+        if (mode < 0 || mode > 2) throw std::invalid_argument("Invalid movement-bound mode.");
+        regression_movement_mode_ = mode;
+        regression_threshold_indices_.set_limit(cache_bytes);
+        regression_movement_stats_.fill(0);
+#endif
+    }
+
+    std::map<std::string, uint64_t> get_regression_movement_stats() const {
+#if defined(ARBORENUM_REGRESSION)
+        return {{"queries", regression_movement_stats_[0]},
+            {"uncached_queries", regression_movement_stats_[1]},
+            {"local_queries", regression_movement_stats_[2]},
+            {"local_workspace_builds", regression_movement_stats_[3]},
+            {"local_index_builds", regression_movement_stats_[4]},
+            {"prefix_decisions", regression_movement_stats_[5]},
+            {"moved_samples_scanned", regression_movement_stats_[6]},
+            {"donor_samples_scanned", regression_movement_stats_[7]},
+            {"global_queries", regression_movement_stats_[8]},
+            {"cache_hits", regression_threshold_indices_.hits()},
+            {"cache_builds", regression_threshold_indices_.misses()},
+            {"cache_evictions", regression_threshold_indices_.evictions()},
+            {"cache_bytes", regression_threshold_indices_.bytes()},
+            {"peak_cache_bytes", regression_threshold_indices_.peak_bytes()}};
+#else
+        return {};
+#endif
+    }
 
     static double current_memory_mb() {
         return current_memory_mb_();
@@ -1070,11 +1147,11 @@ private:
     int n_features = 0;
     int n_words = 0;
     uint64_t tail_mask = ~0ULL; // to clear high bits in last word
-    int gamma = 0;
+    Objective gamma = 0;
     int8_t trained_depth_budget = -1; 
 
-    int best_objective = 0;
-    int obj_bound = 0;
+    Objective best_objective = 0;
+    Objective obj_bound = 0;
 
     double multiplicative_slack = 0.0;
     bool additive = false;
@@ -1095,13 +1172,13 @@ private:
     bool has_prepared_data = false;
 
     std::vector<std::vector<bool>> prepared_X_col_major;
-    std::vector<int> prepared_y;
+    std::vector<Prediction> prepared_y;
     std::vector<int> prepared_continuous_starts;
     std::vector<int> prepared_initial_active_features;
     std::vector<int> prepared_allowed_proxy_features;
 
     // optional black-box predictions corresponding to prepared_y.
-    std::vector<int> prepared_bb_pred;
+    std::vector<Prediction> prepared_bb_pred;
 
     KeyMode key_mode = KeyMode::HASH64; // will change later in fit
     GreedyContinuousMode greedy_continuous_mode = GreedyContinuousMode::BINARY;
@@ -1132,9 +1209,9 @@ private:
     int proxy_style = 0; // 0=constant k (current), 1=cyclic (recursively applying split), 2=cyclic-consistent, 3=split without postprocessing, 4=split with postprocessing
     std::vector<int> k_at_depth; // size depth_budget (only used for style 2)
 
-    unordered_map<K2, int, K2::Hash> greedy_cache;
-    unordered_map<K2,  int, K2::Hash>  lickety_cache_k2; // used when lookahead_init <= 1
-    unordered_map<KLA, int, KLA::Hash>  lickety_cache_kla; // used when lookahead_init > 1
+    unordered_map<K2, Objective, K2::Hash> greedy_cache;
+    unordered_map<K2,  Objective, K2::Hash>  lickety_cache_k2; // used when lookahead_init <= 1
+    unordered_map<KLA, Objective, KLA::Hash>  lickety_cache_kla; // used when lookahead_init > 1
     // all the ProxyCompletion maps, so this is how we get E in the main paper
     std::unordered_map<
         KContProxy,
@@ -1156,6 +1233,10 @@ private:
     double runtime_limit_seconds_ = -1.0;
     double memory_limit_mb_ = -1.0;
     std::chrono::steady_clock::time_point resource_start_time_;
+#if defined(ARBORENUM_REGRESSION)
+    mutable std::chrono::steady_clock::time_point regression_memory_check_;
+    mutable bool regression_memory_exceeded_ = false;
+#endif
 
     // unordered_map<K3, shared_ptr<TreeTrieNode>, K3::Hash> trie_cache; // if trie_cache_enabled is on
     unordered_map<K2, shared_ptr<TreeTrieNode>, K2::Hash> trie_cache; // canonical node per (subproblem, depth)
@@ -1163,7 +1244,453 @@ private:
     std::vector<std::vector<double>> numerical_X_cols_for_greedy;
     std::vector<std::vector<int>> numerical_global_sorted_idx;
     std::vector<std::vector<double>> numerical_unique_values_for_greedy;
-    std::vector<int> y_train;
+    std::vector<Prediction> y_train;
+
+
+#if defined(ARBORENUM_REGRESSION)
+    std::vector<Prediction> regression_bb_predictions_;
+    int regression_movement_mode_ = 1;
+    mutable std::array<uint64_t, 9> regression_movement_stats_{};
+    int regression_kmeans_min_depth_ = 2;
+    bool regression_equivalent_points_ = false;
+    bool regression_continuous_kmeans_ = false;
+    mutable RegressionThresholdCache<KContProxy, KContProxy::Hash> regression_threshold_indices_;
+    mutable std::vector<int> regression_equivalence_ids_;
+    mutable int regression_equivalence_count_ = 0;
+    mutable std::vector<RegressionMoments> regression_equivalence_scratch_;
+    mutable std::vector<int> regression_equivalence_active_;
+    mutable RegressionKMeansBounds regression_lower_bounds_;
+    mutable std::unordered_map<uint64_t, RegressionMoments> regression_moments_cache_;
+    mutable std::vector<std::vector<int>> regression_feature_buckets_;
+    mutable std::vector<int> regression_stump_counts_;
+    mutable std::vector<long double> regression_stump_sums_;
+    mutable std::vector<std::pair<int, long double>> regression_sweep_points_;
+    struct RegressionFeatureScope {
+        const ArborEnum& owner;
+        const Packed& mask;
+        int first;
+        int end;
+        int depth;
+        RegressionFeatureScope* previous;
+        std::unique_ptr<RegressionFeatureExtrema> extrema;
+        std::unique_ptr<RegressionThresholdIndex> index;
+        std::vector<std::pair<int, double>> points;
+        std::vector<std::pair<Objective, Objective>> anchors;
+        std::size_t scanned = 0;
+
+        RegressionFeatureScope(const ArborEnum& owner, const Packed& mask, int feature, int depth)
+            : owner(owner), mask(mask), first(-1), end(-1), depth(depth), previous(owner.regression_feature_scope_) {
+            if (feature >= owner.first_continuous_feature_() && feature < owner.n_features) {
+                const int group = owner.continuous_group_pos_for_threshold_(feature);
+                first = owner.continuous_starts[group];
+                end = owner.continuous_group_end_(group);
+                if (owner.regression_continuous_kmeans_) anchors.assign(end - first,
+                    {std::numeric_limits<Objective>::max(), std::numeric_limits<Objective>::max()});
+            }
+            owner.regression_feature_scope_ = this;
+        }
+        ~RegressionFeatureScope() { owner.regression_feature_scope_ = previous; }
+    };
+    mutable RegressionFeatureScope* regression_feature_scope_ = nullptr;
+#else
+    static constexpr std::vector<Prediction> regression_bb_predictions_{};
+#endif
+
+    uint64_t regression_mask_key_(const Packed& mask) const {
+        if (key_mode == KeyMode::LITS_EXACT) return mask_ids.intern(mask, n_words, tail_mask);
+        return key_of_mask(mask);
+    }
+
+#if defined(ARBORENUM_REGRESSION)
+    const std::vector<int>& regression_bucket_positions_(int group) const {
+        regression_feature_buckets_.resize(continuous_starts.size());
+        auto& positions = regression_feature_buckets_[group];
+        if (!positions.empty()) return positions;
+        positions.resize(n_samples);
+        const int first = continuous_starts[group];
+        const int end = continuous_group_end_(group);
+        for (int row = 0; row < n_samples; ++row) {
+            int low = first, high = end;
+            while (low < high) {
+                const int mid = low + (high - low) / 2;
+                if ((X_bits[mid].w[row >> 6] >> (row & 63)) & 1ULL) high = mid;
+                else low = mid + 1;
+            }
+            positions[row] = low - first;
+        }
+        return positions;
+    }
+
+    std::pair<int, long double> regression_sparse_score_(const Packed& mask, int first, int end,
+            const RegressionMoments& total, const std::vector<int>& allowed) const {
+        const int group = continuous_group_pos_for_threshold_(first);
+        const int origin = continuous_starts[group];
+        const auto& positions = regression_bucket_positions_(group);
+        auto& points = regression_sweep_points_;
+        points.clear();
+        points.reserve(total.count);
+        for (int word = 0; word < n_words; ++word) {
+            uint64_t bits = mask.w[word];
+            while (bits) {
+                const int row = word * 64 + std::countr_zero(bits);
+                const int position = origin + positions[row];
+                if (position < end) points.emplace_back(std::max(first, position),
+                    static_cast<long double>(y_train[row]) - total.mean);
+                bits &= bits - 1;
+            }
+        }
+        std::sort(points.begin(), points.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        int best = -1;
+        long double gain = -std::numeric_limits<long double>::infinity();
+        int count = 0;
+        long double sum = 0;
+        std::size_t offset = 0;
+        while (offset < points.size()) {
+            int feature = points[offset].first;
+            do {
+                sum += points[offset].second;
+                ++count;
+                ++offset;
+            } while (offset < points.size() && points[offset].first == feature);
+            if (count == total.count) break;
+            if (!allowed.empty()) {
+                const auto it = std::lower_bound(allowed.begin(), allowed.end(), feature);
+                const int next = offset < points.size() ? points[offset].first : end;
+                if (it == allowed.end() || *it >= next) continue;
+                feature = *it;
+            }
+            const long double score = sum * sum * (1.0L / count + 1.0L / (total.count - count));
+            if (score > gain) {
+                best = feature;
+                gain = score;
+            }
+        }
+        return {best, gain};
+    }
+
+    RegressionFeatureScope* regression_scope_(const Packed& mask, int feature) const {
+        for (auto* scope = regression_feature_scope_; scope; scope = scope->previous) {
+            if (&scope->mask == &mask && feature >= scope->first && feature < scope->end) return scope;
+        }
+        return nullptr;
+    }
+
+    void regression_record_anchor_(const Packed& mask, int feature, Objective left, Objective right) const {
+        if (!regression_continuous_kmeans_) return;
+        if (auto* scope = regression_scope_(mask, feature)) scope->anchors[feature - scope->first] = {left, right};
+    }
+#endif
+
+    GreedyObjFirstSplit regression_stump_(const Packed& mask, const std::vector<int>& allowed, bool continuous) const {
+#if defined(ARBORENUM_REGRESSION)
+        const auto total = regression_moments_(mask);
+        const Objective leaf = total.count ? gamma + static_cast<Objective>(total.sse) : 0;
+        const bool terminal = leaf_is_optimal_(mask, 1, empty_pk(), leaf);
+        if (total.count < 2 || terminal) return {leaf, -1};
+        std::vector<int> rows;
+        std::vector<int> active_words;
+        if (continuous) rows.reserve(total.count);
+        active_words.reserve(std::min(total.count, n_words));
+        for (int word = 0; word < n_words; ++word) {
+            uint64_t bits = mask.w[word];
+            if (bits) active_words.push_back(word);
+            if (continuous) while (bits) {
+                rows.push_back(word * 64 + std::countr_zero(bits));
+                bits &= bits - 1;
+            }
+        }
+        long double best_gain = gamma;
+        int best = -1;
+        const auto consider = [&](int feature, int count, long double sum) {
+            if (!count || count == total.count) return;
+            if (!allowed.empty() && !std::binary_search(allowed.begin(), allowed.end(), feature)) return;
+            const long double gain = sum * sum * total.count / (static_cast<long double>(count) * (total.count - count));
+            if (gain > best_gain || (gain == best_gain && best >= 0 && feature < best)) {
+                best_gain = gain;
+                best = feature;
+            }
+        };
+        const int binary_end = continuous ? first_continuous_feature_() : n_features;
+        const auto binary = [&](int feature) {
+            int count = 0;
+            long double sum = 0;
+            for (int word : active_words) {
+                uint64_t bits = mask.w[word] & X_bits[feature].w[word];
+                count += popcnt64(bits);
+                while (bits) {
+                    sum += static_cast<long double>(y_train[word * 64 + std::countr_zero(bits)]) - total.mean;
+                    bits &= bits - 1;
+                }
+            }
+            consider(feature, count, sum);
+        };
+        if (allowed.empty()) {
+            for (int feature = 0; feature < binary_end; ++feature) binary(feature);
+        } else {
+            for (int feature : allowed) if (feature < binary_end) binary(feature);
+        }
+        if (continuous) {
+            for (int group = 0; group < static_cast<int>(continuous_starts.size()); ++group) {
+                const int first = continuous_starts[group];
+                const int width = continuous_group_end_(group) - first;
+                if (width > 4LL * total.count) {
+                    const auto [feature, gain] = regression_sparse_score_(mask, first, first + width, total, allowed);
+                    if (feature >= 0 && (gain > best_gain || (gain == best_gain && best >= 0 && feature < best))) {
+                        best_gain = gain;
+                        best = feature;
+                    }
+                    continue;
+                }
+                const auto& positions = regression_bucket_positions_(group);
+                regression_stump_counts_.assign(width + 1, 0);
+                regression_stump_sums_.assign(width + 1, 0);
+                for (int row : rows) {
+                    ++regression_stump_counts_[positions[row]];
+                    regression_stump_sums_[positions[row]] += static_cast<long double>(y_train[row]) - total.mean;
+                }
+                int count = 0;
+                long double sum = 0;
+                for (int offset = 0; offset < width; ++offset) {
+                    count += regression_stump_counts_[offset];
+                    sum += regression_stump_sums_[offset];
+                    if (regression_stump_counts_[offset] || !allowed.empty()) consider(first + offset, count, sum);
+                }
+            }
+        }
+        if (best < 0) return {leaf, -1};
+        Packed left(n_words), right(n_words);
+        split_threshold_bits_(mask, best, left, right);
+        const Objective objective = leaf_objective(left) + leaf_objective(right);
+        return objective < leaf ? GreedyObjFirstSplit{objective, best} : GreedyObjFirstSplit{leaf, -1};
+#else
+        return {};
+#endif
+    }
+
+    long double regression_uncached_movement_error_(const Packed& mask, int source, int destination,
+            bool source_range, long double cutoff) const {
+#if defined(ARBORENUM_REGRESSION)
+        ++regression_movement_stats_[1];
+        const int reference = source_range ? source : destination;
+        double low = std::numeric_limits<double>::infinity(), high = -low;
+        for (int word = 0; word < n_words; ++word) {
+            const uint64_t side = X_bits[reference].w[word];
+            uint64_t bits = mask.w[word] & (destination > source ? ~side : side);
+            while (bits) {
+                const double value = y_train[word * 64 + std::countr_zero(bits)];
+                low = std::min(low, value);
+                high = std::max(high, value);
+                ++regression_movement_stats_[7];
+                bits &= bits - 1;
+            }
+        }
+        if (!std::isfinite(low)) return std::numeric_limits<long double>::infinity();
+        long double error = 0;
+        for (int word = 0; word < n_words; ++word) {
+            uint64_t bits = mask.w[word] & (X_bits[source].w[word] ^ X_bits[destination].w[word]);
+            while (bits) {
+                const long double value = y_train[word * 64 + std::countr_zero(bits)];
+                error += std::max((value - low) * (value - low), (value - high) * (value - high));
+                ++regression_movement_stats_[6];
+                if (error >= cutoff) return error;
+                bits &= bits - 1;
+            }
+        }
+        return error;
+#else
+        return 0;
+#endif
+    }
+
+    long double regression_movement_error_(const Packed& mask, int source, int destination, bool source_range = false,
+                                          long double cutoff = std::numeric_limits<long double>::infinity()) const {
+#if defined(ARBORENUM_REGRESSION)
+        const int group = continuous_group_pos_for_threshold_(source);
+        const int first = continuous_starts[group];
+        const int end = continuous_group_end_(group);
+        if (source == destination) return 0;
+        ++regression_movement_stats_[0];
+        if (regression_movement_mode_ == 0) return regression_uncached_movement_error_(mask, source, destination, source_range, cutoff);
+        auto* scope = regression_movement_mode_ == 1 ? regression_scope_(mask, source) : nullptr;
+        if (scope) {
+            ++regression_movement_stats_[2];
+            if (!scope->extrema) {
+                ++regression_movement_stats_[3];
+                const auto& positions = regression_bucket_positions_(group);
+                scope->points.reserve(count_total(mask));
+                for (int word = 0; word < n_words; ++word) {
+                    uint64_t bits = mask.w[word];
+                    while (bits) {
+                        const int row = word * 64 + std::countr_zero(bits);
+                        scope->points.emplace_back(positions[row], y_train[row]);
+                        bits &= bits - 1;
+                    }
+                }
+                scope->extrema = std::make_unique<RegressionFeatureExtrema>();
+                scope->extrema->build(scope->points, end - first);
+            }
+            if (!scope->index && std::isfinite(cutoff)) {
+                const auto answer = scope->extrema->cutoff_error(source - first, destination - first, source_range, cutoff);
+                if (answer) {
+                    ++regression_movement_stats_[5];
+                    return *answer;
+                }
+            }
+            if (!scope->index && scope->scanned > 8 * scope->points.size()) {
+                ++regression_movement_stats_[4];
+                scope->index = std::make_unique<RegressionThresholdIndex>();
+                scope->index->build(scope->points, end - first);
+            }
+            if (scope->index) return scope->index->error(source - first, destination - first, source_range);
+            const auto [low, high] = scope->extrema->donor_range(source - first, destination - first, source_range);
+            if (!std::isfinite(low)) return std::numeric_limits<long double>::infinity();
+            long double error = 0;
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = mask.w[word] & (X_bits[source].w[word] ^ X_bits[destination].w[word]);
+                while (bits) {
+                    const long double y = y_train[word * 64 + std::countr_zero(bits)];
+                    error += std::max((y - low) * (y - low), (y - high) * (y - high));
+                    ++scope->scanned;
+                    ++regression_movement_stats_[6];
+                    if (error >= cutoff) return error;
+                    bits &= bits - 1;
+                }
+            }
+            return error;
+        }
+        if (!regression_threshold_indices_.limit()) return regression_uncached_movement_error_(mask, source, destination, source_range, cutoff);
+        ++regression_movement_stats_[8];
+        const KContProxy key{regression_mask_key_(mask), 0, first};
+        const auto& index = regression_threshold_indices_.get(key, [&](RegressionThresholdIndex& index) {
+            const auto& positions = regression_bucket_positions_(group);
+            std::vector<std::pair<int, double>> points;
+            points.reserve(count_total(mask));
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = mask.w[word];
+                while (bits) {
+                    const int bit = std::countr_zero(bits);
+                    points.emplace_back(positions[word * 64 + bit], y_train[word * 64 + bit]);
+                    bits &= bits - 1;
+                }
+            }
+            index.build(std::move(points), end - first);
+        });
+        return index.error(source - first, destination - first, source_range);
+#else
+        return 0;
+#endif
+    }
+
+    RegressionMoments regression_moments_(const Packed& mask) const {
+#if defined(ARBORENUM_REGRESSION)
+        const uint64_t key = regression_mask_key_(mask);
+        if (auto it = regression_moments_cache_.find(key); it != regression_moments_cache_.end()) return it->second;
+#endif
+        RegressionMoments result;
+        long double origin = 0, sum = 0;
+        for (int word = 0; word < n_words; ++word) {
+            uint64_t bits = mask.w[word];
+            while (bits) {
+                const int row = word * 64 + std::countr_zero(bits);
+                if (!result.count) origin = y_train[row];
+                sum += static_cast<long double>(y_train[row]) - origin;
+                ++result.count;
+                bits &= bits - 1;
+            }
+        }
+        if (result.count) {
+            const long double center = sum / result.count;
+            result.mean = origin + center;
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = mask.w[word];
+                while (bits) {
+                    const long double delta = (static_cast<long double>(y_train[word * 64 + std::countr_zero(bits)]) - origin) - center;
+                    result.sse += delta * delta;
+                    bits &= bits - 1;
+                }
+            }
+        }
+#if defined(ARBORENUM_REGRESSION)
+        regression_moments_cache_.emplace(key, result);
+#endif
+        return result;
+    }
+
+    Objective subtree_lower_bound_(const Packed& mask, int8_t depth, const PathKey& pk) const {
+#if defined(ARBORENUM_REGRESSION)
+        if (depth <= 0) return leaf_objective(mask);
+        if (use_deferral || depth < regression_kmeans_min_depth_) return mask.any() ? gamma : 0;
+        const uint64_t key = regression_mask_key_(mask);
+        const Objective result = regression_lower_bounds_.get(key, depth, gamma,
+            [&](std::vector<std::pair<double, int>>& points, double& unavoidable) {
+        points.reserve(count_total(mask));
+        if (regression_equivalent_points_) {
+            if (regression_equivalence_ids_.empty()) {
+                std::map<std::vector<uint64_t>, int> groups;
+                regression_equivalence_ids_.resize(n_samples);
+                for (int row = 0; row < n_samples; ++row) {
+                    std::vector<uint64_t> signature((n_features + 63) / 64, 0);
+                    for (int f = 0; f < n_features; ++f) {
+                        if ((X_bits[f].w[row >> 6] >> (row & 63)) & 1ULL) signature[f >> 6] |= 1ULL << (f & 63);
+                    }
+                    auto [it, inserted] = groups.try_emplace(std::move(signature), static_cast<int>(groups.size()));
+                    regression_equivalence_ids_[row] = it->second;
+                }
+                regression_equivalence_count_ = static_cast<int>(groups.size());
+            }
+            regression_equivalence_scratch_.resize(regression_equivalence_count_);
+            regression_equivalence_active_.clear();
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = mask.w[word];
+                while (bits) {
+                    const int row = word * 64 + std::countr_zero(bits);
+                    const int group = regression_equivalence_ids_[row];
+                    auto& moments = regression_equivalence_scratch_[group];
+                    if (!moments.count) regression_equivalence_active_.push_back(group);
+                    moments.add(y_train[row]);
+                    bits &= bits - 1;
+                }
+            }
+            long double error = 0;
+            for (int id : regression_equivalence_active_) {
+                auto& group = regression_equivalence_scratch_[id];
+                points.emplace_back(static_cast<double>(group.mean), group.count);
+                error += group.sse;
+                group = RegressionMoments{};
+            }
+            unavoidable = static_cast<double>(error);
+        } else {
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = mask.w[word];
+                while (bits) {
+                    points.emplace_back(y_train[word * 64 + std::countr_zero(bits)], 1);
+                    bits &= bits - 1;
+                }
+            }
+        }
+        }, [this] { return resource_limit_reached_(); });
+        const Objective bound = result > 0 ? std::nextafter(result, 0.0) : 0;
+        return bound;
+#else
+        return count_total(mask) ? gamma : 0;
+#endif
+    }
+
+    bool leaf_is_optimal_(const Packed& mask, int8_t depth, const PathKey& pk, Objective leaf) const {
+        if constexpr (regression_objective) {
+            const Objective bound = subtree_lower_bound_(mask, depth, pk);
+            return leaf <= 2 * gamma || leaf <= std::nextafter(bound, std::numeric_limits<double>::infinity());
+        } else return leaf <= 2 * gamma;
+    }
+
+    bool split_can_improve_(const Packed& left, const Packed& right, int8_t depth, Objective incumbent) const {
+        if constexpr (regression_objective) {
+            const Objective a = subtree_lower_bound_(left, depth, empty_pk());
+            if (a > incumbent) return false;
+            const Objective b = subtree_lower_bound_(right, depth, empty_pk());
+            return a + b < incumbent;
+        } else return true;
+    }
 
     // bitwise and of the bitvectors represented as lists of words. makes a sparser list of words
     inline void and_bits(const Packed& a, const Packed& b, Packed& out) const {
@@ -1312,7 +1839,7 @@ private:
     }
 
     // a simple way to get the proxy objective when you don't know which proxy you are using
-    int proxy_completion_objective_(
+    Objective proxy_completion_objective_(
         const Packed& mask,
         int8_t depth,
         int8_t k_here,
@@ -1337,7 +1864,7 @@ private:
 
     // this method chooses between the various greedy modes: restricted to a binarization, or fully continuous (but then is your data representation sorted lists of indices or  bitvectors)
     // these are compared in the appendix.
-    int greedy_proxy_objective_(
+    Objective greedy_proxy_objective_(
         const Packed& mask,
         int8_t depth_budget,
         const PathKey& pk,
@@ -1374,9 +1901,10 @@ private:
     }
 
     void shift_proxy_strength_down_one_() {
+        if (proxy_delta_ > 0) remember_proxy_trace_values_();
         if (true) {
             // snapshot positive-lookahead entries before mutating the map.
-            std::vector<std::pair<KLA, int>> source_entries;
+            std::vector<std::pair<KLA, Objective>> source_entries;
             source_entries.reserve(lickety_cache_kla.size());
 
             for (const auto& [key, objective] : lickety_cache_kla) {
@@ -1387,6 +1915,7 @@ private:
 
             // remove objectives that are not over continuous features
             greedy_cache.clear();
+            if (sparsification_enabled_ && !proxy_split_indices_.empty()) proxy_split_indices_.clear();
 
             for (
                 auto it = lickety_cache_kla.begin();
@@ -1450,7 +1979,7 @@ private:
     }
 
     // decide which exact solver to use. and exact over what features.
-    inline int depthd_exact_proxy_objective_(
+    inline Objective depthd_exact_proxy_objective_(
         const Packed& mask,
         int8_t depth,
         const PathKey& pk,
@@ -1473,7 +2002,7 @@ private:
     }
 
     // decide what licketysplit style algorithm to use, and with what features.
-    inline int lickety_proxy_objective_(
+    inline Objective lickety_proxy_objective_(
         const Packed& mask,
         int8_t depth,
         int8_t k,
@@ -1590,6 +2119,10 @@ private:
         runtime_limit_seconds_ = runtime_limit_seconds;
         memory_limit_mb_ = memory_limit_mb;
         resource_start_time_ = std::chrono::steady_clock::now();
+#if defined(ARBORENUM_REGRESSION)
+        regression_memory_check_ = {};
+        regression_memory_exceeded_ = false;
+#endif
     }
 
     void end_resource_tracking_() {
@@ -1616,12 +2149,23 @@ private:
             }
         }
 
+#if defined(ARBORENUM_REGRESSION)
+        if (memory_limit_mb_ >= 0.0) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - regression_memory_check_ >= std::chrono::milliseconds(1)) {
+                regression_memory_check_ = now;
+                regression_memory_exceeded_ = current_memory_mb_() >= memory_limit_mb_;
+            }
+            if (regression_memory_exceeded_) return true;
+        }
+#else
         if (
             memory_limit_mb_ >= 0.0 &&
             current_memory_mb_() >= memory_limit_mb_
         ) {
             return true;
         }
+#endif
 
         return false;
     }
@@ -1681,6 +2225,7 @@ private:
 
     inline void count_per_class(const Packed& mask, std::vector<int>& counts) const {
         counts.assign((size_t)num_classes, 0);
+        if constexpr (regression_objective) return;
         for (int c = 0; c < num_classes; ++c) {
             counts[(size_t)c] = popcount_and(mask, Y_bits[(size_t)c]);
         }
@@ -1690,8 +2235,8 @@ private:
         return popcount_and(mask, Y_bits[(size_t)c]);
     }
 
-    int rashomon_budget_(
-        int reference_objective,
+    Objective rashomon_budget_(
+        Objective reference_objective,
         double rashomon_mult,
         int reference_n,
         bool apply_multiplicative_slack
@@ -1706,7 +2251,7 @@ private:
             bound *= (1.0 + multiplicative_slack);
         }
 
-        return static_cast<int>(std::llround(bound));
+        return rounded_objective(bound);
     }
 
     // standard formulas in greedy decision tree optimization
@@ -2092,6 +2637,7 @@ public:
         }
 
         greedy_cache.clear();
+        if (sparsification_enabled_ && !proxy_split_indices_.empty()) proxy_split_indices_.clear();
         greedy_first_split_cache.clear();
     }
 
@@ -2100,17 +2646,17 @@ public:
     }
 
     struct MistakesWithObj {
-        int obj;
-        int mistakes;
+        Objective obj;
+        Objective mistakes;
     };
 
     struct DeferralsWithObj {
-        int obj;
+        Objective obj;
         int deferrals;
     };
 
     struct ExactReplacementMistakesWithObj {
-        int obj = 0;
+        Objective obj = 0;
         std::vector<double> mistakes; // [m_original, m_0, ..., m_{p-1}], exact, no montecarlo error
     };
 
@@ -2319,10 +2865,10 @@ public:
 
                 if (
                     split.left->min_objective !=
-                        std::numeric_limits<int>::max()
+                        std::numeric_limits<Objective>::max()
                     &&
                     split.right->min_objective !=
-                        std::numeric_limits<int>::max()
+                        std::numeric_limits<Objective>::max()
                 ) {
                     e.min_objective =
                         split.left->min_objective +
@@ -2366,8 +2912,267 @@ public:
         return out;
     }
 
-    
 
+    void fit_prepared_majority_graph(
+        double lambda, int8_t depth_budget, double rashomon_mult,
+        int8_t lookahead_k, Objective root_budget,
+        bool use_multipass_flag, bool rule_list_mode_flag,
+        int proxy_style_in, bool majority_leaf_only_flag,
+        bool cache_cheap_subproblems_flag, bool proxy_caching_flag,
+        bool restrict_proxy_in_lickety_in,
+        bool restrict_proxy_in_depthd_exact_in,
+        bool restrict_proxy_in_greedy_in,
+        double subsample_fraction, int num_subsamples,
+        double vote_fraction, uint64_t seed,
+        bool stronger_rollout_flag = false
+    ) {
+        if (!has_prepared_data) {
+            throw std::runtime_error(
+                "Call prepare_continuous_data before fit_prepared_majority_graph.");
+        }
+        if (use_deferral || rule_list_mode_flag) {
+            throw std::runtime_error(
+                "Majority three-state bounds support ordinary, non-deferring trees only.");
+        }
+        if (greedy_continuous_mode != GreedyContinuousMode::BINARY) {
+            throw std::runtime_error(
+                "Majority graph currently requires greedy_continuous_mode='binary'.");
+        }
+        if (!(subsample_fraction > 0.0 && subsample_fraction <= 1.0) ||
+            !(vote_fraction > 0.0 && vote_fraction <= 1.0) ||
+            num_subsamples <= 0 || depth_budget < 0) {
+            throw std::runtime_error("Invalid majority subsample/vote/depth parameters.");
+        }
+        if (root_budget < -1) {
+            throw std::runtime_error("root_budget must be >= -1.");
+        }
+        const int n = static_cast<int>(prepared_y.size());
+        const int F = static_cast<int>(prepared_X_col_major.size());
+        if (n < 2 || F <= 0) {
+            throw std::runtime_error("Majority graph needs at least two rows and a feature.");
+        }
+        const int sample_n = std::max(1, std::min(n,
+            static_cast<int>(std::llround(subsample_fraction * n))));
+        const int required = std::max(1, static_cast<int>(std::ceil(
+            vote_fraction * num_subsamples - 1e-12)));
+
+        clear_fit_state_();
+        n_samples = n;
+        n_features = F;
+        n_words = (n + 63) / 64;
+        tail_mask = (n % 64) ? ((1ULL << (n % 64)) - 1ULL) : ~0ULL;
+        gamma = rounded_objective(lambda * sample_n);
+        trained_depth_budget = depth_budget;
+        continuous_starts = prepared_continuous_starts;
+        y_train = prepared_y;
+        if constexpr (regression_objective) num_classes = 1;
+        else {
+        for (int label : prepared_y) {
+            if (label < 0) throw std::runtime_error("Negative label.");
+            num_classes = std::max(num_classes, label + 1);
+        }        }
+
+        X_bits.assign(static_cast<size_t>(F), Packed(static_cast<size_t>(n_words)));
+        for (int f = 0; f < F; ++f) {
+            if (static_cast<int>(prepared_X_col_major[f].size()) != n)
+                throw std::runtime_error("Prepared training columns are inconsistent.");
+            for (int row = 0; row < n; ++row) {
+                if (prepared_X_col_major[f][row]) {
+                    X_bits[f].w[static_cast<size_t>(row >> 6)] |=
+                        1ULL << (row & 63);
+                }
+            }
+        }
+        const Packed full = [&]() {
+            Packed mask(static_cast<size_t>(n_words));
+            std::fill(mask.w.begin(), mask.w.end(), ~0ULL);
+            mask.w.back() &= tail_mask;
+            return mask;
+        }();
+
+        struct NodeKey {
+            uint64_t hash;
+            int depth;
+            bool operator==(const NodeKey& o) const noexcept {
+                return hash == o.hash && depth == o.depth;
+            }
+        };
+        struct NodeKeyHash {
+            size_t operator()(const NodeKey& k) const noexcept {
+                return static_cast<size_t>(mix64(k.hash ^ mix64(
+                    static_cast<uint64_t>(k.depth))));
+            }
+        };
+        struct LeafVote {
+            int count = 0, last_seen = -1;
+            Objective min_loss = std::numeric_limits<Objective>::max();
+            bool dead = false;
+        };
+        struct SplitVote {
+            int count = 0, last_seen = -1;
+            int left = -1, right = -1;
+            bool dead = false;
+        };
+        struct MergeNode {
+            std::unordered_map<Prediction, LeafVote> leaves;
+            std::unordered_map<int, SplitVote> splits;
+        };
+        std::vector<MergeNode> merged;
+        std::unordered_map<NodeKey, int, NodeKeyHash> ids;
+        auto intern = [&](const Packed& mask, int depth) -> int {
+            const NodeKey key{hash_mask64(
+                mask.w.data(), n_words, tail_mask), depth};
+            auto it = ids.find(key);
+            if (it != ids.end()) return it->second;
+            const int id = static_cast<int>(merged.size());
+            ids.emplace(key, id);
+            merged.emplace_back();
+            return id;
+        };
+        const int root_id = intern(full, depth_budget);
+        std::vector<int> order(static_cast<size_t>(n));
+        std::iota(order.begin(), order.end(), 0);
+        std::mt19937_64 rng(seed);
+        Objective common_budget = root_budget;
+
+        struct VisitKey {
+            const TreeTrieNode* src;
+            int dst;
+            bool operator==(const VisitKey& o) const noexcept {
+                return src == o.src && dst == o.dst;
+            }
+        };
+        struct VisitHash {
+            size_t operator()(const VisitKey& k) const noexcept {
+                return static_cast<size_t>(mix64(
+                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(k.src)) ^
+                    mix64(static_cast<uint64_t>(k.dst))));
+            }
+        };
+
+        for (int rep = 0; rep < num_subsamples; ++rep) {
+            std::shuffle(order.begin(), order.end(), rng);
+            std::vector<int> selected(order.begin(), order.begin() + sample_n);
+            std::sort(selected.begin(), selected.end());
+            std::vector<std::vector<bool>> compact_X(
+                static_cast<size_t>(F), std::vector<bool>(static_cast<size_t>(sample_n)));
+            std::vector<Prediction> compact_y(static_cast<size_t>(sample_n));
+            for (int j = 0; j < sample_n; ++j) {
+                const int row = selected[j];
+                compact_y[j] = prepared_y[row];
+                for (int f = 0; f < F; ++f)
+                    compact_X[f][j] = prepared_X_col_major[f][row];
+            }
+
+            ArborEnum sample;
+            sample.set_key_mode(key_mode);
+            sample.set_trie_cache_enabled(trie_cache_enabled);
+            sample.set_multiplicative_slack(multiplicative_slack);
+            sample.set_additive(additive);
+            sample.set_greedy_split_mode(greedy_split_mode);
+            sample.set_proxy_caching_enabled(proxy_caching_flag);
+            sample.set_stronger_rollout(stronger_rollout_flag);
+            sample.fit(
+                compact_X, compact_y, lambda, depth_budget,
+                rashomon_mult, lookahead_k, common_budget,
+                use_multipass_flag, rule_list_mode_flag, proxy_style_in,
+                majority_leaf_only_flag, cache_cheap_subproblems_flag,
+                proxy_caching_flag, prepared_allowed_proxy_features,
+                restrict_proxy_in_lickety_in,
+                restrict_proxy_in_depthd_exact_in,
+                restrict_proxy_in_greedy_in, true,
+                prepared_continuous_starts, stronger_rollout_flag);
+            if (!sample.result) {
+                throw std::runtime_error("A subsample fit returned no Rashomon graph.");
+            }
+            if (common_budget < 0) common_budget = sample.result->budget;
+
+            std::unordered_set<VisitKey, VisitHash> seen;
+            auto visit = [&](auto&& self, const TreeTrieNode* src,
+                             const Packed& full_mask, int depth) -> void {
+                if (!src) return;
+                const int dst = intern(full_mask, depth);
+                if (!seen.insert(VisitKey{src, dst}).second) return;
+                for (const LeafNode& leaf : src->leaves) {
+                    const auto full_leaf = regression_objective ? best_leaf_action(full_mask) : BestLeafAction{leaf.prediction, leaf.loss};
+                    auto& a = merged[dst].leaves[full_leaf.prediction];
+                    if (a.dead) continue;
+                    if (a.last_seen != rep) {
+                        a.last_seen = rep;
+                        ++a.count;
+                    }
+                    a.min_loss = std::min(a.min_loss, full_leaf.loss);
+                }
+                if (depth == 0) return;
+                for (const SplitNode& split : src->splits) {
+                    if (!split.left || !split.right) continue;
+                    const int f = split.feature;
+                    if (f < 0 || f >= F) throw std::runtime_error("Bad split column.");
+                    Packed left(static_cast<size_t>(n_words));
+                    Packed right(static_cast<size_t>(n_words));
+                    and_words(full_mask.w.data(), X_bits[f].w.data(),
+                        left.w.data(), n_words, tail_mask);
+                    andnot_words(full_mask.w.data(), X_bits[f].w.data(),
+                        right.w.data(), n_words, tail_mask);
+                    const int l = intern(left, depth - 1);
+                    const int r = intern(right, depth - 1);
+                    auto& a = merged[dst].splits[f];
+                    if (a.dead) continue;
+                    if (a.count != 0 && (a.left != l || a.right != r))
+                        throw std::runtime_error("Inconsistent canonical split children.");
+                    a.left = l;
+                    a.right = r;
+                    if (a.last_seen != rep) {
+                        a.last_seen = rep;
+                        ++a.count;
+                    }
+                    self(self, split.left.get(), left, depth - 1);
+                    self(self, split.right.get(), right, depth - 1);
+                }
+            };
+            visit(visit, sample.result.get(), full, depth_budget);
+
+            const int remaining = num_subsamples - rep - 1;
+            for (auto& node : merged) {
+                for (auto& [pred, a] : node.leaves)
+                    if (a.count + remaining < required) a.dead = true;
+                for (auto& [feature, a] : node.splits)
+                    if (a.count + remaining < required) a.dead = true;
+            }
+        }
+
+        const Objective INF = std::numeric_limits<Objective>::max();
+        std::vector<std::shared_ptr<TreeTrieNode>> memo(merged.size());
+        std::vector<uint8_t> built(merged.size(), uint8_t{0});
+        auto materialize = [&](auto&& self, int id) -> std::shared_ptr<TreeTrieNode> {
+            if (built[id]) return memo[id];
+            built[id] = 1;
+            auto out = std::make_shared<TreeTrieNode>();
+            out->budget = common_budget;
+            out->min_objective = INF;
+            for (const auto& [pred, a] : merged[id].leaves) {
+                if (a.dead || a.count < required) continue;
+                out->leaves.push_back(LeafNode{pred, a.min_loss});
+                out->min_objective = std::min(out->min_objective, a.min_loss);
+            }
+            for (const auto& [feature, a] : merged[id].splits) {
+                if (a.dead || a.count < required) continue;
+                auto l = self(self, a.left);
+                auto r = self(self, a.right);
+                if (!l || !r) continue;
+                const Objective cost = l->min_objective + r->min_objective;
+                out->splits.push_back(SplitNode{feature, std::move(l), std::move(r), 0});
+                if (cost < out->min_objective)
+                    out->min_objective = static_cast<Objective>(cost);
+            }
+            if (out->min_objective == INF) return memo[id] = nullptr;
+            return memo[id] = std::move(out);
+        };
+        result = materialize(materialize, root_id);
+        if (!result) throw std::runtime_error(
+            "No tree survives the majority graph's local voting rules.");
+        obj_bound = common_budget;
+    }
 
     // return the internal feature index at which each continuous group begins
     std::vector<int> get_continuous_starts() const {
@@ -2677,11 +3482,11 @@ public:
     void prepare_continuous_data(
         const std::vector<std::vector<double>>& X_num_row_major,
         const std::vector<std::vector<uint8_t>>& X_bin_row_major,
-        const std::vector<int>& y,
+        const std::vector<Prediction>& y,
         const std::vector<std::vector<uint8_t>>& X_initial_active_row_major,
         const std::vector<std::vector<uint8_t>>& X_proxy_active_row_major,
         int max_number_thresholds_per_feature = -1,
-        const std::vector<int>& bb_pred = {}
+        const std::vector<Prediction>& bb_pred = {}
     ) {
         validate_rectangular_matrix_(X_num_row_major, "X_num_row_major");
         validate_rectangular_matrix_(X_bin_row_major, "X_bin_row_major");
@@ -2817,7 +3622,7 @@ public:
             }
         }
 
-        if (X_cols.empty()) {
+        if (X_cols.empty() && !regression_objective) {
             throw std::runtime_error("prepare_continuous_data produced zero binary features.");
         }
 
@@ -2979,7 +3784,7 @@ public:
 
     std::vector<double> fit_repeated_subsamples(
         const std::vector<std::vector<bool>>& X_col_major,
-        const std::vector<int>& y,
+        const std::vector<Prediction>& y,
         double lambda,
         int8_t depth_budget,
         double rashomon_mult,
@@ -3002,16 +3807,17 @@ public:
         bool stronger_rollout_flag = false,
         bool use_deferral_flag = false,
         double eta_defer_in = 0.0,
-        const std::vector<int>& bb_pred = {}
+        const std::vector<Prediction>& bb_pred = {}
     ) {
         // start both benchmark cases from a completely clean object
         clear_fit_state_();
+        if (proxy_delta_ > 0) depth_budget = proxy_total_depth_(depth_budget);
 
-        if (X_col_major.empty()) {
+        if (X_col_major.empty() && !regression_objective) {
             throw std::runtime_error("X_col_major is empty.");
         }
 
-        if (X_col_major[0].empty()) {
+        if (y.empty() || (!X_col_major.empty() && X_col_major[0].empty())) {
             throw std::runtime_error("X_col_major has zero samples.");
         }
 
@@ -3032,7 +3838,7 @@ public:
         }
 
         n_features = (int)X_col_major.size();
-        n_samples = (int)X_col_major[0].size();
+        n_samples = regression_objective && X_col_major.empty() ? static_cast<int>(y.size()) : (int)X_col_major[0].size();
 
         if ((int)y.size() != n_samples) {
             throw std::runtime_error(
@@ -3096,8 +3902,8 @@ public:
             );
 
         // gamma is scaled by local subproblem size
-        gamma = (int)std::llround(
-            lambda * (double)subsample_size
+        gamma = rounded_objective(
+            lambda * static_cast<double>(regression_objective ? n_samples : subsample_size)
         );
 
         trained_depth_budget = depth_budget;
@@ -3106,9 +3912,9 @@ public:
         rule_list_mode = rule_list_mode_flag;
         majority_leaf_only = majority_leaf_only_flag;
         cache_cheap_subproblems =
-            cache_cheap_subproblems_flag;
+            cache_cheap_subproblems_flag || proxy_delta_ > 0 || sparsification_enabled_;
         proxy_style = proxy_style_in;
-        proxy_caching_enabled = proxy_caching_flag;
+        proxy_caching_enabled = proxy_caching_flag || proxy_delta_ > 0 || sparsification_enabled_;
         stronger_rollout = stronger_rollout_flag;
 
         restrict_proxy_in_lickety =
@@ -3193,13 +3999,17 @@ public:
                 tail_mask;
         }
 
+        if constexpr (regression_objective) {
+            num_classes = 1;
+            Y_bits.assign(1, Packed(n_words));
+            for (double value : y_train) {
+                if (!std::isfinite(value)) throw std::invalid_argument("Regression targets must be finite.");
+            }
+        } else {
         int y_max = 0;
 
         for (int i = 0; i < n_samples; ++i) {
-            y_max = std::max(
-                y_max,
-                y[(size_t)i]
-            );
+            y_max = std::max(y_max, static_cast<int>(y[(size_t)i]));
         }
 
         num_classes = y_max + 1;
@@ -3228,11 +4038,15 @@ public:
                 .w[(size_t)(n_words - 1)] &=
                 tail_mask;
         }
+        }
 
         BBwrong = Packed((size_t)n_words);
         BBwrong.clear();
 
-        if (use_deferral) {
+#if defined(ARBORENUM_REGRESSION)
+        regression_bb_predictions_ = bb_pred;
+#endif
+        if (use_deferral && !regression_objective) {
             for (int i = 0; i < n_samples; ++i) {
                 const int bi =
                     bb_pred[(size_t)i];
@@ -3344,6 +4158,10 @@ public:
             root.w[(size_t)(n_words - 1)] &=
                 tail_mask;
 
+#if defined(ARBORENUM_REGRESSION)
+            regression_importance_training_mask_ = root;
+#endif
+
             const uint64_t subsample_hash =
                 hash_mask64(
                     root.w.data(),
@@ -3361,8 +4179,14 @@ public:
             if (
                 !reuse_caches_between_subsamples
             ) {
+#if defined(ARBORENUM_REGRESSION)
+                regression_lower_bounds_.clear();
+                regression_moments_cache_.clear();
+                regression_threshold_indices_.clear();
+#endif
                 trie_cache.clear();
                 greedy_cache.clear();
+                if (sparsification_enabled_ && !proxy_split_indices_.empty()) proxy_split_indices_.clear();
                 
 
                 lickety_cache_k2.clear();
@@ -3437,6 +4261,7 @@ public:
                     root_cpath,
                     &B_active_all
                 );
+            if (proxy_delta_ > 0) expand_proxy_frontiers_(result, root, depth_budget);
 
             const double run_seconds =
                 std::chrono::duration<double>(
@@ -3451,10 +4276,10 @@ public:
                 cumulative_seconds
             );
 
-            const int min_obj =
+            const Objective min_obj =
                 result
                     ? result->min_objective
-                    : std::numeric_limits<int>::max();
+                    : std::numeric_limits<Objective>::max();
 
             std::cout
                 << "Subsample "
@@ -3578,7 +4403,7 @@ public:
         int8_t depth_budget,
         double rashomon_mult,
         int8_t lookahead_k,
-        int root_budget,
+        Objective root_budget,
         bool use_multipass_flag,
         bool rule_list_mode_flag,
         int proxy_style_in,
@@ -3645,12 +4470,12 @@ public:
     // construct_trie is the equivalent of ContinuousRSet, although we will go to a construct_trie_extend variant when extending or when we have a different active feature set
     // this is code duplication but gets us some small speedups because of overhead
     void fit(const std::vector<std::vector<bool>>& X_col_major,
-             const std::vector<int>& y,
+             const std::vector<Prediction>& y,
              double lambda,
              int8_t depth_budget,
              double rashomon_mult,
              int8_t lookahead_k,
-             int root_budget,
+             Objective root_budget,
              bool use_multipass_flag,
              bool rule_list_mode_flag,
              int proxy_style_in,
@@ -3666,20 +4491,21 @@ public:
              bool stronger_rollout_flag=false,
              bool use_deferral_flag = false,
              double eta_defer_in = 0.0,
-             const std::vector<int>& bb_pred = {}
+             const std::vector<Prediction>& bb_pred = {}
             ) {
 
         clear_fit_state_();
+        if (proxy_delta_ > 0) depth_budget = proxy_total_depth_(depth_budget);
 
-        if (X_col_major.empty()) {
+        if (X_col_major.empty() && !regression_objective) {
             throw std::runtime_error("X_col_major is empty.");
         }
-        if (X_col_major[0].empty()) {
+        if (y.empty() || (!X_col_major.empty() && X_col_major[0].empty())) {
             throw std::runtime_error("X_col_major has zero samples.");
         }
 
         n_features = (int)X_col_major.size();
-        n_samples  = (int)X_col_major[0].size();
+        n_samples = regression_objective && X_col_major.empty() ? static_cast<int>(y.size()) : (int)X_col_major[0].size();
         continuous_starts = continuous_starts_in;
         y_train = y;
        
@@ -3694,7 +4520,7 @@ public:
         }
         n_words = (n_samples + 63) / 64; // 64 -> 1, 65 -> 2
         tail_mask = (n_samples % 64) ? ((1ULL << (n_samples % 64)) - 1ULL) : ~0ULL; // if multiple of 64, all 1s. otherwise, n_samples % 64 1s followed by 0s.
-        gamma = (int)llround(lambda * (double)n_samples);
+        gamma = rounded_objective(lambda * (double)n_samples);
 
         use_deferral = use_deferral_flag;
         eta_defer = eta_defer_in;
@@ -3719,9 +4545,9 @@ public:
         use_multipass = use_multipass_flag;
         rule_list_mode = rule_list_mode_flag;
         majority_leaf_only = majority_leaf_only_flag;
-        cache_cheap_subproblems = cache_cheap_subproblems_flag;
+        cache_cheap_subproblems = cache_cheap_subproblems_flag || proxy_delta_ > 0 || sparsification_enabled_;
         proxy_style = proxy_style_in;
-        proxy_caching_enabled = proxy_caching_flag;
+        proxy_caching_enabled = proxy_caching_flag || proxy_delta_ > 0 || sparsification_enabled_;
         stronger_rollout = stronger_rollout_flag;
         if (!rashomon_mode) { // force proxy caching on in single-tree mode - required for this codebase
             proxy_caching_enabled = true;
@@ -3772,8 +4598,15 @@ public:
         //     if (y[i]) Ypos.w[i>>6] |= (1ULL << (i & 63));
         // }
         // Ypos.w[n_words-1] &= tail_mask;
+        if constexpr (regression_objective) {
+            num_classes = 1;
+            Y_bits.assign(1, Packed(n_words));
+            for (double value : y_train) {
+                if (!std::isfinite(value)) throw std::invalid_argument("Regression targets must be finite.");
+            }
+        } else {
         int y_max = 0;
-        for (int i = 0; i < n_samples; ++i) y_max = std::max(y_max, y[i]);
+        for (int i = 0; i < n_samples; ++i) y_max = std::max(y_max, static_cast<int>(y[i]));
         num_classes = y_max + 1;
 
         Y_bits.assign((size_t)num_classes, Packed(n_words));
@@ -3788,6 +4621,7 @@ public:
         for (int c = 0; c < num_classes; ++c) {
             Y_bits[(size_t)c].w[(size_t)(n_words - 1)] &= tail_mask;
         }
+        }
 
         Packed root(n_words);
         for (int i = 0; i < n_words-1; ++i) root.w[i] = ~0ULL; // not 0, so all 1.
@@ -3796,7 +4630,10 @@ public:
         BBwrong = Packed((size_t)n_words);
         BBwrong.clear();
 
-        if (use_deferral) {
+#if defined(ARBORENUM_REGRESSION)
+        regression_bb_predictions_ = bb_pred;
+#endif
+        if (use_deferral && !regression_objective) {
             for (int i = 0; i < n_samples; ++i) {
                 const int bi = bb_pred[(size_t)i];
 
@@ -3821,7 +4658,7 @@ public:
 
         // SINGLE TREE SUPPORT - always use all features
         if (!rashomon_mode) {
-            int single_obj = 0;
+            Objective single_obj = 0;
             if (lookahead_init <= 0) {
                 single_obj = train_greedy_continuous(root, depth_budget, root_pk, root_cpath);
             } else {
@@ -3880,6 +4717,7 @@ public:
 
         std::vector<int> B_active_all = all_feature_indices_();
         result = construct_trie(root, depth_budget, obj_bound, root_pk, root_cpath, &B_active_all);
+        if (proxy_delta_ > 0) expand_proxy_frontiers_(result, root, depth_budget);
 
         if (!result) {
             cout << "Minimum objective: NONE (empty Rashomon set)\n";
@@ -3914,7 +4752,7 @@ public:
     // we test with mode 3 in the main paper.
     shared_ptr<TreeTrieNode> fit_then_extend(
         const std::vector<std::vector<bool>>& X_col_major,
-        const std::vector<int>& y,
+        const std::vector<Prediction>& y,
         double lambda,
         int8_t depth_budget,
         double first_rashomon_mult,
@@ -3937,7 +4775,7 @@ public:
         double memory_limit_mb = -1.0,
         bool use_deferral_flag = false,
         double eta_defer_in = 0.0,
-        const std::vector<int>& bb_pred = {}
+        const std::vector<Prediction>& bb_pred = {}
     ) {
         if (
             first_rashomon_mult < 0.0 ||
@@ -3990,14 +4828,16 @@ public:
             bb_pred
         );
 
+        depth_budget = trained_depth_budget;
+
         if (!result) {
             throw std::runtime_error(
                 "The first-stage fit did not construct a Rashomon graph."
             );
         }
 
-        const int first_budget = obj_bound;
-        int current_budget = first_budget;
+        const Objective first_budget = obj_bound;
+        Objective current_budget = first_budget;
 
         Packed root = root_mask_();
 
@@ -4041,7 +4881,7 @@ public:
                     << round
                     << "\n";
 
-                const int candidate_budget =
+                const Objective candidate_budget =
                     split_gap_extension_budget_(
                         result,
                         root,
@@ -4098,7 +4938,7 @@ public:
                     << round
                     << "\n";
 
-                const int candidate_budget =
+                const Objective candidate_budget =
                     trie_node_gap_extension_budget_(
                         result,
                         root,
@@ -4142,7 +4982,7 @@ public:
 
         // mode 3: second multiplier is larger.
         // do expected behavior of extending to it
-        const int explicit_second_budget =
+        const Objective explicit_second_budget =
             rashomon_budget_(
                 best_objective,
                 second_rashomon_mult,
@@ -4177,7 +5017,7 @@ public:
                 current_multiplier + multiplier_step_size
             );
 
-            int next_budget = rashomon_budget_(
+            Objective next_budget = rashomon_budget_(
                 best_objective,
                 current_multiplier,
                 n_samples,
@@ -4188,7 +5028,7 @@ public:
             if (
                 next_budget <= current_budget
             ) {
-                next_budget = current_budget + 1;
+                next_budget = regression_objective ? std::nextafter(static_cast<double>(current_budget), std::numeric_limits<double>::infinity()) : current_budget + 1;
             }
 
             // never exceed the requested final budget.
@@ -4227,6 +5067,7 @@ public:
         }
         
 
+        if (proxy_delta_ > 0) expand_proxy_frontiers_(result, root, depth_budget);
         obj_bound = current_budget;
         end_resource_tracking_();
 
@@ -4293,7 +5134,7 @@ public:
 
     void fit_anytime(
         const std::vector<std::vector<bool>>& X_col_major,
-        const std::vector<int>& y,
+        const std::vector<Prediction>& y,
         double lambda,
         int8_t depth_budget,
         double rashomon_mult,
@@ -4319,20 +5160,21 @@ public:
         double memory_limit_mb = -1.0,
         bool use_deferral_flag = false,
         double eta_defer_in = 0.0,
-        const std::vector<int>& bb_pred = {}
+        const std::vector<Prediction>& bb_pred = {}
     ) {
         clear_fit_state_();
+        if (proxy_delta_ > 0) depth_budget = proxy_total_depth_(depth_budget);
 
-        if (X_col_major.empty()) {
+        if (X_col_major.empty() && !regression_objective) {
             throw std::runtime_error("X_col_major is empty.");
         }
 
-        if (X_col_major[0].empty()) {
+        if (y.empty() || (!X_col_major.empty() && X_col_major[0].empty())) {
             throw std::runtime_error("X_col_major has zero samples.");
         }
 
         n_features = (int)X_col_major.size();
-        n_samples  = (int)X_col_major[0].size();
+        n_samples = regression_objective && X_col_major.empty() ? static_cast<int>(y.size()) : (int)X_col_major[0].size();
         continuous_starts = continuous_starts_in;
         y_train = y;
 
@@ -4387,7 +5229,7 @@ public:
             ? ((1ULL << (n_samples % 64)) - 1ULL)
             : ~0ULL;
 
-        gamma = (int)llround(lambda * (double)n_samples);
+        gamma = rounded_objective(lambda * (double)n_samples);
 
         use_deferral = use_deferral_flag;
         eta_defer = eta_defer_in;
@@ -4417,9 +5259,9 @@ public:
         use_multipass = use_multipass_flag;
         rule_list_mode = rule_list_mode_flag;
         majority_leaf_only = majority_leaf_only_flag;
-        cache_cheap_subproblems = cache_cheap_subproblems_flag;
+        cache_cheap_subproblems = cache_cheap_subproblems_flag || proxy_delta_ > 0 || sparsification_enabled_;
         proxy_style = proxy_style_in;
-        proxy_caching_enabled = proxy_caching_flag;
+        proxy_caching_enabled = proxy_caching_flag || proxy_delta_ > 0 || sparsification_enabled_;
 
         if (!proxy_caching_enabled) { // we need this
             proxy_caching_enabled = true;
@@ -4447,13 +5289,20 @@ public:
             col[(std::size_t)(n_words - 1)] &= tail_mask;
         }
 
+        if constexpr (regression_objective) {
+            num_classes = 1;
+            Y_bits.assign(1, Packed(n_words));
+            for (double value : y_train) {
+                if (!std::isfinite(value)) throw std::invalid_argument("Regression targets must be finite.");
+            }
+        } else {
         int y_max = 0;
         for (int i = 0; i < n_samples; ++i) {
             if (y[(std::size_t)i] < 0) {
                 throw std::runtime_error("y contains negative class labels.");
             }
 
-            y_max = std::max(y_max, y[(std::size_t)i]);
+            y_max = std::max(y_max, static_cast<int>(y[(std::size_t)i]));
         }
 
         num_classes = y_max + 1;
@@ -4487,11 +5336,15 @@ public:
         } else {
             k_at_depth.clear();
         }
+        }
 
         BBwrong = Packed((size_t)n_words);
         BBwrong.clear();
 
-        if (use_deferral) {
+#if defined(ARBORENUM_REGRESSION)
+        regression_bb_predictions_ = bb_pred;
+#endif
+        if (use_deferral && !regression_objective) {
             for (int i = 0; i < n_samples; ++i) {
                 const int bi =
                     bb_pred[(size_t)i];
@@ -4642,7 +5495,7 @@ public:
     // the majority of the following extraction methods are existing. we note this and skip to our contributions.
 
     // predict using the i-th tree in the Rashomon set: X_row_major: binary [n_samples][n_features]
-    std::vector<uint8_t> get_predictions(uint64_t tree_index, const std::vector<std::vector<uint8_t>>& X_row_major, const std::vector<int>& bb_pred_row = {}, int defer_placeholder = 99) const {
+    std::vector<OutputPrediction> get_predictions(uint64_t tree_index, const std::vector<std::vector<uint8_t>>& X_row_major, const std::vector<Prediction>& bb_pred_row = {}, Prediction defer_placeholder = 99) const {
         const std::size_t n_samples = X_row_major.size();
         if (n_samples == 0) return {};
 
@@ -4691,7 +5544,7 @@ public:
             tree = get_ith_tree(tree_index);
         }
 
-        std::vector<uint8_t> out(n_samples, 0);
+        std::vector<OutputPrediction> out(n_samples, 0);
 
         std::vector<int> idx(n_samples);
         for (std::size_t i = 0; i < n_samples; ++i) {
@@ -4704,14 +5557,14 @@ public:
 
 
     // get predictions from all trees in the rashomon set, as a vector of prediction vectors (one per tree).
-    std::vector<std::vector<uint8_t>> get_all_predictions(
-        const std::vector<std::vector<uint8_t>>& X_row_major, const std::vector<int>& bb_pred_row = {}, int defer_placeholder = 99
+    std::vector<std::vector<OutputPrediction>> get_all_predictions(
+        const std::vector<std::vector<uint8_t>>& X_row_major, const std::vector<Prediction>& bb_pred_row = {}, Prediction defer_placeholder = 99
     ) const {
         const uint64_t total =
             result
                 ? result->count_trees()
                 : 1ULL;
-        std::vector<std::vector<uint8_t>> all;
+        std::vector<std::vector<OutputPrediction>> all;
         all.reserve(static_cast<std::size_t>(total));
         for (uint64_t i = 0; i < total; ++i) {
             all.push_back(get_predictions(i, X_row_major, bb_pred_row, defer_placeholder));
@@ -4719,7 +5572,7 @@ public:
         return all;
     }
 
-    std::pair<std::vector<std::vector<int>>, std::vector<int>>
+    std::pair<std::vector<std::vector<int>>, std::vector<Prediction>>
     get_tree_paths(std::uint64_t tree_index) const {
         // single tree mode
         if (!result) {
@@ -4740,7 +5593,7 @@ public:
                 : build_best_tree_from_caches(root, depth_budget, root_pk);
 
             std::vector<std::vector<int>> paths;
-            std::vector<int> preds;
+            std::vector<Prediction> preds;
             std::vector<int> current;
             collect_paths(tree.get(), current, paths, preds);
             return {paths, preds};
@@ -4749,7 +5602,7 @@ public:
         // standard rashomon mode
         auto tree = get_ith_tree(tree_index);
         std::vector<std::vector<int>> paths;
-        std::vector<int> preds;
+        std::vector<Prediction> preds;
         std::vector<int> current;
 
         collect_paths(tree.get(), current, paths, preds);
@@ -4829,6 +5682,7 @@ public:
                 }
             }
 
+            if constexpr (regression_objective) refit_regression_leaves_(single_tree_refined_override_.get(), root);
             if (improvements_this_sweep == 0) break;
         }
 
@@ -4837,14 +5691,14 @@ public:
 
 
     // for individual decision tree algorithm
-    std::pair<std::vector<std::vector<int>>, std::vector<int>>
+    std::pair<std::vector<std::vector<int>>, std::vector<Prediction>>
         get_tree_paths_from_tree(const std::shared_ptr<PredNode>& tree) const {
             if (!tree) {
                 throw std::runtime_error("Null tree passed to get_tree_paths_from_tree.");
             }
 
             std::vector<std::vector<int>> paths;
-            std::vector<int> preds;
+            std::vector<Prediction> preds;
             std::vector<int> current;
 
             collect_paths(tree.get(), current, paths, preds);
@@ -4853,7 +5707,7 @@ public:
 
 
     // return (unnormalized_objective, normalized_objective) for the ith tree
-    std::pair<int, double> get_ith_tree_objective(std::uint64_t i) const {
+    std::pair<Objective, double> get_ith_tree_objective(std::uint64_t i) const {
         // if (!result) {
         //     throw std::runtime_error("No Rashomon trie has been constructed. Call fit() first.");
         // }
@@ -4861,7 +5715,7 @@ public:
             if (i != 0) throw std::out_of_range("Single-tree mode only supports i==0.");
 
             if (single_tree_refined_override_) {
-                const int refined = tree_training_objective_raw_(single_tree_refined_override_.get());
+                const Objective refined = tree_training_objective_raw_(single_tree_refined_override_.get());
                 return {refined, (double)refined / (double)n_samples};
             }
 
@@ -4877,12 +5731,19 @@ public:
             for (int w = 0; w < n_words - 1; ++w) root.w[(size_t)w] = ~0ULL;
             root.w[(size_t)(n_words - 1)] = tail_mask;
 
+            if constexpr (regression_objective) {
+                if (trained_depth_budget == 0) {
+                    const Objective objective = leaf_objective(root);
+                    return {objective, objective / n_samples};
+                }
+            }
+
             const PathKey& root_pk = empty_pk();
             const int8_t d = trained_depth_budget;
 
             const uint64_t km = key_of_subproblem(root, root_pk);
 
-            int best = std::numeric_limits<int>::max(); // it suffices to return the minimum among the root caches
+            Objective best = std::numeric_limits<Objective>::max(); // it suffices to return the minimum among the root caches
 
             // greedy
             if (auto itg = greedy_cache.find(K2{km, d}); itg != greedy_cache.end())
@@ -4899,7 +5760,7 @@ public:
                     best = std::min(best, it->second);
             }
 
-            if (best == std::numeric_limits<int>::max()) {
+            if (best == std::numeric_limits<Objective>::max()) {
                 throw std::runtime_error("Root objective not found in caches (greedy/lickety).");
             }
 
@@ -4914,7 +5775,7 @@ public:
         }
 
         std::uint64_t cum = 0;
-        int target_obj = -1;
+        Objective target_obj = -1;
 
         // hist is sorted by objective ascending
         for (const auto& e : result->hist) {
@@ -4937,7 +5798,7 @@ public:
     }
 
     // root LicketySPLIT objective with lookahead=1 so the user can compare frontier cuts to the reference solution
-    int root_lickety_objective_lookahead1(int depth_budget) {
+    Objective root_lickety_objective_lookahead1(Objective depth_budget) {
         if (n_samples == 0) {
             throw std::runtime_error("Model not fitted.");
         }
@@ -4966,7 +5827,7 @@ public:
         bool continuous_proxy_in_depthd_exact = false,
         bool continuous_proxy_in_greedy = false
     ) {
-        if (n_samples <= 0 || n_features <= 0 || n_words <= 0) {
+        if (n_samples <= 0 || (!regression_objective && n_features <= 0) || n_words <= 0) {
             throw std::runtime_error(
                 "anytime_continuous_rset requires prepared/fitted internal data."
             );
@@ -5066,7 +5927,7 @@ public:
         anytime_mode_active_ = true;
         anytime_lickety_first_split_cache.clear();
 
-        int P_root;
+        Objective P_root;
 
         if (lookahead_init < 0) {
             P_root = leaf_objective(root);
@@ -5087,7 +5948,23 @@ public:
             );
         }
 
-        const int eps_abs = rashomon_budget_(
+        if constexpr (regression_objective) {
+            if (lookahead_init >= 0) {
+                const auto reference = build_best_tree_from_caches(root, depth_budget, root_pk);
+                std::vector<const PredNode*> pending{reference.get()};
+                while (!pending.empty()) {
+                    const PredNode* node = pending.back();
+                    pending.pop_back();
+                    if (!node || node->feature < 0) continue;
+                    B_active.push_back(node->feature);
+                    pending.push_back(node->left.get());
+                    pending.push_back(node->right.get());
+                }
+                sort_unique_ints_inplace_(B_active);
+            }
+        }
+
+        const Objective eps_abs = rashomon_budget_(
             P_root,
             rashomon_mult,
             n_samples,
@@ -5130,7 +6007,7 @@ public:
         };
         publish();
 
-        int round_budget = eps_abs;
+        Objective round_budget = eps_abs;
         const auto apply_live_budget = [&] {
             round_budget = G_min ? G_min->budget : eps_abs;
             if (!live_round_budget) return;
@@ -5198,7 +6075,7 @@ public:
                     root_cpath,
                     B_active,
                     visited,
-                    round_budget < G_min->budget ? round_budget : INT_MAX
+                    round_budget < G_min->budget ? round_budget : std::numeric_limits<Objective>::max()
                 );
             }
 
@@ -5213,13 +6090,13 @@ public:
         anytime_lickety_first_split_cache.clear();
 
         // after all active-threshold refinement is done, we could consider increasing epsilon
-        int current_budget = eps_abs;
+        Objective current_budget = eps_abs;
 
         if (
             second_rashomon_mult > rashomon_mult &&
             !resource_limit_reached_()
         ) {
-            const int final_budget = rashomon_budget_(
+            const Objective final_budget = rashomon_budget_(
                 P_root,
                 second_rashomon_mult,
                 n_samples,
@@ -5237,7 +6114,7 @@ public:
                     current_multiplier + multiplier_step_size
                 );
 
-                int next_budget = rashomon_budget_(
+                Objective next_budget = rashomon_budget_(
                     P_root,
                     current_multiplier,
                     n_samples,
@@ -5247,7 +6124,7 @@ public:
                 // rounding can otherwise make a multiplier step produce
                 // the same integer budget.
                 if (next_budget <= current_budget) {
-                    next_budget = current_budget + 1;
+                    next_budget = regression_objective ? std::nextafter(static_cast<double>(current_budget), std::numeric_limits<double>::infinity()) : current_budget + 1;
                 }
 
                 next_budget = std::min(
@@ -5299,7 +6176,7 @@ public:
         // in auto mode, we will decide whether to do this or not
 
         bool proxy_refinement_stopped_early = false;
-        if (proxy_refinement_mode != 0) {
+        if (proxy_refinement_mode != 0 && !sparsification_enabled_) {
 
             const int old_lookahead_init = lookahead_init;
             const int final_refinement_lookahead = std::max<int>(lookahead_init, depth_budget - 2); // d-1 is optimal at depth d, but we never evaluate at the root again, always one split lower
@@ -5354,6 +6231,8 @@ public:
                 }
 
                 apply_live_budget();
+                if (proxy_delta_ > 0) expand_proxy_frontiers_(G_min, root, depth_budget);
+
                 lookahead_init = (int8_t)next_k;
 
                 if (proxy_style == 2) {
@@ -5388,7 +6267,7 @@ public:
                     root_cpath,
                     B_active,
                     visited,
-                    round_budget < G_min->budget ? round_budget : INT_MAX
+                    round_budget < G_min->budget ? round_budget : std::numeric_limits<Objective>::max()
                 );
 
                 ++automatic_refinement_round;
@@ -5413,6 +6292,8 @@ public:
                     << "down one lookahead level.\n";
 
                 apply_live_budget();
+                if (proxy_delta_ > 0) expand_proxy_frontiers_(G_min, root, depth_budget);
+
                 shift_proxy_strength_down_one_();
 
                 // same two cache clears as before
@@ -5430,7 +6311,7 @@ public:
                     root_cpath,
                     B_active,
                     visited,
-                    round_budget < G_min->budget ? round_budget : INT_MAX
+                    round_budget < G_min->budget ? round_budget : std::numeric_limits<Objective>::max()
                 );
 
                 publish();
@@ -5466,6 +6347,11 @@ public:
         restrict_proxy_in_greedy = old_restrict_greedy;
         anytime_mode_active_ = false;
 
+        if (proxy_delta_ > 0) {
+            expand_proxy_frontiers_(G_min, root, depth_budget);
+            decltype(proxy_trace_values_)().swap(proxy_trace_values_);
+        }
+
         result = G_min;
         obj_bound = current_budget;
         best_objective = P_root;
@@ -5485,8 +6371,8 @@ private:
         std::size_t nodes_checked = 0;
 
         const TreeTrieNode* worst_node = nullptr;
-        int worst_proxy_objective = -1;
-        int worst_minimum_objective = -1;
+        Objective worst_proxy_objective = -1;
+        Objective worst_minimum_objective = -1;
     };
 
     void collect_max_trie_node_proxy_gap_(
@@ -5512,13 +6398,13 @@ private:
         }
 
         if (
-            node->min_objective == std::numeric_limits<int>::max() ||
+            node->min_objective == std::numeric_limits<Objective>::max() ||
             node->min_objective <= 0
         ) {
             return;
         }
 
-        const int proxy_objective =
+        const Objective proxy_objective =
             proxy_objective_for_gap_(
                 mask,
                 depth,
@@ -5635,11 +6521,11 @@ private:
         const TreeTrieNode* worst_node = nullptr;
         int worst_feature = -1;
 
-        int worst_proxy_sum = 0;
-        int worst_minimum_sum = 0;
+        Objective worst_proxy_sum = 0;
+        Objective worst_minimum_sum = 0;
     };
 
-    int proxy_objective_for_gap_(
+    Objective proxy_objective_for_gap_(
         const Packed& mask,
         int8_t depth,
         const PathKey& pk,
@@ -5693,7 +6579,7 @@ private:
 
     void extend_result_to_budget_(
         int8_t depth_budget,
-        int new_budget,
+        Objective new_budget,
         const Packed& root,
         const PathKey& root_pk,
         const ContinuousPath& root_cpath,
@@ -5805,7 +6691,7 @@ private:
             const int8_t child_depth =
                 static_cast<int8_t>(depth - 1);
 
-            const int proxy_left =
+            const Objective proxy_left =
                 proxy_objective_for_gap_(
                     left_mask,
                     child_depth,
@@ -5813,7 +6699,7 @@ private:
                     *left_cpath
                 );
 
-            const int proxy_right =
+            const Objective proxy_right =
                 proxy_objective_for_gap_(
                     right_mask,
                     child_depth,
@@ -5821,23 +6707,23 @@ private:
                     *right_cpath
                 );
 
-            const int minimum_left =
+            const Objective minimum_left =
                 split.left->min_objective;
 
-            const int minimum_right =
+            const Objective minimum_right =
                 split.right->min_objective;
 
             if (
-                minimum_left == std::numeric_limits<int>::max() ||
-                minimum_right == std::numeric_limits<int>::max()
+                minimum_left == std::numeric_limits<Objective>::max() ||
+                minimum_right == std::numeric_limits<Objective>::max()
             ) {
                 continue;
             }
 
-            const int proxy_sum =
+            const Objective proxy_sum =
                 proxy_left + proxy_right;
 
-            const int minimum_sum =
+            const Objective minimum_sum =
                 minimum_left + minimum_right;
 
             if (minimum_sum <= 0) {
@@ -5885,12 +6771,12 @@ private:
         }
     }
 
-    int trie_node_gap_extension_budget_(
+    Objective trie_node_gap_extension_budget_(
         const std::shared_ptr<TreeTrieNode>& root_node,
         const Packed& root_mask,
         int8_t depth_budget,
-        int first_budget,
-        int current_budget,
+        Objective first_budget,
+        Objective current_budget,
         const PathKey& root_pk,
         const ContinuousPath& root_cpath
     ) {
@@ -5904,7 +6790,7 @@ private:
         if (
             root_node->min_objective <= 0 ||
             root_node->min_objective ==
-                std::numeric_limits<int>::max()
+                std::numeric_limits<Objective>::max()
         ) {
             throw std::runtime_error(
                 "The root graph has an invalid minimum objective."
@@ -5945,7 +6831,7 @@ private:
         if (
             raw_candidate >
             static_cast<long double>(
-                std::numeric_limits<int>::max()
+                std::numeric_limits<Objective>::max()
             )
         ) {
             throw std::overflow_error(
@@ -5953,7 +6839,7 @@ private:
             );
         }
 
-        const int candidate_budget =
+        const Objective candidate_budget =
             static_cast<int>(std::ceil(raw_candidate));
 
         std::cout
@@ -5999,12 +6885,12 @@ private:
         return std::max(first_budget, candidate_budget);
     }
 
-    int split_gap_extension_budget_(
+    Objective split_gap_extension_budget_(
         const std::shared_ptr<TreeTrieNode>& root_node,
         const Packed& root_mask,
         int8_t depth_budget,
-        int first_budget,
-        int current_budget,
+        Objective first_budget,
+        Objective current_budget,
         const PathKey& root_pk,
         const ContinuousPath& root_cpath
     ) {
@@ -6018,7 +6904,7 @@ private:
         if (
             root_node->min_objective <= 0 ||
             root_node->min_objective ==
-                std::numeric_limits<int>::max()
+                std::numeric_limits<Objective>::max()
         ) {
             throw std::runtime_error(
                 "The root graph has an invalid minimum objective."
@@ -6060,7 +6946,7 @@ private:
         if (
             raw_candidate >
             static_cast<long double>(
-                std::numeric_limits<int>::max()
+                std::numeric_limits<Objective>::max()
             )
         ) {
             throw std::overflow_error(
@@ -6068,7 +6954,7 @@ private:
             );
         }
 
-        const int candidate_budget =
+        const Objective candidate_budget =
             static_cast<int>(std::ceil(raw_candidate));
 
         std::cout
@@ -6129,14 +7015,14 @@ private:
         throw std::runtime_error("Prediction label too large for uint8_t mask.");
     }
 
-    static inline uint64_t class_to_mask_(int prediction) {
+    static inline uint64_t class_to_mask_(Prediction prediction) {
         if (prediction < 0 || prediction >= 64) {
             throw std::runtime_error(
                 "Reachable class masks support class labels 0 through 63."
             );
         }
 
-        return uint64_t(1) << prediction;
+        return uint64_t(1) << static_cast<unsigned>(prediction);
     }
 
     ReachableActions
@@ -6191,6 +7077,167 @@ private:
         }
 
         return out;
+    }
+
+    Objective prediction_budget_(Objective budget) const {
+        if (!result) {
+            throw std::runtime_error("No Rashomon trie has been constructed. Call fit() first.");
+        }
+        if (budget < -1 || budget > result->budget) {
+            throw std::invalid_argument("budget must be -1 or between 0 and the fitted Rashomon budget.");
+        }
+        return budget == -1 ? result->budget : budget;
+    }
+
+    template <typename Count>
+    using PredictionCounts = std::conditional_t<regression_objective, std::map<Prediction, Count>, std::vector<Count>>;
+
+    template <typename Count>
+    using PredictionHistogram = std::map<std::pair<Objective, Prediction>, Count>;
+
+    template <typename Count>
+    using PredictionHistogramCache = std::unordered_map<
+        const TreeTrieNode*, std::map<std::pair<Objective, bool>, PredictionHistogram<Count>>
+    >;
+
+    template <typename Count, typename ValueAt>
+    const PredictionHistogram<Count>& prediction_histogram_(
+        const TreeTrieNode* node,
+        Objective budget,
+        const ValueAt& value_at,
+        bool routed,
+        PredictionHistogramCache<Count>& cache
+    ) const {
+        budget = std::min(budget, node->budget);
+        auto [entry, inserted] = cache[node].try_emplace({budget, routed});
+        auto& hist = entry->second;
+        if (!inserted || node->min_objective > budget) {
+            return hist;
+        }
+
+        for (const auto& leaf : node->leaves) {
+            if (leaf.loss <= budget) {
+                auto& count = hist[{leaf.loss, routed ? leaf.prediction : DEFER_PREDICTION}];
+                count = count + Count(1);
+            }
+        }
+
+        for (const auto& split : node->splits) {
+            const auto* child = split.left.get();
+            const auto* sibling = split.right.get();
+            if (routed && !value_at(split.feature)) {
+                std::swap(child, sibling);
+            }
+            if (!child || !sibling || child->min_objective > budget ||
+                (regression_objective ? child->min_objective + sibling->min_objective > budget : sibling->min_objective > budget - child->min_objective)) {
+                continue;
+            }
+
+            const auto& child_hist = prediction_histogram_(
+                child, objective_remainder(budget, sibling->min_objective), value_at, routed, cache
+            );
+            const auto& sibling_hist = prediction_histogram_(
+                sibling, objective_remainder(budget, child->min_objective), value_at, false, cache
+            );
+            for (const auto& [child_key, child_count] : child_hist) {
+                const auto [objective, prediction] = child_key;
+                for (const auto& [sibling_key, sibling_count] : sibling_hist) {
+                    const Objective sibling_objective = sibling_key.first;
+                    if (regression_objective ? objective + sibling_objective > budget : sibling_objective > budget - objective) {
+                        break;
+                    }
+                    auto& count = hist[{objective + sibling_objective, prediction}];
+                    count = count + child_count * sibling_count;
+                }
+            }
+        }
+        return hist;
+    }
+
+    template <typename ValueAt>
+    bool prediction_disagrees_(
+        const TreeTrieNode* node,
+        Objective budget,
+        const ValueAt& value_at,
+        Prediction& first_class,
+        std::unordered_map<const TreeTrieNode*, Objective>& visited
+    ) const {
+        budget = std::min(budget, node->budget);
+        if (node->min_objective > budget) {
+            return false;
+        }
+        auto [entry, inserted] = visited.try_emplace(node, budget);
+        if (!inserted && entry->second >= budget) {
+            return false;
+        }
+        entry->second = budget;
+
+        for (const auto& leaf : node->leaves) {
+            if (leaf.loss > budget || leaf.prediction == DEFER_PREDICTION) {
+                continue;
+            }
+            if (first_class != DEFER_PREDICTION && leaf.prediction != first_class) {
+                return true;
+            }
+            first_class = leaf.prediction;
+        }
+
+        for (const auto& split : node->splits) {
+            const bool go_left = value_at(split.feature);
+            const auto* child = (go_left ? split.left : split.right).get();
+            const auto* sibling = (go_left ? split.right : split.left).get();
+            if (child && sibling && sibling->min_objective <= budget &&
+                prediction_disagrees_(
+                    child, feasible_child_budget_(child, budget, sibling->min_objective), value_at, first_class, visited
+                )) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    template <typename Count, typename ValueAt>
+    PredictionCounts<Count> prediction_counts_(Objective budget, const ValueAt& value_at) const {
+        PredictionHistogramCache<Count> cache;
+        const auto& hist = prediction_histogram_(
+            result.get(), budget, value_at, true, cache
+        );
+        PredictionCounts<Count> counts;
+#if !defined(ARBORENUM_REGRESSION)
+        counts.resize(static_cast<std::size_t>(num_classes) + 1);
+#endif
+        for (const auto& [key, count] : hist) {
+            const Prediction prediction = key.second;
+            if constexpr (regression_objective) counts[prediction] = counts[prediction] + count;
+            else {
+                const int index = prediction == DEFER_PREDICTION ? num_classes : prediction;
+                counts[index] = counts[index] + count;
+            }
+        }
+        return counts;
+    }
+
+    template <typename ValueAt>
+    bool has_disagreement_(Objective budget, const ValueAt& value_at) const {
+        Prediction first_class = DEFER_PREDICTION;
+        std::unordered_map<const TreeTrieNode*, Objective> visited;
+        return prediction_disagrees_(result.get(), budget, value_at, first_class, visited);
+    }
+
+    Objective training_prediction_budget_(int sample_idx, Objective budget) const {
+        budget = prediction_budget_(budget);
+        if (sample_idx < 0 || sample_idx >= n_samples) {
+            throw std::out_of_range("sample_idx is out of range.");
+        }
+        return budget;
+    }
+
+    Objective eval_prediction_budget_(std::size_t features, Objective budget) const {
+        budget = prediction_budget_(budget);
+        if (features != static_cast<std::size_t>(n_features)) {
+            throw std::invalid_argument("X has the wrong number of internal features.");
+        }
+        return budget;
     }
 
     bool training_value_(int sample_idx, int feat) const {
@@ -6389,6 +7436,22 @@ private:
     }
 
     void clear_fit_state_() {
+        clear_sparsification_state_();
+        if (!proxy_trace_values_.empty()) proxy_trace_values_.clear();
+#if defined(ARBORENUM_REGRESSION)
+        regression_importance_training_mask_.w.clear();
+        regression_lower_bounds_.clear();
+        regression_moments_cache_.clear();
+        regression_feature_buckets_.clear();
+        regression_movement_stats_.fill(0);
+        regression_bb_predictions_.clear();
+        regression_equivalence_ids_.clear();
+        regression_equivalence_scratch_.clear();
+        regression_equivalence_active_.clear();
+        regression_equivalence_count_ = 0;
+        regression_threshold_indices_.clear();
+#endif
+
         result.reset();
 
         X_bits.clear();
@@ -6400,6 +7463,7 @@ private:
         BBwrong = Packed();
 
         greedy_cache.clear();
+        if (sparsification_enabled_ && !proxy_split_indices_.empty()) proxy_split_indices_.clear();
         lickety_cache_k2.clear();
         lickety_cache_kla.clear();
         trie_cache.clear();
@@ -6443,9 +7507,12 @@ private:
 
     // a wrapper equivalent of ContinuousRSet
     // as seen just below, if we need to extend a graph to a bigger budget, we switch over to this construct_trie_extend method, which is an exact implementation of ContinuousRSet
-    shared_ptr<TreeTrieNode> construct_trie(const Packed& mask, int8_t depth, int budget, const PathKey& pk, const ContinuousPath& cpath = empty_continuous_path(), const std::vector<int>* active_features = nullptr, const std::function<void(const shared_ptr<TreeTrieNode>&)>& live_bind = {}) {
+    shared_ptr<TreeTrieNode> construct_trie(const Packed& mask, int8_t depth, Objective budget, const PathKey& pk, const ContinuousPath& cpath = empty_continuous_path(), const std::vector<int>* active_features = nullptr, const std::function<void(const shared_ptr<TreeTrieNode>&)>& live_bind = {}) {
         live_yield_();
         // testing something
+        if constexpr (regression_objective) {
+            if (subtree_lower_bound_(mask, depth, pk) > budget) return nullptr;
+        }
         auto node = std::make_shared<TreeTrieNode>();
         // force construct_trie_extend to treat this as an unsolved node.
         node->budget = -1;
@@ -6471,7 +7538,7 @@ private:
         shared_ptr<TreeTrieNode>& node,
         const Packed& mask,
         int8_t depth,
-        int budget,
+        Objective budget,
         const PathKey& pk,
         ContinuousPath& cpath,
         int8_t k_here,
@@ -6482,6 +7549,10 @@ private:
         const std::vector<int>* active_features
     ) {
         live_yield_();
+#if defined(ARBORENUM_REGRESSION)
+        RegressionFeatureScope regression_scope(*this, mask, start_idx, depth);
+#endif
+
         if (!active_features || start_idx >= end_idx) return;
 
         const auto active_lo = std::lower_bound(
@@ -6580,8 +7651,8 @@ private:
                 cpathR_local
             );
 
-            int lossL;
-            int lossR;
+            Objective lossL;
+            Objective lossR;
 
             // there is little need to look at the evaluated map here, we could just go to proxy completions
             // auto it_eval = evaluated.find(feat);
@@ -6649,13 +7720,16 @@ private:
                 evaluated[feat] = {lossL, lossR};
             }
 
-            const int total_proxy = lossL + lossR;
+            #if defined(ARBORENUM_REGRESSION)
+            regression_record_anchor_(mask, feat, lossL, lossR);
+#endif
+            const Objective total_proxy = lossL + lossR;
 
             bool feasible;
             if (!rule_list_mode) {
                 feasible = (total_proxy <= budget);
             } else {
-                feasible = !(lossL > budget - gamma && lossR > budget - gamma);
+                feasible = !(lossL > objective_remainder(budget, gamma) && lossR > objective_remainder(budget, gamma));
             }
 
             if (feasible) {
@@ -6721,7 +7795,7 @@ private:
                 continue;
             }
 
-            const int delta = total_proxy - budget;
+            const Objective delta = total_proxy - budget;
 
             if (delta <= 0) {
                 if (i <= mid - 1) Q.push_back({i, mid - 1});
@@ -6767,7 +7841,7 @@ private:
         int anchor_pos,
         int lo_pos,
         int hi_pos,
-        int delta
+        Objective delta
     ) const {
         if (delta <= 0) return lo_pos;
         if (lo_pos > hi_pos) return hi_pos + 1;
@@ -6791,7 +7865,7 @@ private:
             const int mid = lo + ((hi - lo) >> 1);
             const int feat = active_thresholds[(std::size_t)mid];
 
-            if (bit_distance_at_least_(mask, anchor_feat, feat, delta)) {
+            if (bit_distance_at_least_(mask, anchor_feat, feat, delta, regression_objective)) {
                 ans = mid;
                 hi = mid - 1;
             } else {
@@ -6799,6 +7873,9 @@ private:
             }
         }
 
+        if constexpr (regression_objective) {
+            while (ans <= hi_pos && !bit_distance_at_least_(mask, anchor_feat, active_thresholds[ans], delta)) ++ans;
+        }
         return ans;
     }
 
@@ -6808,7 +7885,7 @@ private:
         int anchor_pos,
         int lo_pos,
         int hi_pos,
-        int delta
+        Objective delta
     ) const {
         if (delta <= 0) return hi_pos;
         if (lo_pos > hi_pos) return lo_pos - 1;
@@ -6819,7 +7896,7 @@ private:
         const int probe_start = std::max(lo_pos, hi_pos - 1);
         for (int p = hi_pos; p >= probe_start; --p) {
             const int feat = active_thresholds[(std::size_t)p];
-            if (bit_distance_at_least_(mask, feat, anchor_feat, delta)) {
+            if (bit_distance_at_least_(mask, regression_objective ? anchor_feat : feat, regression_objective ? feat : anchor_feat, delta)) {
                 return p;
             }
         }
@@ -6832,7 +7909,7 @@ private:
             const int mid = lo + ((hi - lo) >> 1);
             const int feat = active_thresholds[(std::size_t)mid];
 
-            if (bit_distance_at_least_(mask, feat, anchor_feat, delta)) {
+            if (bit_distance_at_least_(mask, regression_objective ? anchor_feat : feat, regression_objective ? feat : anchor_feat, delta, regression_objective)) {
                 ans = mid;
                 lo = mid + 1;
             } else {
@@ -6840,6 +7917,9 @@ private:
             }
         }
 
+        if constexpr (regression_objective) {
+            while (ans >= lo_pos && !bit_distance_at_least_(mask, anchor_feat, active_thresholds[ans], delta)) --ans;
+        }
         return ans;
     }
 
@@ -6869,10 +7949,19 @@ private:
     }
 
     // we actually need to guarantee that there is a solution within the budget
+    static Objective feasible_child_budget_(const TreeTrieNode* child, Objective budget, Objective sibling) {
+        if constexpr (regression_objective) {
+            child->ensure_hist_built();
+            const auto end = std::upper_bound(child->hist.begin(), child->hist.end(), budget,
+                [sibling](Objective limit, const HistEntry& entry) { return limit < sibling + entry.obj; });
+            return end == child->hist.begin() ? -1 : std::prev(end)->obj;
+        } else return std::min(child->budget, budget - sibling);
+    }
+
     static bool children_have_feasible_pair_(
         const std::shared_ptr<TreeTrieNode>& left,
         const std::shared_ptr<TreeTrieNode>& right,
-        int parent_budget
+        Objective parent_budget
     ) {
         if (!node_has_solution_(left) ||
             !node_has_solution_(right)) {
@@ -6881,13 +7970,14 @@ private:
 
         if (
             left->min_objective ==
-                std::numeric_limits<int>::max() ||
+                std::numeric_limits<Objective>::max() ||
             right->min_objective ==
-                std::numeric_limits<int>::max()
+                std::numeric_limits<Objective>::max()
         ) {
             return false;
         }
 
+        if constexpr (regression_objective) return left->min_objective + right->min_objective <= parent_budget;
         return left->min_objective <=
             parent_budget - right->min_objective;
     }
@@ -6900,7 +7990,7 @@ private:
         shared_ptr<TreeTrieNode>& node,
         const Packed& mask,
         int8_t depth,
-        int budget,
+        Objective budget,
         const PathKey& pk,
         ContinuousPath& cpath,
         int8_t k_here,
@@ -6912,6 +8002,10 @@ private:
         const std::vector<int>* active_features
     ) {
         live_yield_();
+#if defined(ARBORENUM_REGRESSION)
+        RegressionFeatureScope regression_scope(*this, mask, start_idx, depth);
+#endif
+
         if (!node || !active_features || start_idx >= end_idx) return;
 
         // for (int f : *active_features) {
@@ -6975,8 +8069,8 @@ private:
         // invariant/assumption: only call on things within budget
         auto resolve_threshold = [&](
             int feat,
-            int lossL,
-            int lossR
+            Objective lossL,
+            Objective lossR
         ) -> bool {
             split_threshold_bits_(mask, feat, L, R);
 
@@ -7092,7 +8186,7 @@ private:
                 it_split->left = LR.first;
                 it_split->right = LR.second;
 
-                const int min_sum =
+                const Objective min_sum =
                     LR.first->min_objective + LR.second->min_objective;
 
                 if (min_sum < node->min_objective) {
@@ -7144,7 +8238,7 @@ private:
                     cpathR_local
                 );
 
-                const int lossL = proxy_completion_objective_(
+                const Objective lossL = proxy_completion_objective_(
                     L,
                     depth - 1,
                     k_here,
@@ -7152,7 +8246,7 @@ private:
                     *cpathLp
                 );
 
-                const int lossR = proxy_completion_objective_(
+                const Objective lossR = proxy_completion_objective_(
                     R,
                     depth - 1,
                     k_here,
@@ -7162,12 +8256,15 @@ private:
 
                 evaluated[feat] = {lossL, lossR};
 
-                const int total_proxy = lossL + lossR;
+                #if defined(ARBORENUM_REGRESSION)
+            regression_record_anchor_(mask, feat, lossL, lossR);
+#endif
+            const Objective total_proxy = lossL + lossR;
 
                 const bool feasible =
                     !rule_list_mode
                         ? (total_proxy <= budget)
-                        : !(lossL > budget - gamma && lossR > budget - gamma);
+                        : !(lossL > objective_remainder(budget, gamma) && lossR > objective_remainder(budget, gamma));
 
                 if (feasible) {
                     const bool resolved =
@@ -7242,15 +8339,18 @@ private:
             const int pos =
                 (int)std::distance(active_thresholds.begin(), pos_it);
 
-            const int lossL = it->second.first;
-            const int lossR = it->second.second;
-            const int total_proxy = lossL + lossR;
+            const Objective lossL = it->second.first;
+            const Objective lossR = it->second.second;
+            #if defined(ARBORENUM_REGRESSION)
+            regression_record_anchor_(mask, feat, lossL, lossR);
+#endif
+            const Objective total_proxy = lossL + lossR;
 
             bool feasible;
             if (!rule_list_mode) {
                 feasible = (total_proxy <= budget);
             } else {
-                feasible = !(lossL > budget - gamma && lossR > budget - gamma);
+                feasible = !(lossL > objective_remainder(budget, gamma) && lossR > objective_remainder(budget, gamma));
             }
 
             
@@ -7276,7 +8376,7 @@ private:
                 } 
             }
 
-            const int delta = total_proxy - budget;
+            const Objective delta = total_proxy - budget;
 
             if (delta <= 0) {
                 continue;
@@ -7328,13 +8428,13 @@ private:
                 );
 
                 if (it_split != node->splits.end()) {
-                    const int lossL = it_split->left
+                    const Objective lossL = it_split->left
                         ? it_split->left->min_objective
-                        : std::numeric_limits<int>::max();
+                        : std::numeric_limits<Objective>::max();
 
-                    const int lossR = it_split->right
+                    const Objective lossR = it_split->right
                         ? it_split->right->min_objective
-                        : std::numeric_limits<int>::max();
+                        : std::numeric_limits<Objective>::max();
 
 
                     // same deal
@@ -7410,8 +8510,8 @@ private:
                 cpathR_local
             );
 
-            int lossL;
-            int lossR;
+            Objective lossL;
+            Objective lossR;
 
             // auto it_eval = evaluated.find(feat);
 
@@ -7477,13 +8577,16 @@ private:
             evaluated[feat] = {lossL, lossR};
         
 
-            const int total_proxy = lossL + lossR;
+            #if defined(ARBORENUM_REGRESSION)
+            regression_record_anchor_(mask, feat, lossL, lossR);
+#endif
+            const Objective total_proxy = lossL + lossR;
 
             bool feasible;
             if (!rule_list_mode) {
                 feasible = (total_proxy <= budget);
             } else {
-                feasible = !(lossL > budget - gamma && lossR > budget - gamma);
+                feasible = !(lossL > objective_remainder(budget, gamma) && lossR > objective_remainder(budget, gamma));
             }
 
             if (feasible) {
@@ -7514,7 +8617,7 @@ private:
                 } 
             }
 
-            const int delta = total_proxy - budget;
+            const Objective delta = total_proxy - budget;
 
             if (delta <= 0) {
                 if (i <= mid - 1) {
@@ -7558,7 +8661,7 @@ private:
     }
 
     using RefineVisited =
-        std::unordered_map<TreeTrieNode*, int>;
+        std::unordered_map<TreeTrieNode*, Objective>;
 
     // an implementation of RefineGraph from the paper (appendix). as in the algorithm, it takes in the visited set, which starts out empty, so this recursive graph procedure can add to it.
     void RefineGraphDfs(
@@ -7569,7 +8672,7 @@ private:
         const ContinuousPath& cpath,
         const std::vector<int>& B_active,
         RefineVisited& visited,
-        int allowance = INT_MAX
+        Objective allowance = std::numeric_limits<Objective>::max()
     ) {
         
         if (!G) return;
@@ -7580,12 +8683,17 @@ private:
 
         // A shared node may be reached under different live allowances. Refine
         // it again only when the new path permits a larger search budget.
-        const int budget = std::min(G->budget, allowance);
-        const int visit_allowance = allowance == INT_MAX ? INT_MAX : budget;
+        const Objective budget = std::min(G->budget, allowance);
+        const Objective visit_allowance = allowance == std::numeric_limits<Objective>::max() ? allowance : budget;
         auto [seen, inserted] = visited.emplace(node_ptr, visit_allowance);
         if (!inserted) {
             if (seen->second >= visit_allowance) return;
             seen->second = visit_allowance;
+        }
+
+        if (proxy_delta_ > 0 && depth == proxy_delta_) {
+            G = proxy_frontier_(G, mask, depth, budget, pk, cpath);
+            return;
         }
 
         if (depth <= 0 || budget < 2 * gamma) {
@@ -7665,7 +8773,7 @@ private:
                     *cpathLp,
                     B_active,
                     visited,
-                    allowance == INT_MAX ? INT_MAX : (budget >= gamma ? budget - gamma : -1)
+                    allowance == std::numeric_limits<Objective>::max() ? allowance : (budget >= gamma ? objective_remainder(budget, gamma) : -1)
                 );
             }
 
@@ -7678,7 +8786,7 @@ private:
                     *cpathRp,
                     B_active,
                     visited,
-                    allowance == INT_MAX ? INT_MAX : (budget >= gamma ? budget - gamma : -1)
+                    allowance == std::numeric_limits<Objective>::max() ? allowance : (budget >= gamma ? objective_remainder(budget, gamma) : -1)
                 );
             }
 
@@ -7692,7 +8800,7 @@ private:
                 s.feature == anytime_lk1_feat;
 
             if (is_binary_feature || is_missing_anytime_lk1_feature) {
-                const int lossL = proxy_completion_objective_(
+                const Objective lossL = proxy_completion_objective_(
                     L,
                     depth - 1,
                     k_here,
@@ -7700,7 +8808,7 @@ private:
                     *cpathLp
                 );
 
-                const int lossR = proxy_completion_objective_(
+                const Objective lossR = proxy_completion_objective_(
                     R,
                     depth - 1,
                     k_here,
@@ -7740,7 +8848,7 @@ private:
                     s.left = LR.first;
                     s.right = LR.second;
 
-                    const int min_sum =
+                    const Objective min_sum =
                         s.left->min_objective +
                         s.right->min_objective;
 
@@ -7751,6 +8859,11 @@ private:
 
                 
             }
+        }
+
+        if (sparsification_enabled_ && sparsify_subproblem_(mask, depth)) {
+            G = sparsified_split_(G, mask, depth, budget, pk, cpath, k_here, &B_active);
+            return;
         }
 
         // now refine this OR node, using children that have already been updated.
@@ -7823,8 +8936,55 @@ private:
         const Packed& mask,
         int feat_a,
         int feat_b,
-        int delta
+        Objective delta,
+        bool conservative = false
     ) const {
+        if constexpr (regression_objective) {
+#if defined(ARBORENUM_REGRESSION)
+            const bool tighten = regression_continuous_kmeans_ && !conservative;
+            long double error = regression_movement_error_(mask, feat_a, feat_b, conservative,
+                tighten || use_deferral ? std::numeric_limits<long double>::infinity() : delta);
+            if (error < delta && !use_deferral) return false;
+            if (tighten) {
+                Packed before(n_words), after(n_words);
+                for (int word = 0; word < n_words; ++word) {
+                    before.w[word] = mask.w[word] & (feat_b > feat_a ? X_bits[feat_a].w[word] : ~X_bits[feat_a].w[word]);
+                    after.w[word] = mask.w[word] & (feat_b > feat_a ? X_bits[feat_b].w[word] : ~X_bits[feat_b].w[word]);
+                }
+                if (after.any()) {
+                    int child_depth = std::max<int>(0, trained_depth_budget - 1);
+                    Objective previous = std::numeric_limits<Objective>::max();
+                    if (auto* scope = regression_scope_(mask, feat_a)) {
+                        child_depth = std::max(0, scope->depth - 1);
+                        const auto& values = scope->anchors[feat_a - scope->first];
+                        previous = feat_b > feat_a ? values.first : values.second;
+                    }
+                    if (previous == std::numeric_limits<Objective>::max()) previous = leaf_objective(before);
+                    const Objective gain = subtree_lower_bound_(after, child_depth, empty_pk()) - previous;
+                    delta += std::max(Objective(0), gain);
+                }
+            }
+#endif
+            if (delta <= 0) return true;
+            if (use_deferral) {
+                long double extra = 0;
+                for (int word = 0; word < n_words; ++word) {
+                    uint64_t bits = mask.w[word] & (X_bits[feat_a].w[word] ^ X_bits[feat_b].w[word]);
+                    while (bits) {
+                        const int row = word * 64 + std::countr_zero(bits);
+                        const long double residual = y_train[row] - regression_bb_predictions_[row];
+                        extra += residual * residual + eta_defer;
+                        bits &= bits - 1;
+                    }
+                }
+                delta -= static_cast<Objective>(extra);
+            }
+#if defined(ARBORENUM_REGRESSION)
+            return error >= delta;
+#else
+            return false;
+#endif
+        }
         // need at least 0 moved samples is always true.
         if (delta <= 0) return true;
 
@@ -7876,7 +9036,7 @@ private:
     // returns the largest evaluated threshold index strictly less than i
     // used in some pruning discussed in the proxy section of the appendix
     inline int predecessor_eval_(
-        const std::map<int, std::pair<int,int>>& evaluated,
+        const std::map<int, std::pair<Objective,Objective>>& evaluated,
         int i
     ) const {
         auto it = evaluated.lower_bound(i);
@@ -7887,7 +9047,7 @@ private:
 
     // smallest strictly larger
     inline int successor_eval_(
-        const std::map<int, std::pair<int,int>>& evaluated,
+        const std::map<int, std::pair<Objective,Objective>>& evaluated,
         int j
     ) const {
         auto it = evaluated.upper_bound(j);
@@ -7895,27 +9055,27 @@ private:
         return it->first;
     }
 
-    inline int eval_left_(
-        const std::map<int, std::pair<int,int>>& evaluated,
+    inline Objective eval_left_(
+        const std::map<int, std::pair<Objective,Objective>>& evaluated,
         int feat
     ) const {
         return evaluated.at(feat).first;
     }
 
-    inline int eval_right_(
-        const std::map<int, std::pair<int,int>>& evaluated,
+    inline Objective eval_right_(
+        const std::map<int, std::pair<Objective,Objective>>& evaluated,
         int feat
     ) const {
         return evaluated.at(feat).second;
     }
 
     // if at budget, that is fine
-    inline bool violates_rashomon_bound_(int z, int budget) const {
+    inline bool violates_rashomon_bound_(Objective z, Objective budget) const {
         return z > budget;
     }
 
     // need to improve by gap to be within budget
-    inline int rashomon_gap_(int z, int budget) const {
+    inline Objective rashomon_gap_(Objective z, Objective budget) const {
         return z - budget;
     }
 
@@ -7925,7 +9085,7 @@ private:
         int end_idx,
         int u,
         int i,
-        int delta
+        Objective delta
     ) const {
         // return min k >= i such that distance(u,k) >= delta.
         // search interval is [i, end_idx).
@@ -7951,7 +9111,7 @@ private:
         while (lo <= hi) {
             const int mid = lo + ((hi - lo) >> 1);
 
-            if (bit_distance_at_least_(mask, u, mid, delta)) {
+            if (bit_distance_at_least_(mask, u, mid, delta, regression_objective)) {
                 ans = mid;
                 hi = mid - 1;
             } else {
@@ -7959,6 +9119,9 @@ private:
             }
         }
 
+        if constexpr (regression_objective) {
+            while (ans < end_idx && !bit_distance_at_least_(mask, u, ans, delta)) ++ans;
+        }
         return ans;
     }
 
@@ -7967,7 +9130,7 @@ private:
         int start_idx,
         int v,
         int j,
-        int delta
+        Objective delta
     ) const {
         // return max k <= j such that distance(k,v) >= delta.
         // search interval is [start_idx, j].
@@ -7979,7 +9142,7 @@ private:
         // Local probe: nearby thresholds often satisfy the movement condition.
         const int probe_start = std::max(start_idx, j - 1);
         for (int k = j; k >= probe_start; --k) {
-            if (bit_distance_at_least_(mask, k, v, delta)) {
+            if (bit_distance_at_least_(mask, regression_objective ? v : k, regression_objective ? k : v, delta)) {
                 return k;
             }
         }
@@ -7992,7 +9155,7 @@ private:
         while (lo <= hi) {
             const int mid = lo + ((hi - lo) >> 1);
 
-            if (bit_distance_at_least_(mask, mid, v, delta)) {
+            if (bit_distance_at_least_(mask, regression_objective ? v : mid, regression_objective ? mid : v, delta, regression_objective)) {
                 ans = mid;
                 lo = mid + 1;
             } else {
@@ -8000,13 +9163,16 @@ private:
             }
         }
 
+        if constexpr (regression_objective) {
+            while (ans >= start_idx && !bit_distance_at_least_(mask, v, ans, delta)) --ans;
+        }
         return ans;
     }
 
     // start_idx and end_idx are the fixed threshold boundaries of the continuous feature.
     // i and j are the current threshold indices for the interval being pruned.
     std::pair<int,int> shrink_interval_with_bound_bitvector_(
-        const std::map<int, std::pair<int,int>>& evaluated,
+        const std::map<int, std::pair<Objective,Objective>>& evaluated,
         const Packed& mask,
         int start_idx,
         int end_idx,
@@ -8014,7 +9180,7 @@ private:
         int j,
         int M_L,
         int M_R,
-        int budget
+        Objective budget
     ) const {
         // we will leverage the closest thing we evaluated before, and the closest thing we evaluated above.
         const int u = predecessor_eval_(evaluated, i);
@@ -8024,8 +9190,8 @@ private:
         // and the closest evaluated threshold to the right contributes a right side
         // whose sum already violates the budget, prune the whole interval, because we haven't even accounted for the points in the middle.
         if (u >= 0 && v >= 0) {
-            const int L_u = eval_left_(evaluated, u);
-            const int R_v = eval_right_(evaluated, v);
+            const Objective L_u = eval_left_(evaluated, u);
+            const Objective R_v = eval_right_(evaluated, v);
 
             if (violates_rashomon_bound_(L_u + R_v, budget)) {
                 return {1, 0};
@@ -8035,12 +9201,12 @@ private:
         // if predecessor itself violates, move the lower endpoint rightward
         // until enough active samples have changed sides.
         if (u >= 0) {
-            const int L_u = eval_left_(evaluated, u);
-            const int R_u = eval_right_(evaluated, u);
-            const int P_u = L_u + R_u;
+            const Objective L_u = eval_left_(evaluated, u);
+            const Objective R_u = eval_right_(evaluated, u);
+            const Objective P_u = L_u + R_u;
 
             if (violates_rashomon_bound_(P_u, budget)) {
-                const int delta = rashomon_gap_(P_u, budget);
+                const Objective delta = rashomon_gap_(P_u, budget);
                 // given a failed predecessor threshold u, and a current interval starting at i, 
                 // find the first threshold at or after i that is at least delta samples away from u
                 const int new_i = tighten_lower_bound_bitvector_(
@@ -8058,12 +9224,12 @@ private:
         // if successor itself violates, move the upper endpoint leftward
         // until enough active samples have changed sides.
         if (v >= 0) {
-            const int L_v = eval_left_(evaluated, v);
-            const int R_v = eval_right_(evaluated, v);
-            const int P_v = L_v + R_v;
+            const Objective L_v = eval_left_(evaluated, v);
+            const Objective R_v = eval_right_(evaluated, v);
+            const Objective P_v = L_v + R_v;
 
             if (violates_rashomon_bound_(P_v, budget)) {
-                const int delta = rashomon_gap_(P_v, budget);
+                const Objective delta = rashomon_gap_(P_v, budget);
 
                 const int new_j = tighten_upper_bound_bitvector_(
                     mask,
@@ -8103,7 +9269,7 @@ private:
         shared_ptr<TreeTrieNode>& node,
         const Packed& mask,
         int8_t depth,
-        int budget,
+        Objective budget,
         const PathKey& pk,
         ContinuousPath& cpath,
         int8_t k_here,
@@ -8113,6 +9279,10 @@ private:
         Packed& R
     ){
         live_yield_();
+#if defined(ARBORENUM_REGRESSION)
+        RegressionFeatureScope regression_scope(*this, mask, start_idx, depth);
+#endif
+
         // continuous threshold group is [start_idx, end_idx).
         // threshold columns are already binarized and monotone ordered.
         if (start_idx >= end_idx) return;
@@ -8213,8 +9383,8 @@ private:
                 cpathR_local
             );
 
-            int lossL;
-            int lossR;
+            Objective lossL;
+            Objective lossR;
 
             if (lookahead_init < 0) {
                 lossL = leaf_objective(L);
@@ -8242,13 +9412,16 @@ private:
 
             // evaluated[feat] = {lossL, lossR};
 
-            const int total_proxy = lossL + lossR;
+            #if defined(ARBORENUM_REGRESSION)
+            regression_record_anchor_(mask, feat, lossL, lossR);
+#endif
+            const Objective total_proxy = lossL + lossR;
 
             bool feasible;
             if (!rule_list_mode) {
                 feasible = (total_proxy <= budget);
             } else {
-                feasible = !(lossL > budget - gamma && lossR > budget - gamma);
+                feasible = !(lossL > objective_remainder(budget, gamma) && lossR > objective_remainder(budget, gamma));
             }
 
             if (feasible) {
@@ -8330,7 +9503,7 @@ private:
                 M_R = std::min(M_R, feat - 1);
             }
 
-            const int delta = total_proxy - budget;
+            const Objective delta = total_proxy - budget;
 
             if (delta <= 0) {
                 // this is only possible in rule-list mode, where infeasible means
@@ -8377,44 +9550,44 @@ private:
     // this is the iterative budget refinement covered in the appendix. the bulk of it is not novel.
     // returns left and right treetrienode. the left and right mask are constants, even as you recurse on construct_trie
     pair<shared_ptr<TreeTrieNode>, shared_ptr<TreeTrieNode>>
-    solve_siblings(int loss_l, int loss_r,
+    solve_siblings(Objective loss_l, Objective loss_r,
                const Packed& Lmask, const Packed& Rmask,
-               int budget, int8_t depth,
+               Objective budget, int8_t depth,
                const PathKey& pkL, const PathKey& pkR,
                const ContinuousPath& cpathL, const ContinuousPath& cpathR) {
         live_yield_();
-        int left_budget  = budget - loss_r;
+        Objective left_budget  = objective_remainder(budget, loss_r);
         shared_ptr<TreeTrieNode> left_node =
             (left_budget >= 0) ? construct_trie(Lmask, depth - 1, left_budget, pkL, cpathL)
                                : nullptr; // handles some potential issues with non-injective keys
-        int min_left = (left_node ? left_node->min_objective : numeric_limits<int>::max());
+        Objective min_left = (left_node ? left_node->min_objective : numeric_limits<Objective>::max());
 
-        int right_budget = (min_left == numeric_limits<int>::max()) ? -1 : (budget - min_left);
+        Objective right_budget = (min_left == numeric_limits<Objective>::max()) ? -1 : (objective_remainder(budget, min_left));
         shared_ptr<TreeTrieNode> right_node =
             (right_budget >= 0) ? construct_trie(Rmask, depth - 1, right_budget, pkR, cpathR)
                                 : nullptr;
-        int min_right = (right_node ? right_node->min_objective : numeric_limits<int>::max());
+        Objective min_right = (right_node ? right_node->min_objective : numeric_limits<Objective>::max());
 
         while (true) {
             live_yield_();
             bool improved = false;
 
-            int new_left_budget = (min_right == numeric_limits<int>::max()) ? -1 : (budget - min_right);
+            Objective new_left_budget = (min_right == numeric_limits<Objective>::max()) ? -1 : (objective_remainder(budget, min_right));
             if (new_left_budget > left_budget) {
                 left_budget = new_left_budget;
                 if (left_budget >= 0) {
                     left_node = construct_trie(Lmask, depth - 1, left_budget, pkL, cpathL);
-                    int new_min_left = left_node->min_objective;
+                    Objective new_min_left = left_node->min_objective;
                     if (new_min_left < min_left) min_left = new_min_left;
                 }
             }
 
-            int new_right_budget = (min_left == numeric_limits<int>::max()) ? -1 : (budget - min_left);
+            Objective new_right_budget = (min_left == numeric_limits<Objective>::max()) ? -1 : (objective_remainder(budget, min_left));
             if (new_right_budget > right_budget) {
                 right_budget = new_right_budget;
                 if (right_budget >= 0) {
                     right_node = construct_trie(Rmask, depth - 1, right_budget, pkR, cpathR);
-                    int new_min_right = right_node->min_objective;
+                    Objective new_min_right = right_node->min_objective;
                     if (new_min_right < min_right) { min_right = new_min_right; improved = true; }
                 }
             }
@@ -8427,14 +9600,14 @@ private:
 
     // this is solely for ableation study purposes - if practical we would subtract minobjective from the other side
     std::pair<std::shared_ptr<TreeTrieNode>, std::shared_ptr<TreeTrieNode>>
-    symmetric_single_pass(int loss_l, int loss_r,
+    symmetric_single_pass(Objective loss_l, Objective loss_r,
                  const Packed& Lmask, const Packed& Rmask,
-                 int budget, int8_t depth,
+                 Objective budget, int8_t depth,
                  const PathKey& pkL, const PathKey& pkR,
                  const ContinuousPath& cpathL, const ContinuousPath& cpathR) {
         live_yield_();
-        int left_budget  = budget - loss_r;
-        int right_budget = budget - loss_l;
+        Objective left_budget  = objective_remainder(budget, loss_r);
+        Objective right_budget = objective_remainder(budget, loss_l);
 
         std::shared_ptr<TreeTrieNode> left_node  = nullptr;
         std::shared_ptr<TreeTrieNode> right_node = nullptr;
@@ -8473,11 +9646,11 @@ private:
         int feature,
         shared_ptr<TreeTrieNode> left_node,
         shared_ptr<TreeTrieNode> right_node,
-        int loss_l,
-        int loss_r,
+        Objective loss_l,
+        Objective loss_r,
         const Packed& Lmask,
         const Packed& Rmask,
-        int budget,
+        Objective budget,
         int8_t depth,
         const PathKey& pkL,
         const PathKey& pkR,
@@ -8491,7 +9664,7 @@ private:
         auto solve_or_extend = [&](
             shared_ptr<TreeTrieNode>& node,
             const Packed& mask,
-            int node_budget,
+            Objective node_budget,
             const PathKey& pk,
             const ContinuousPath& cpath
         ) -> shared_ptr<TreeTrieNode> {
@@ -8537,22 +9710,22 @@ private:
             shared_ptr<TreeTrieNode>& second_node,
             const Packed& first_mask,
             const Packed& second_mask,
-            int first_loss,
-            int second_loss,
+            Objective first_loss,
+            Objective second_loss,
             const PathKey& first_pk,
             const PathKey& second_pk,
             const ContinuousPath& first_cpath,
             const ContinuousPath& second_cpath
         ) {
-            int first_budget = first_node
+            Objective first_budget = first_node
                 ? first_node->budget
-                : std::numeric_limits<int>::min();
+                : std::numeric_limits<Objective>::lowest();
 
-            int second_budget = second_node
+            Objective second_budget = second_node
                 ? second_node->budget
-                : std::numeric_limits<int>::min();
+                : std::numeric_limits<Objective>::lowest();
 
-            int new_first_budget = budget - second_loss;
+            Objective new_first_budget = objective_remainder(budget, second_loss);
 
             while (new_first_budget > first_budget) {
                 live_yield_();
@@ -8570,11 +9743,11 @@ private:
                     return;
                 }
 
-                const int first_cert =
+                const Objective first_cert =
                     std::min(first_loss, first_node->min_objective);
 
-                const int new_second_budget =
-                    budget - first_cert;
+                const Objective new_second_budget =
+                    objective_remainder(budget, first_cert);
 
                 if (new_second_budget > second_budget) {
                     second_budget = new_second_budget;
@@ -8591,11 +9764,11 @@ private:
                         return;
                     }
 
-                    const int second_cert =
+                    const Objective second_cert =
                         std::min(second_loss, second_node->min_objective);
 
                     new_first_budget =
-                        budget - second_cert;
+                        objective_remainder(budget, second_cert);
                 } else {
                     break;
                 }
@@ -8626,20 +9799,20 @@ private:
             return {nullptr, nullptr};
         }
 
-        const int left_budget = left_node->budget;
-        const int right_budget = right_node->budget;
+        const Objective left_budget = left_node->budget;
+        const Objective right_budget = right_node->budget;
 
-        const int best_left_estimate =
+        const Objective best_left_estimate =
             std::min(loss_l, left_node->min_objective);
 
-        const int best_right_estimate =
+        const Objective best_right_estimate =
             std::min(loss_r, right_node->min_objective);
 
-        const int new_left_budget =
-            budget - best_right_estimate;
+        const Objective new_left_budget =
+            objective_remainder(budget, best_right_estimate);
 
-        const int new_right_budget =
-            budget - best_left_estimate;
+        const Objective new_right_budget =
+            objective_remainder(budget, best_left_estimate);
 
         if (new_left_budget <= left_budget &&
             new_right_budget <= right_budget) {
@@ -8678,7 +9851,7 @@ private:
     }
 
     // the expected implementation of ContinuousRSet. here, we have active_thresholds (active_features) and directly extend a given node (or we can look up a better one if it exists).
-    shared_ptr<TreeTrieNode> construct_trie_extend(shared_ptr<TreeTrieNode> node, const Packed& mask, int8_t depth, int budget, const PathKey& pk, const ContinuousPath& cpath = empty_continuous_path(), const std::vector<int>* active_features = nullptr, bool launched_by_anytime = false, const std::function<void(const shared_ptr<TreeTrieNode>&)>& live_bind = {}) {
+    shared_ptr<TreeTrieNode> construct_trie_extend(shared_ptr<TreeTrieNode> node, const Packed& mask, int8_t depth, Objective budget, const PathKey& pk, const ContinuousPath& cpath = empty_continuous_path(), const std::vector<int>* active_features = nullptr, bool launched_by_anytime = false, const std::function<void(const shared_ptr<TreeTrieNode>&)>& live_bind = {}) {
         live_yield_();
         // if (!node) {
         //     return construct_trie(mask, depth, budget, pk, cpath,  active_features);
@@ -8709,6 +9882,13 @@ private:
                 : nullptr;
         }
 
+        if (proxy_delta_ > 0 && depth == proxy_delta_) {
+            return proxy_frontier_(node, mask, depth, budget, pk, cpath);
+        }
+
+        if constexpr (regression_objective) {
+            if (subtree_lower_bound_(mask, depth, pk) > budget) return nullptr;
+        }
         if (!node) { // no node was given and nothing was found in the cache if we were caching so how can i extend it
             // could call construct_trie, lets just make the node
             node = std::make_shared<TreeTrieNode>();
@@ -8719,9 +9899,13 @@ private:
         // under a smaller allowance. Query budgets are separate from capacity.
         node->budget = live_round_budget ? std::max(node->budget, budget) : budget;
 
+        if constexpr (regression_objective) {
+            const auto leaf = best_leaf_action(mask);
+            if (leaf.loss <= budget && node->leaves.empty()) node->add_leaf(leaf.prediction, leaf.loss);
+        } else {
         // add newly feasible leaves without duplicating existing predictions.
         {
-            std::unordered_set<int> existing_leaf_preds;
+            std::unordered_set<Prediction> existing_leaf_preds;
             existing_leaf_preds.reserve(node->leaves.size() * 2 + 4);
 
             for (const auto& leaf : node->leaves) {
@@ -8745,8 +9929,8 @@ private:
                 const int neg = n_sub - pos;
 
                 if (!majority_leaf_only) {
-                    const int cost0 = gamma + pos;
-                    const int cost1 = gamma + neg;
+                    const Objective cost0 = gamma + pos;
+                    const Objective cost1 = gamma + neg;
 
                     if (
                         cost0 <= budget &&
@@ -8765,7 +9949,7 @@ private:
                     }
                 } else {
                     const int best_c = (pos >= neg) ? 1 : 0;
-                    const int best_cost =
+                    const Objective best_cost =
                         gamma + std::min(pos, neg);
 
                     if (
@@ -8778,7 +9962,7 @@ private:
                 }
 
                 if (use_deferral && n_sub > 0) {
-                    const int defer_cost =
+                    const Objective defer_cost =
                         gamma
                         + defer_penalty_from_count_(n_sub)
                         + bb_wrong;
@@ -8806,7 +9990,7 @@ private:
                         const int mis =
                             n_sub - cnts[(size_t)c];
 
-                        const int cost =
+                        const Objective cost =
                             gamma + mis;
 
                         if (
@@ -8837,7 +10021,7 @@ private:
                     const int mis =
                         n_sub - best_cnt;
 
-                    const int best_cost =
+                    const Objective best_cost =
                         gamma + mis;
 
                     if (
@@ -8853,7 +10037,7 @@ private:
                     const int bb_wrong =
                         count_bb_wrong(mask);
 
-                    const int defer_cost =
+                    const Objective defer_cost =
                         gamma
                         + defer_penalty_from_count_(n_sub)
                         + bb_wrong;
@@ -8870,6 +10054,7 @@ private:
                     }
                 }
             }
+        }
         }
 
         if (depth == 0 || budget < 2 * gamma) {
@@ -8890,6 +10075,10 @@ private:
             : lookahead_init;
 
         
+        if (sparsification_enabled_ && sparsify_subproblem_(mask, depth)) {
+            return sparsified_split_(node, mask, depth, budget, pk, pi_cur, k_here, active_features);
+        }
+
         const int first_continuous_feature = continuous_starts.empty() ? n_features : continuous_starts[0];
         auto already_split = local_split_features_(node);
 
@@ -9007,7 +10196,7 @@ private:
                     cpathR_local
                 );
 
-                const int lossL = proxy_completion_objective_(
+                const Objective lossL = proxy_completion_objective_(
                     L,
                     depth - 1,
                     k_here,
@@ -9015,7 +10204,7 @@ private:
                     *cpathLp
                 );
 
-                const int lossR = proxy_completion_objective_(
+                const Objective lossR = proxy_completion_objective_(
                     R,
                     depth - 1,
                     k_here,
@@ -9059,7 +10248,7 @@ private:
                 it->left = LR.first;
                 it->right = LR.second;
 
-                const int min_sum = it->left->min_objective + it->right->min_objective;
+                const Objective min_sum = it->left->min_objective + it->right->min_objective;
                 if (min_sum < node->min_objective) {
                     node->min_objective = min_sum;
                 }
@@ -9088,7 +10277,7 @@ private:
                 pkRp = &pkR_local;
             }
 
-            int lossL, lossR;
+            Objective lossL, lossR;
 
             // to evaluate whether lossL+lossR is within budget (for non rule list mode), we can first handle an early pruning case
             if (lookahead_init < 0) {
@@ -9125,7 +10314,7 @@ private:
             if (!rule_list_mode) {
                 if (lossL + lossR > budget) continue; // approximation decision tree rashomon set
             } else {
-                if (lossL > budget - gamma && lossR > budget - gamma) continue; // exact rule list rashomon set
+                if (lossL > objective_remainder(budget, gamma) && lossR > objective_remainder(budget, gamma)) continue; // exact rule list rashomon set
             }
 
             
@@ -9190,7 +10379,7 @@ private:
         shared_ptr<TreeTrieNode>& node,
         const Packed& mask,
         int8_t depth,
-        int budget,
+        Objective budget,
         const PathKey& pk,
         ContinuousPath& cpath,
         int8_t k_here,
@@ -9201,6 +10390,10 @@ private:
         std::unordered_set<int>& already_split
     ){
         live_yield_();
+#if defined(ARBORENUM_REGRESSION)
+        RegressionFeatureScope regression_scope(*this, mask, start_idx, depth);
+#endif
+
         // continuous threshold group is [start_idx, end_idx).
         // threshold columns are already binarized and monotone ordered.
         if (start_idx >= end_idx) return;
@@ -9292,13 +10485,13 @@ private:
                             cpathR_local
                         );
 
-                        const int lossL = it->left
+                        const Objective lossL = it->left
                             ? it->left->min_objective
-                            : std::numeric_limits<int>::max();
+                            : std::numeric_limits<Objective>::max();
 
-                        const int lossR = it->right
+                        const Objective lossR = it->right
                             ? it->right->min_objective
-                            : std::numeric_limits<int>::max();
+                            : std::numeric_limits<Objective>::max();
 
                         auto LR = solve_siblings_extend(
                             node, feat,
@@ -9334,7 +10527,7 @@ private:
                         it->right = LR.second;
 
                         if (it->left && it->right) {
-                            const int min_sum =
+                            const Objective min_sum =
                                 it->left->min_objective + it->right->min_objective;
 
                             if (min_sum < node->min_objective) {
@@ -9411,8 +10604,8 @@ private:
                 cpathR_local
             );
 
-            int lossL;
-            int lossR;
+            Objective lossL;
+            Objective lossR;
 
             if (lookahead_init < 0) {
                 lossL = leaf_objective(L);
@@ -9440,13 +10633,16 @@ private:
 
             // evaluated[feat] = {lossL, lossR};
 
-            const int total_proxy = lossL + lossR;
+            #if defined(ARBORENUM_REGRESSION)
+            regression_record_anchor_(mask, feat, lossL, lossR);
+#endif
+            const Objective total_proxy = lossL + lossR;
 
             bool feasible;
             if (!rule_list_mode) {
                 feasible = (total_proxy <= budget);
             } else {
-                feasible = !(lossL > budget - gamma && lossR > budget - gamma);
+                feasible = !(lossL > objective_remainder(budget, gamma) && lossR > objective_remainder(budget, gamma));
             }
 
             if (feasible) {
@@ -9508,7 +10704,7 @@ private:
                 M_R = std::min(M_R, feat - 1);
             }
 
-            const int delta = total_proxy - budget;
+            const Objective delta = total_proxy - budget;
 
             if (delta <= 0) {
                 // this is only possible in rule-list mode, where infeasible means
@@ -9650,13 +10846,23 @@ private:
     }
 
     struct BestLeafAction {
-        int prediction = 0; // 0..C-1 or DEFER_PREDICTION
-        int loss = 0;
+        Prediction prediction = 0; // 0..C-1 or DEFER_PREDICTION
+        Objective loss = 0;
     };
 
     BestLeafAction best_leaf_action(
         const Packed& mask
     ) const {
+        if constexpr (regression_objective) {
+            const auto moments = regression_moments_(mask);
+            if (!moments.count) return BestLeafAction{0, 0};
+            BestLeafAction best{static_cast<Prediction>(moments.mean), gamma + static_cast<Objective>(moments.sse)};
+            if (use_deferral) {
+                const Objective deferred = gamma + defer_penalty_from_count_(moments.count) + count_bb_wrong(mask);
+                if (deferred < best.loss) best = BestLeafAction{DEFER_PREDICTION, deferred};
+            }
+            return best;
+        }
         if (num_classes == 2) {
             int n_sub = 0;
             int pos = 0;
@@ -9687,7 +10893,7 @@ private:
             }
 
             if (use_deferral) {
-                const int defer_loss =
+                const Objective defer_loss =
                     gamma
                     + defer_penalty_from_count_(n_sub)
                     + bb_wrong;
@@ -9708,7 +10914,7 @@ private:
             return BestLeafAction{0, 0};
         }
 
-        int best_pred = 0;
+        Prediction best_pred = 0;
         int best_cnt = -1;
 
         for (int c = 0; c < num_classes; ++c) {
@@ -9730,7 +10936,7 @@ private:
         if (use_deferral) {
             const int bb_wrong = count_bb_wrong(mask);
 
-            const int defer_loss =
+            const Objective defer_loss =
                 gamma
                 + defer_penalty_from_count_(n_sub)
                 + bb_wrong;
@@ -9744,7 +10950,7 @@ private:
         return best;
     }
 
-    int leaf_objective(const Packed& mask) const {
+    Objective leaf_objective(const Packed& mask) const {
         live_yield_();
         return best_leaf_action(mask).loss;
     }
@@ -9838,16 +11044,25 @@ private:
 
 
 
-    inline int defer_penalty_from_count_(int n_sub) const {
-        return static_cast<int>(
-            std::llround(
-                eta_defer * static_cast<double>(n_sub)
-            )
-        );
+    inline Objective defer_penalty_from_count_(int n_sub) const {
+        return rounded_objective(eta_defer * static_cast<double>(n_sub));
     }
 
-    inline int count_bb_wrong(const Packed& mask) const {
+    inline Objective count_bb_wrong(const Packed& mask) const {
         if (!use_deferral) return 0;
+        if constexpr (regression_objective) {
+            long double error = 0;
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = mask.w[word];
+                while (bits) {
+                    const int row = word * 64 + std::countr_zero(bits);
+                    const long double residual = y_train[row] - regression_bb_predictions_[row];
+                    error += residual * residual;
+                    bits &= bits - 1;
+                }
+            }
+            return static_cast<Objective>(error);
+        }
         return popcount_and(mask, BBwrong);
     }
 
@@ -9863,7 +11078,7 @@ private:
     }
 
     // prediction-only objective. Useful only when defer must be excluded.
-    inline int predict_leaf_objective_binary_from_counts(
+    inline Objective predict_leaf_objective_binary_from_counts(
         int n_sub,
         int pos
     ) const {
@@ -9871,7 +11086,7 @@ private:
         return gamma + std::min(pos, n_sub - pos);
     }
 
-    inline int leaf_objective_binary_from_counts(
+    inline Objective leaf_objective_binary_from_counts(
         int n_sub,
         int pos
     ) const {
@@ -9889,21 +11104,21 @@ private:
         );
     }
 
-    inline int leaf_objective_binary_from_counts(
+    inline Objective leaf_objective_binary_from_counts(
         int n_sub,
         int pos,
         int bb_wrong
     ) const {
         if (n_sub == 0) return 0;
 
-        const int predict_loss =
+        const Objective predict_loss =
             gamma + std::min(pos, n_sub - pos);
 
         if (!use_deferral) {
             return predict_loss;
         }
 
-        const int defer_loss =
+        const Objective defer_loss =
             gamma
             + defer_penalty_from_count_(n_sub)
             + bb_wrong;
@@ -9922,8 +11137,8 @@ private:
 
     // called the incumbent solution in the appendix
     struct ContinuousBestSplitResult {
-        int best_sum = std::numeric_limits<int>::max();          // feature-selection score
-        int best_cached_sum = std::numeric_limits<int>::max();   // objective-only candidate
+        Objective best_sum = std::numeric_limits<Objective>::max();          // feature-selection score
+        Objective best_cached_sum = std::numeric_limits<Objective>::max();   // objective-only candidate
         int best_feat = -1;
     };
 
@@ -10016,18 +11231,19 @@ private:
     }
 
     // best-search mode: equality is not useful, because we only need strict improvement.
-    inline bool violates_best_bound_(int z, int best) const {
+    inline bool violates_best_bound_(Objective z, Objective best) const {
         return z >= best;
     }
 
     // if z == best, we still need at least one active sample to move before
     // a neighboring threshold can possibly become strictly better.
-    inline int best_gap_(int z, int best) const {
-        return std::max(1, z - best);
+    inline Objective best_gap_(Objective z, Objective best) const {
+        if constexpr (regression_objective) return std::max(std::numeric_limits<double>::denorm_min(), static_cast<double>(z - best));
+        else return std::max(Objective(1), z - best);
     }
 
     std::pair<int,int> shrink_interval_with_best_bound_bitvector_(
-        const std::map<int, std::pair<int,int>>& evaluated,
+        const std::map<int, std::pair<Objective,Objective>>& evaluated,
         const Packed& mask,
         int start_idx,
         int end_idx,
@@ -10035,7 +11251,7 @@ private:
         int j,
         int M_L,
         int M_R,
-        int best
+        Objective best
     ) const {
         const int u = predecessor_eval_(evaluated, i);
         const int v = successor_eval_(evaluated, j);
@@ -10043,8 +11259,8 @@ private:
         // if predecessor-left plus successor-right already cannot strictly beat best,
         // then every threshold in the middle is hopeless.
         if (u >= 0 && v >= 0) {
-            const int L_u = eval_left_(evaluated, u);
-            const int R_v = eval_right_(evaluated, v);
+            const Objective L_u = eval_left_(evaluated, u);
+            const Objective R_v = eval_right_(evaluated, v);
 
             if (violates_best_bound_(L_u + R_v, best)) {
                 return {1, 0};
@@ -10054,12 +11270,12 @@ private:
         // if predecessor total cannot beat best, move lower endpoint right until
         // enough active samples have changed sides to make strict improvement possible.
         if (u >= 0) {
-            const int L_u = eval_left_(evaluated, u);
-            const int R_u = eval_right_(evaluated, u);
-            const int P_u = L_u + R_u;
+            const Objective L_u = eval_left_(evaluated, u);
+            const Objective R_u = eval_right_(evaluated, u);
+            const Objective P_u = L_u + R_u;
 
             if (violates_best_bound_(P_u, best)) {
-                const int delta = best_gap_(P_u, best);
+                const Objective delta = best_gap_(P_u, best);
 
                 const int new_i = tighten_lower_bound_bitvector_(
                     mask,
@@ -10076,12 +11292,12 @@ private:
         // if successor total cannot beat best, move upper endpoint left until
         // enough active samples have changed sides to make strict improvement possible.
         if (v >= 0) {
-            const int L_v = eval_left_(evaluated, v);
-            const int R_v = eval_right_(evaluated, v);
-            const int P_v = L_v + R_v;
+            const Objective L_v = eval_left_(evaluated, v);
+            const Objective R_v = eval_right_(evaluated, v);
+            const Objective P_v = L_v + R_v;
 
             if (violates_best_bound_(P_v, best)) {
-                const int delta = best_gap_(P_v, best);
+                const Objective delta = best_gap_(P_v, best);
 
                 const int new_j = tighten_upper_bound_bitvector_(
                     mask,
@@ -10138,7 +11354,7 @@ private:
         eval_feature(gf);
     }
 
-    int eval_with_lookahead_continuous(
+    Objective eval_with_lookahead_continuous(
         const Packed& mask,
         int8_t depth_budget,
         int8_t k,
@@ -10172,14 +11388,18 @@ private:
         ContinuousPath& cpath,
         int start_idx,
         int end_idx,
-        int current_best,
+        Objective current_best,
         ContinuousEvalMode eval_mode
     ) {
         LiveProxyScope live_proxy_scope(*this);
+#if defined(ARBORENUM_REGRESSION)
+        RegressionFeatureScope regression_scope(*this, mask, start_idx, depth_budget);
+#endif
+
         // unlike rashomon, if we are just current best at best, can prune. can also update current best
         ContinuousBestSplitResult out;
         out.best_sum = current_best;
-        out.best_cached_sum = std::numeric_limits<int>::max();
+        out.best_cached_sum = std::numeric_limits<Objective>::max();
         out.best_feat = -1;
 
         auto tightened = tighten_continuous_interval_from_path_(start_idx, end_idx, cpath);
@@ -10189,7 +11409,7 @@ private:
 
         if (start_idx >= end_idx) return out;
         
-        std::map<int, std::pair<int,int>> evaluated;
+        std::map<int, std::pair<Objective,Objective>> evaluated;
 
         // ContinuousPath q_cpath = materialize_continuous_path_(cpath);
         if ((int)cpath.size() != (int)continuous_starts.size()) {
@@ -10277,8 +11497,21 @@ private:
                 cpathR_local
             );
 
-            int lossL;
-            int lossR;
+            if constexpr (regression_objective) {
+                const Objective lower_left = subtree_lower_bound_(L, depth_budget - 1, *pkLp);
+                const Objective lower_right = subtree_lower_bound_(R, depth_budget - 1, *pkRp);
+                if (lower_left + lower_right >= out.best_sum) {
+                    const Objective delta = best_gap_(lower_left + lower_right, out.best_sum);
+                    const int a = tighten_upper_bound_bitvector_(mask, start_idx, feat, feat - 1, delta);
+                    const int b = tighten_lower_bound_bitvector_(mask, end_idx, feat, feat + 1, delta);
+                    if (i <= a) Q.push_back({i, a});
+                    if (b <= j) Q.push_back({b, j});
+                    continue;
+                }
+            }
+
+            Objective lossL;
+            Objective lossR;
 
             if (eval_mode == ContinuousEvalMode::Exact) {
                 if (depth_budget == 1) { // note that this is saying depth_budget-1 recursive call would give leaf objective, which is correct, it isn't that depth budget 1 is leaf.
@@ -10317,7 +11550,10 @@ private:
                 );
             }
 
-            const int sum = lossL + lossR;
+            #if defined(ARBORENUM_REGRESSION)
+            regression_record_anchor_(mask, feat, lossL, lossR);
+#endif
+            const Objective sum = lossL + lossR;
 
             evaluated[feat] = {lossL, lossR};
 
@@ -10353,7 +11589,7 @@ private:
 
             // we are bad, we can prune our neighbors
             if (sum >= out.best_sum) {
-                const int delta = best_gap_(sum, out.best_sum); // if we are equal, we must move at least one sample
+                const Objective delta = best_gap_(sum, out.best_sum); // if we are equal, we must move at least one sample
 
                 const int a = tighten_upper_bound_bitvector_(
                     mask,
@@ -10394,7 +11630,7 @@ private:
 
     // this is "licketysnip" with some lookahead. licketysnip with k (lookahead) 1 is what we evalaute in our paper.
     // using k >= depth_budget-1 recovers the optimal proxy that we use in our paper.
-    int generalized_lickety_split_continuous(
+    Objective generalized_lickety_split_continuous(
         const Packed& mask,
         int8_t depth_budget,
         int8_t k,
@@ -10448,9 +11684,9 @@ private:
             }
         }
 
-        const int leaf_loss = leaf_objective(mask);
+        const Objective leaf_loss = leaf_objective(mask);
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             if (cache_cheap_subproblems && proxy_caching_enabled) {
                 if (use_kla) {
                     lickety_cache_kla.emplace(keyla, leaf_loss);
@@ -10463,8 +11699,8 @@ private:
         }
 
         int best_feat = -1;
-        int best_sum = leaf_loss;
-        int best_cached_sum = std::numeric_limits<int>::max();
+        Objective best_sum = leaf_loss;
+        Objective best_cached_sum = std::numeric_limits<Objective>::max();
 
         Packed L(n_words), R(n_words), bestL(n_words), bestR(n_words);
 
@@ -10539,7 +11775,11 @@ private:
                 pkR_local
             );
 
-            const int left_loss = eval_with_lookahead_continuous(
+            if constexpr (regression_objective) {
+                if (!split_can_improve_(L, R, depth_budget - 1, std::min(best_sum, leaf_loss))) continue;
+            }
+
+            const Objective left_loss = eval_with_lookahead_continuous(
                 L,
                 depth_budget - 1,
                 child_k,
@@ -10547,7 +11787,7 @@ private:
                 pi_cur
             );
 
-            const int right_loss = eval_with_lookahead_continuous(
+            const Objective right_loss = eval_with_lookahead_continuous(
                 R,
                 depth_budget - 1,
                 child_k,
@@ -10555,7 +11795,7 @@ private:
                 pi_cur
             );
 
-            const int sum = left_loss + right_loss;
+            const Objective sum = left_loss + right_loss;
 
             if (sum < best_sum) {
                 best_sum = sum;
@@ -10575,13 +11815,14 @@ private:
             );
         }
 
-        int ans = leaf_loss;
+        Objective recorded_split = best_sum;
+        Objective ans = leaf_loss;
 
         int8_t k_recurse;
 
         ans = std::min(ans, best_sum);
 
-        if (best_cached_sum != std::numeric_limits<int>::max()) {
+        if (best_cached_sum != std::numeric_limits<Objective>::max()) {
             ans = std::min(ans, best_cached_sum);
         }
         
@@ -10603,6 +11844,7 @@ private:
                 }
             }
 
+            if (sparsification_index_enabled_ && ans == recorded_split) remember_proxy_split_(kmask, depth_budget, ans, best_feat, use_kla_cache() ? k : 0);
             return ans;
         } else {
             // styles 1/2: recursively cycle k, k-1, ..., 1, k.
@@ -10644,7 +11886,7 @@ private:
                 cpathR_local
             );
 
-            const int left_loss = generalized_lickety_split_continuous(
+            const Objective left_loss = generalized_lickety_split_continuous(
                 bestL,
                 next_depth,
                 k_recurse,
@@ -10652,7 +11894,7 @@ private:
                 *cpathLp
             );
 
-            const int right_loss = generalized_lickety_split_continuous(
+            const Objective right_loss = generalized_lickety_split_continuous(
                 bestR,
                 next_depth,
                 k_recurse,
@@ -10660,6 +11902,7 @@ private:
                 *cpathRp
             );
 
+            recorded_split = std::min(recorded_split, left_loss + right_loss);
             ans = std::min(ans, left_loss + right_loss);
             ans = std::min(ans, best_sum);
         }
@@ -10676,6 +11919,7 @@ private:
             }
         }
 
+        if (sparsification_index_enabled_ && ans == recorded_split) remember_proxy_split_(kmask, depth_budget, ans, best_feat, use_kla_cache() ? k : 0);
         return ans;
     }
 
@@ -10712,7 +11956,7 @@ private:
     }
 
     // just a wrapper for the optimal decision tree here. it calls the existing best-split selector with the correct lookahead
-    int depthd_exact_solver_cached_continuous(
+    Objective depthd_exact_solver_cached_continuous(
         const Packed& mask,
         int8_t depth_budget,
         const PathKey& pk,
@@ -10727,7 +11971,7 @@ private:
         const int8_t KTAG = depth_budget - 1;
 
         uint64_t kmask = 0;
-        int cached = 0;
+        Objective cached = 0;
 
         if (proxy_caching_enabled) {
             kmask = key_of_subproblem(mask, pk);
@@ -10737,10 +11981,19 @@ private:
             }
         }
 
+        if constexpr (regression_objective) {
+            if (depth_budget == 1 && !use_deferral) {
+                const auto result = regression_stump_(mask, proxy_features_for_(ProxyLoopKind::DepthDExact), true);
+                if (proxy_caching_enabled) cache_lickety_if_true_(kmask, 1, 0, result.obj, true);
+                if (sparsification_index_enabled_) remember_proxy_split_(kmask, depth_budget, result.obj, result.first_feat, use_kla_cache() ? KTAG : 0);
+                return result.obj;
+            }
+        }
+
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         if (num_classes == 2) {
             count_total_pos_bbwrong_binary(
@@ -10761,7 +12014,7 @@ private:
             leaf_loss = leaf_objective(mask);
         }
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             if (proxy_caching_enabled) {
                 cache_lickety_if_true_(
                     kmask,
@@ -10775,8 +12028,9 @@ private:
             return leaf_loss;
         }
 
-        int best_sum = leaf_loss;
-        int best_cached_sum = std::numeric_limits<int>::max();
+        Objective best_sum = leaf_loss;
+        int recorded_feature = -1;
+        Objective best_cached_sum = std::numeric_limits<Objective>::max();
 
         Packed L(n_words), R(n_words);
 
@@ -10818,6 +12072,7 @@ private:
 
             if (cres.best_feat >= 0 && cres.best_sum < best_sum) {
                 best_sum = cres.best_sum;
+                recorded_feature = cres.best_feat;
             }
 
             if (cres.best_cached_sum < best_cached_sum) {
@@ -10873,8 +12128,12 @@ private:
                 cpathR_local
             );
 
-            int left_best;
-            int right_best;
+            if constexpr (regression_objective) {
+                if (!split_can_improve_(L, R, depth_budget - 1, std::min(best_sum, leaf_loss))) continue;
+            }
+
+            Objective left_best;
+            Objective right_best;
 
             if (depth_budget == 1) {
                 left_best = leaf_objective(L);
@@ -10895,10 +12154,11 @@ private:
                 );
             }
 
-            const int sum = left_best + right_best;
+            const Objective sum = left_best + right_best;
 
             if (sum < best_sum) {
                 best_sum = sum;
+                recorded_feature = f;
             }
 
             update_cached_rollout_sum_if_available_(
@@ -10914,9 +12174,9 @@ private:
             );
         }
 
-        int ans = best_sum;
+        Objective ans = best_sum;
 
-        if (best_cached_sum != std::numeric_limits<int>::max()) {
+        if (best_cached_sum != std::numeric_limits<Objective>::max()) {
             ans = std::min(ans, best_cached_sum);
         }
 
@@ -10932,6 +12192,7 @@ private:
             );
         }
 
+        if (sparsification_index_enabled_ && ans == best_sum) remember_proxy_split_(kmask, depth_budget, ans, recorded_feature, use_kla_cache() ? KTAG : 0);
         return ans;
     }
 
@@ -10956,10 +12217,19 @@ private:
             }
         }
 
+        if constexpr (regression_objective) {
+            if (!use_deferral) {
+                const auto result = regression_stump_(mask, proxy_features_for_(ProxyLoopKind::DepthDExact), true);
+                if (proxy_caching_enabled) greedy_first_split_cache.emplace(key, result);
+                if (sparsification_index_enabled_) remember_proxy_split_(key.k, depth_budget, result.obj, result.first_feat, -2);
+                return result;
+            }
+        }
+
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         if (num_classes == 2) {
             count_total_pos_bbwrong_binary(
@@ -10980,17 +12250,18 @@ private:
             leaf_loss = leaf_objective(mask);
         }
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             GreedyObjFirstSplit out{leaf_loss, -1};
 
             if (proxy_caching_enabled) {
                 greedy_first_split_cache.emplace(key, out);
             }
 
+            if (sparsification_index_enabled_) remember_proxy_split_(key.k, depth_budget, out.obj, out.first_feat, -2);
             return out;
         }
 
-        int best_sum = leaf_loss;
+        Objective best_sum = leaf_loss;
         int best_feat = -1;
 
         Packed L(n_words), R(n_words);
@@ -11017,7 +12288,7 @@ private:
                 }
             }
 
-            const int sum = leaf_objective(L) + leaf_objective(R);
+            const Objective sum = leaf_objective(L) + leaf_objective(R);
 
             if (sum < best_sum) {
                 best_sum = sum;
@@ -11073,6 +12344,7 @@ private:
             greedy_first_split_cache.emplace(key, out);
         }
 
+        if (sparsification_index_enabled_) remember_proxy_split_(key.k, depth_budget, out.obj, out.first_feat, -2);
         return out;
     }
 
@@ -11080,6 +12352,108 @@ private:
         double score = -std::numeric_limits<double>::infinity();
         int feat = -1;
     };
+
+    GainSplitResult regression_score_splits_(const Packed& mask, int first, int end, bool continuous) const {
+        GainSplitResult best;
+        const auto total = regression_moments_(mask);
+        if (total.count < 2) return best;
+        const auto& allowed = proxy_features_for_(ProxyLoopKind::Greedy);
+        int left_count = 0;
+        long double left_sum = 0;
+#if defined(ARBORENUM_REGRESSION)
+        if (continuous) {
+            const int group = continuous_group_pos_for_threshold_(first);
+            const int origin = continuous_starts[group];
+            const auto& positions = regression_bucket_positions_(group);
+            const int width = end - first;
+            if (width > 4LL * total.count) {
+                const auto [feature, gain] = regression_sparse_score_(mask, first, end, total, allowed);
+                return {static_cast<double>(gain), feature};
+            }
+            regression_stump_counts_.assign(width, 0);
+            regression_stump_sums_.assign(width, 0);
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = mask.w[word];
+                while (bits) {
+                    const int row = word * 64 + std::countr_zero(bits);
+                    const int position = std::max(0, origin + positions[row] - first);
+                    if (position < width) {
+                        ++regression_stump_counts_[position];
+                        regression_stump_sums_[position] += static_cast<long double>(y_train[row]) - total.mean;
+                    }
+                    bits &= bits - 1;
+                }
+            }
+            for (int offset = 0; offset < width; ++offset) {
+                left_count += regression_stump_counts_[offset];
+                left_sum += regression_stump_sums_[offset];
+                const int feat = first + offset;
+                if (!left_count || left_count == total.count) continue;
+                if (!allowed.empty() && !std::binary_search(allowed.begin(), allowed.end(), feat)) continue;
+                const double score = static_cast<double>(left_sum * left_sum
+                    * (1.0L / left_count + 1.0L / (total.count - left_count)));
+                if (score > best.score) best = {score, feat};
+            }
+            return best;
+        }
+#endif
+        for (int feat = first; feat < end; ++feat) {
+            if (!continuous) {
+                left_count = 0;
+                left_sum = 0;
+            }
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = mask.w[word] & X_bits[feat].w[word];
+                if (continuous && feat > first) bits &= ~X_bits[feat - 1].w[word];
+                left_count += popcnt64(bits);
+                while (bits) {
+                    left_sum += y_train[word * 64 + std::countr_zero(bits)] - total.mean;
+                    bits &= bits - 1;
+                }
+            }
+            if (!left_count || left_count == total.count) continue;
+            if (!allowed.empty() && !std::binary_search(allowed.begin(), allowed.end(), feat)) continue;
+            const double score = static_cast<double>(left_sum * left_sum
+                * (1.0L / left_count + 1.0L / (total.count - left_count)));
+            if (score > best.score) best = {score, feat};
+        }
+        return best;
+    }
+
+    GainSplitResult regression_numerical_score_(int group, const std::vector<int>& rows) const {
+        GainSplitResult best;
+        if (rows.size() < 2) return best;
+        const auto& x = numerical_X_cols_for_greedy[group];
+        const auto& values = numerical_unique_values_for_greedy[group];
+        const auto& allowed = proxy_features_for_(ProxyLoopKind::Greedy);
+        RegressionMoments total;
+        for (int row : rows) total.add(y_train[row]);
+        long double left_sum = 0;
+        std::size_t i = 0;
+        auto cut = values.begin();
+        while (i < rows.size()) {
+            const auto value = x[rows[i]];
+            do {
+                left_sum += static_cast<long double>(y_train[rows[i]]) - total.mean;
+                ++i;
+            } while (i < rows.size() && x[rows[i]] == value);
+            if (i == rows.size()) break;
+            cut = std::lower_bound(cut, values.end(), value);
+            if (cut == values.end() || cut + 1 == values.end()) break;
+            int feat = continuous_starts[group] + static_cast<int>(cut - values.begin());
+            if (!allowed.empty()) {
+                const auto candidate = std::lower_bound(allowed.begin(), allowed.end(), feat);
+                if (candidate == allowed.end()) continue;
+                const int offset = *candidate - continuous_starts[group];
+                if (offset < 0 || offset + 1 >= static_cast<int>(values.size()) || values[offset] >= x[rows[i]]) continue;
+                feat = *candidate;
+            }
+            const double score = static_cast<double>(left_sum * left_sum * (1.0L / i + 1.0L / (rows.size() - i)));
+            if (score > best.score) best = {score, feat};
+        }
+        return best;
+    }
+
 
     inline double split_score_from_counts_binary_(
         int n,
@@ -11135,6 +12509,8 @@ private:
         int pos_total,
         int bb_wrong_total
     ) const {
+        if constexpr (regression_objective) return regression_score_splits_(mask, first_feat, end_feat, false);
+
         GainSplitResult best;
 
         if (first_feat >= end_feat) {
@@ -11195,14 +12571,14 @@ private:
                     bb_wrong_total -
                     left_bb_wrong;
 
-                const int left_loss =
+                const Objective left_loss =
                     leaf_objective_binary_from_counts(
                         nL,
                         posL,
                         left_bb_wrong
                     );
 
-                const int right_loss =
+                const Objective right_loss =
                     leaf_objective_binary_from_counts(
                         nR,
                         posR,
@@ -11241,6 +12617,8 @@ private:
         int pos_total,
         int bb_wrong_total
     ) const {
+        if constexpr (regression_objective) return regression_score_splits_(mask, start_idx, end_idx, true);
+
         GainSplitResult best;
 
         if (start_idx >= end_idx) return best;
@@ -11311,14 +12689,14 @@ private:
                     bb_wrong_total -
                     left_bb_wrong;
 
-                const int left_loss =
+                const Objective left_loss =
                     leaf_objective_binary_from_counts(
                         nL,
                         posL,
                         left_bb_wrong
                     );
 
-                const int right_loss =
+                const Objective right_loss =
                     leaf_objective_binary_from_counts(
                         nR,
                         posR,
@@ -11356,6 +12734,8 @@ private:
         int bb_wrong_total,
         const std::vector<int>& parent_counts
     ) const {
+        if constexpr (regression_objective) return regression_score_splits_(mask, first_feat, end_feat, false);
+
         GainSplitResult best;
 
         if (first_feat >= end_feat) {
@@ -11432,13 +12812,13 @@ private:
                     bb_wrong_total -
                     left_bb_wrong;
 
-                const int left_loss =
+                const Objective left_loss =
                     leaf_objective_multiclass_from_counts_(
                         left_counts,
                         left_bb_wrong
                     );
 
-                const int right_loss =
+                const Objective right_loss =
                     leaf_objective_multiclass_from_counts_(
                         right_counts,
                         right_bb_wrong
@@ -11475,6 +12855,8 @@ private:
         int bb_wrong_total,
         const std::vector<int>& parent_counts
     ) const {
+        if constexpr (regression_objective) return regression_score_splits_(mask, start_idx, end_idx, true);
+
         GainSplitResult best;
 
         if (start_idx >= end_idx) {
@@ -11589,13 +12971,13 @@ private:
                     bb_wrong_total -
                     left_bb_wrong;
 
-                const int left_loss =
+                const Objective left_loss =
                     leaf_objective_multiclass_from_counts_(
                         left_counts,
                         left_bb_wrong
                     );
 
-                const int right_loss =
+                const Objective right_loss =
                     leaf_objective_multiclass_from_counts_(
                         right_counts,
                         right_bb_wrong
@@ -11627,7 +13009,7 @@ private:
     
 
     // get the sorted lists of indices to do greedy more efficiently for large-scale problems
-    int greedy_numerical_entry_point(
+    Objective greedy_numerical_entry_point(
         const Packed& mask,
         int8_t depth_budget,
         const PathKey& pk
@@ -11744,6 +13126,8 @@ private:
         int bb_wrong_total,
         const std::vector<int>& parent_counts
     ) const {
+        if constexpr (regression_objective) return regression_numerical_score_(num_group, sorted_rows);
+
         GainSplitResult best;
         best.score = -std::numeric_limits<double>::infinity();
         best.feat = -1;
@@ -11894,14 +13278,14 @@ private:
                     const int right_bb_wrong =
                         bb_wrong_total - left_bb_wrong;
 
-                    const int left_loss =
+                    const Objective left_loss =
                         leaf_objective_binary_from_counts(
                             nL,
                             posL,
                             left_bb_wrong
                         );
 
-                    const int right_loss =
+                    const Objective right_loss =
                         leaf_objective_binary_from_counts(
                             nR,
                             posR,
@@ -11925,7 +13309,7 @@ private:
                     const int right_bb_wrong =
                         bb_wrong_total - left_bb_wrong;
 
-                    const int left_loss =
+                    const Objective left_loss =
                         leaf_objective_multiclass_from_counts_(
                             left_counts,
                             left_bb_wrong
@@ -11942,7 +13326,7 @@ private:
                             left_counts[(std::size_t)c];
                     }
 
-                    const int right_loss =
+                    const Objective right_loss =
                         leaf_objective_multiclass_from_counts_(
                             right_counts,
                             right_bb_wrong
@@ -12009,26 +13393,26 @@ private:
             - ((double)nR / (double)n_total) * right;
     }
 
-    int leaf_objective_multiclass_from_counts_(
+    Objective leaf_objective_multiclass_from_counts_(
         const std::vector<int>& counts,
         int bb_wrong
     ) const {
         int n = 0;
-        int best = 0;
+        Objective best = 0;
 
         for (int c : counts) {
             n += c;
-            best = std::max(best, c);
+            best = std::max(best, static_cast<Objective>(c));
         }
 
-        const int predict_loss =
+        const Objective predict_loss =
             gamma + (n - best);
 
         if (!use_deferral || n == 0) {
             return predict_loss;
         }
 
-        const int defer_loss =
+        const Objective defer_loss =
             gamma
             + defer_penalty_from_count_(n)
             + bb_wrong;
@@ -12077,7 +13461,7 @@ private:
 
     // the actual training with the numerical representation, called state here, now that we have it
     // this does use the special depth 1 solver to get the optimal split at depth 1 instead of information-gain selection
-    int train_greedy_continuous_numerical(
+    Objective train_greedy_continuous_numerical(
         const Packed& mask,
         int8_t depth_budget,
         const PathKey& pk,
@@ -12123,7 +13507,7 @@ private:
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         std::vector<int> parent_counts;
 
@@ -12148,7 +13532,7 @@ private:
             leaf_loss = leaf_objective(mask);
         }
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             if (
                 cache_cheap_subproblems &&
                 proxy_caching_enabled
@@ -12307,7 +13691,7 @@ private:
             right_state
         );
 
-        const int left_loss =
+        const Objective left_loss =
             train_greedy_continuous_numerical(
                 L,
                 depth_budget - 1,
@@ -12315,7 +13699,7 @@ private:
                 left_state
             );
 
-        const int right_loss =
+        const Objective right_loss =
             train_greedy_continuous_numerical(
                 R,
                 depth_budget - 1,
@@ -12323,10 +13707,10 @@ private:
                 right_state
             );
 
-        const int split_loss =
+        const Objective split_loss =
             left_loss + right_loss;
 
-        const int ans =
+        const Objective ans =
             std::min(
                 leaf_loss,
                 split_loss
@@ -12339,10 +13723,11 @@ private:
             );
         }
 
+        if (sparsification_index_enabled_ && ans == split_loss) remember_proxy_split_(kmask, depth_budget, ans, best.feat, -1);
         return ans;
     }
 
-    int depth1_numerical_solver_cached(
+    Objective depth1_numerical_solver_cached(
         const Packed& mask,
         const PathKey& pk,
         const NumericalGreedyState& state
@@ -12367,10 +13752,19 @@ private:
             }
         }
 
+        if constexpr (regression_objective) {
+            if (!use_deferral) {
+                const auto result = regression_stump_(mask, proxy_features_for_(ProxyLoopKind::Greedy), true);
+                if (proxy_caching_enabled) greedy_cache.emplace(key, result.obj);
+                if (sparsification_index_enabled_) remember_proxy_split_(kmask, DEPTH, result.obj, result.first_feat, -1);
+                return result.obj;
+            }
+        }
+
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         std::vector<int> parent_counts;
 
@@ -12407,7 +13801,7 @@ private:
         }
 
         // any split has at least two leaves.
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, DEPTH, pk, leaf_loss)) {
             if (
                 cache_cheap_subproblems &&
                 proxy_caching_enabled
@@ -12421,7 +13815,8 @@ private:
             return leaf_loss;
         }
 
-        int best_sum = leaf_loss;
+        Objective best_sum = leaf_loss;
+        int recorded_feature = -1;
 
         Packed L(n_words);
         Packed R(n_words);
@@ -12465,12 +13860,13 @@ private:
                 }
             }
 
-            const int sum =
+            const Objective sum =
                 leaf_objective(L) +
                 leaf_objective(R);
 
             if (sum < best_sum) {
                 best_sum = sum;
+                if (sparsification_index_enabled_) recorded_feature = f;
             }
         }
 
@@ -12497,7 +13893,7 @@ private:
         }
 
         for (int g = 0; g < G; ++g) {
-            const int candidate =
+            const Objective candidate =
                 depth1_numerical_feature_best_sum_(
                     g,
                     state.sorted_idx_by_num[
@@ -12507,10 +13903,12 @@ private:
                     pos,
                     bb_wrong,
                     parent_counts,
-                    best_sum
+                    best_sum,
+                    sparsification_index_enabled_ ? &recorded_feature : nullptr
                 );
 
             if (candidate < best_sum) {
+
                 best_sum = candidate;
             }
         }
@@ -12522,19 +13920,44 @@ private:
             );
         }
 
+        if (sparsification_index_enabled_) remember_proxy_split_(kmask, DEPTH, best_sum, recorded_feature, -1);
         return best_sum;
     } 
 
     // implementation of the fast scanning described in the appendix
-    int depth1_numerical_feature_best_sum_(
+    Objective depth1_numerical_feature_best_sum_(
         int num_group,
         const std::vector<int>& sorted_rows,
         int n_total,
         int pos_total,
         int bb_wrong_total,
         const std::vector<int>& parent_counts,
-        int incumbent
+        Objective incumbent,
+        int* recorded_feature = nullptr
     ) const {
+        if constexpr (regression_objective) {
+            const auto split = regression_numerical_score_(num_group, sorted_rows);
+            if (split.feat < 0) return incumbent;
+            Packed left(n_words), right(n_words);
+            const auto evaluate = [&](int feature) {
+                for (int word = 0; word < n_words; ++word) left.w[word] = right.w[word] = 0;
+                for (int row : sorted_rows) {
+                    auto& child = training_value_(row, feature) ? left : right;
+                    child.w[row >> 6] |= 1ULL << (row & 63);
+                }
+                if (!left.any() || !right.any()) return incumbent;
+                const Objective value = leaf_objective(left) + leaf_objective(right);
+                if (recorded_feature && value < incumbent) *recorded_feature = feature;
+                return std::min(incumbent, value);
+            };
+            if (!use_deferral) return evaluate(split.feat);
+            const auto& allowed = proxy_features_for_(ProxyLoopKind::Greedy);
+            for (int feature = continuous_starts[num_group]; feature < continuous_group_end_(num_group); ++feature) {
+                if (allowed.empty() || std::binary_search(allowed.begin(), allowed.end(), feature)) incumbent = evaluate(feature);
+            }
+            return incumbent;
+        }
+
         if (
             num_group < 0 ||
             num_group >= (int)continuous_starts.size()
@@ -12580,7 +14003,7 @@ private:
             );
         }
 
-        int best_sum = incumbent;
+        Objective best_sum = incumbent;
 
         int nL = 0;
         int posL = 0;
@@ -12695,7 +14118,7 @@ private:
                 continue;
             }
 
-            int sum = 0;
+            Objective sum = 0;
 
             const int right_bb_wrong =
                 bb_wrong_total - left_bb_wrong;
@@ -12707,14 +14130,14 @@ private:
                 const int posR =
                     pos_total - posL;
 
-                const int left_loss =
+                const Objective left_loss =
                     leaf_objective_binary_from_counts(
                         nL,
                         posL,
                         left_bb_wrong
                     );
 
-                const int right_loss =
+                const Objective right_loss =
                     leaf_objective_binary_from_counts(
                         nR,
                         posR,
@@ -12735,13 +14158,13 @@ private:
                         left_counts[(std::size_t)c];
                 }
 
-                const int left_loss =
+                const Objective left_loss =
                     leaf_objective_multiclass_from_counts_(
                         left_counts,
                         left_bb_wrong
                     );
 
-                const int right_loss =
+                const Objective right_loss =
                     leaf_objective_multiclass_from_counts_(
                         right_counts,
                         right_bb_wrong
@@ -12753,6 +14176,7 @@ private:
 
             if (sum < best_sum) {
                 best_sum = sum;
+                if (recorded_feature) *recorded_feature = feat;
             }
 
             i = j;
@@ -12762,7 +14186,7 @@ private:
     }
 
     // essentially the same greedy solver was in praxis; there is a subtle optimization we add (proxy section of the appendix)
-    int train_greedy_continuous(
+    Objective train_greedy_continuous(
         const Packed& mask,
         int8_t depth_budget,
         const PathKey& pk,
@@ -12793,7 +14217,7 @@ private:
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         std::vector<int> parent_counts;
 
@@ -12818,7 +14242,7 @@ private:
             leaf_loss = leaf_objective(mask);
         }
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             if (cache_cheap_subproblems && proxy_caching_enabled) {
                 greedy_cache.emplace(key, leaf_loss);
             }
@@ -12957,27 +14381,28 @@ private:
             cpathR_local
         );
 
-        const int left_loss = train_greedy_continuous(
+        const Objective left_loss = train_greedy_continuous(
             L,
             depth_budget - 1,
             *pkLp,
             *cpathLp
         );
 
-        const int right_loss = train_greedy_continuous(
+        const Objective right_loss = train_greedy_continuous(
             R,
             depth_budget - 1,
             *pkRp,
             *cpathRp
         );
 
-        const int split_loss = left_loss + right_loss;
-        const int ans = std::min(leaf_loss, split_loss);
+        const Objective split_loss = left_loss + right_loss;
+        const Objective ans = std::min(leaf_loss, split_loss);
 
         if (proxy_caching_enabled) {
             greedy_cache.emplace(key, ans);
         }
 
+        if (sparsification_index_enabled_ && ans == split_loss) remember_proxy_split_(kmask, depth_budget, ans, best.feat, -1);
         return ans;
     }
 
@@ -13018,7 +14443,7 @@ private:
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         std::vector<int> parent_counts;
 
@@ -13043,12 +14468,13 @@ private:
             leaf_loss = leaf_objective(mask);
         }
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             GreedyObjFirstSplit out{leaf_loss, -1};
             if (cache_cheap_subproblems && proxy_caching_enabled) {
                 greedy_first_split_cache.emplace(key, out);
             }
 
+            if (sparsification_index_enabled_) remember_proxy_split_(key.k, depth_budget, out.obj, out.first_feat, -2);
             return out;
         }
 
@@ -13139,6 +14565,7 @@ private:
                 greedy_first_split_cache.emplace(key, out);
             }
 
+            if (sparsification_index_enabled_) remember_proxy_split_(key.k, depth_budget, out.obj, out.first_feat, -2);
             return out;
         }
 
@@ -13151,6 +14578,7 @@ private:
                 greedy_first_split_cache.emplace(key, out);
             }
 
+            if (sparsification_index_enabled_) remember_proxy_split_(key.k, depth_budget, out.obj, out.first_feat, -2);
             return out;
         }
 
@@ -13184,28 +14612,29 @@ private:
             cpathR_local
         );
 
-        const int left_loss = train_greedy_continuous_with_first_split_(
+        const Objective left_loss = train_greedy_continuous_with_first_split_(
             L,
             depth_budget - 1,
             *pkLp,
             *cpathLp
         ).obj;
 
-        const int right_loss = train_greedy_continuous_with_first_split_(
+        const Objective right_loss = train_greedy_continuous_with_first_split_(
             R,
             depth_budget - 1,
             *pkRp,
             *cpathRp
         ).obj;
 
-        const int split_loss = left_loss + right_loss;
-        const int ans = std::min(leaf_loss, split_loss);
+        const Objective split_loss = left_loss + right_loss;
+        const Objective ans = std::min(leaf_loss, split_loss);
 
         GreedyObjFirstSplit out{ans, best.feat};
         if (proxy_caching_enabled) {
             greedy_first_split_cache.emplace(key, out); 
         }
 
+        if (sparsification_index_enabled_) remember_proxy_split_(key.k, depth_budget, out.obj, out.first_feat, -2);
         return out;
     }
 
@@ -13213,7 +14642,7 @@ private:
 
     // these are now existing binary algorithms - nothing new exists beyond this point. our contribution ends here.
 
-    int train_greedy(const Packed& mask, int8_t depth_budget, const PathKey& pk) {
+    Objective train_greedy(const Packed& mask, int8_t depth_budget, const PathKey& pk) {
         LiveProxyScope live_proxy_scope(*this);
         if (depth_budget == 0) {
             return leaf_objective(mask);
@@ -13234,7 +14663,7 @@ private:
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         if (num_classes == 2) {
             count_total_pos_bbwrong_binary(
@@ -13255,7 +14684,7 @@ private:
             leaf_loss = leaf_objective(mask);
         }
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             if (cache_cheap_subproblems && proxy_caching_enabled) {
                 greedy_cache.emplace(key, leaf_loss);
             }
@@ -13304,16 +14733,17 @@ private:
         PathKey pkL_local, pkR_local;
         make_child_pks_if_needed_(best_feat, pk, pkLp, pkRp, pkL_local, pkR_local);
 
-        int left_obj  = train_greedy(L, depth_budget - 1, *pkLp);
-        int right_obj = train_greedy(R, depth_budget - 1, *pkRp);
-        int split_obj = left_obj + right_obj;
+        Objective left_obj  = train_greedy(L, depth_budget - 1, *pkLp);
+        Objective right_obj = train_greedy(R, depth_budget - 1, *pkRp);
+        Objective split_obj = left_obj + right_obj;
 
-        int ans = min(leaf_loss, split_obj);
+        Objective ans = min(leaf_loss, split_obj);
         if (proxy_caching_enabled) greedy_cache.emplace(key, ans);
+        if (sparsification_index_enabled_ && ans == split_obj) remember_proxy_split_(kmask, depth_budget, ans, best_feat, -1);
         return ans;
     }
 
-    int eval_with_lookahead(const Packed& m, int depth, int k, const PathKey& pk) {
+    Objective eval_with_lookahead(const Packed& m, int depth, int k, const PathKey& pk) {
         LiveProxyScope live_proxy_scope(*this);
         if (k <= 0) return greedy_proxy_objective_(m, depth, pk);
         return generalized_lickety_split(m, depth, k, pk);
@@ -13342,7 +14772,7 @@ private:
         );
     }
 
-    int depth1_exact_solver_cached(const Packed& mask, const PathKey& pk) {
+    Objective depth1_exact_solver_cached(const Packed& mask, const PathKey& pk) {
         LiveProxyScope live_proxy_scope(*this);
         constexpr int8_t DEPTH = 1;
         constexpr int8_t KTAG  = 0;
@@ -13351,7 +14781,7 @@ private:
             should_route_continuous_lickety_depth1_to_binary_greedy_();
 
         uint64_t kmask = 0;
-        int cached;
+        Objective cached;
 
         if (proxy_caching_enabled) {
             kmask = key_of_subproblem(mask, pk);
@@ -13364,8 +14794,10 @@ private:
             }
         }
 
-        auto cache_depth1 = [&](int val, bool allow_cache) {
+        int recorded_feature = -1;
+        auto cache_depth1 = [&](Objective val, bool allow_cache) {
             if (!proxy_caching_enabled || !allow_cache) return;
+            if (sparsification_index_enabled_) remember_proxy_split_(kmask, DEPTH, val, recorded_feature, use_greedy_cache_for_depth1 ? -1 : (use_kla_cache() ? KTAG : 0));
 
             if (use_greedy_cache_for_depth1) {
                 greedy_cache.emplace(K2{kmask, DEPTH}, val);
@@ -13373,6 +14805,15 @@ private:
                 cache_lickety_if_true_(kmask, DEPTH, KTAG, val, /*allow_cache=*/true);
             }
         };
+
+        if constexpr (regression_objective) {
+            if (!use_deferral) {
+                const auto result = regression_stump_(mask, proxy_features_for_(ProxyLoopKind::DepthDExact), false);
+                recorded_feature = result.first_feat;
+                cache_depth1(result.obj, true);
+                return result.obj;
+            }
+        }
 
         if (num_classes == 2) {
             int n_sub = 0;
@@ -13386,7 +14827,7 @@ private:
                 bb_wrong_total
             );
 
-            const int leaf_loss =
+            const Objective leaf_loss =
                 leaf_objective_binary_from_counts(
                     n_sub,
                     pos_total,
@@ -13394,12 +14835,12 @@ private:
                 );
 
             // only cache cheap subproblems if flag enabled
-            if (leaf_loss <= 2 * gamma) {
+            if (leaf_is_optimal_(mask, DEPTH, pk, leaf_loss)) {
                 cache_depth1(leaf_loss, cache_cheap_subproblems);
                 return leaf_loss;
             }
 
-            int best_sum = std::numeric_limits<int>::max();
+            Objective best_sum = std::numeric_limits<Objective>::max();
 
             const Packed& Ypos = Y_bits[(size_t)1];
             const auto& feats = proxy_features_for_(ProxyLoopKind::DepthDExact);
@@ -13438,7 +14879,7 @@ private:
                 const int right_bb_wrong =
                     bb_wrong_total - left_bb_wrong;
 
-                const int sum =
+                const Objective sum =
                     leaf_objective_binary_from_counts(
                         left_n,
                         left_pos,
@@ -13453,6 +14894,7 @@ private:
 
                 if (sum < best_sum) {
                     best_sum = sum;
+                    recorded_feature = f;
                 }
             };
 
@@ -13463,8 +14905,8 @@ private:
                 for (int f : feats) eval_feature(f);
             }
 
-            int ans = leaf_loss;
-            if (best_sum != std::numeric_limits<int>::max()) {
+            Objective ans = leaf_loss;
+            if (best_sum != std::numeric_limits<Objective>::max()) {
                 ans = std::min(ans, best_sum);
             }
 
@@ -13472,15 +14914,15 @@ private:
             return ans;
         }
 
-        const int leaf_loss = leaf_objective(mask);
+        const Objective leaf_loss = leaf_objective(mask);
 
         // only cache cheap subproblems if flag enabled
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, DEPTH, pk, leaf_loss)) {
             cache_depth1(leaf_loss, cache_cheap_subproblems);
             return leaf_loss;
         }
 
-        int best_sum = std::numeric_limits<int>::max();
+        Objective best_sum = std::numeric_limits<Objective>::max();
 
         Packed L(n_words), R(n_words);
         const auto& feats = proxy_features_for_(ProxyLoopKind::DepthDExact);
@@ -13490,8 +14932,8 @@ private:
             andnot_bits(mask, X_bits[f], R);
             if (!L.any() || !R.any()) return;
 
-            const int sum = leaf_objective(L) + leaf_objective(R);
-            if (sum < best_sum) best_sum = sum;
+            const Objective sum = leaf_objective(L) + leaf_objective(R);
+            if (sum < best_sum) { best_sum = sum; recorded_feature = f; }
         };
 
         if (!should_restrict_proxy_features_(ProxyLoopKind::DepthDExact)) {
@@ -13500,8 +14942,8 @@ private:
             for (int f : feats) eval_feature(f);
         }
 
-        int ans = leaf_loss;
-        if (best_sum != std::numeric_limits<int>::max()) {
+        Objective ans = leaf_loss;
+        if (best_sum != std::numeric_limits<Objective>::max()) {
             ans = std::min(ans, best_sum);
         }
 
@@ -13510,23 +14952,50 @@ private:
     }
 
 
-    int depth2_special_solver_cached(const Packed& mask, const PathKey& pk){
+    Objective depth2_special_solver_cached(const Packed& mask, const PathKey& pk){
         LiveProxyScope live_proxy_scope(*this);
         constexpr int8_t DEPTH = 2;
         constexpr int8_t KTAG  = 1;
 
         uint64_t kmask = 0;
-        int cached;
+        Objective cached;
 
         if (proxy_caching_enabled) {
             kmask = key_of_subproblem(mask, pk);
             if (try_get_lickety_cached_(kmask, DEPTH, KTAG, cached)) return cached;
         }
 
+        if constexpr (regression_objective) {
+            Objective best = leaf_objective(mask);
+            int recorded_feature = -1;
+            if (!leaf_is_optimal_(mask, DEPTH, pk, best)) {
+                Packed left(n_words), right(n_words);
+                const auto evaluate = [&](int feature) {
+                    split_threshold_bits_(mask, feature, left, right);
+                    if (!left.any() || !right.any()) return;
+                    if (!split_can_improve_(left, right, 1, best)) return;
+                    const PathKey* left_pk = &empty_pk();
+                    const PathKey* right_pk = &empty_pk();
+                    PathKey left_path, right_path;
+                    make_child_pks_if_needed_(feature, pk, left_pk, right_pk, left_path, right_path);
+                    const Objective a = depth1_exact_solver_cached(left, *left_pk);
+                    if (a + subtree_lower_bound_(right, 1, empty_pk()) >= best) return;
+                    const Objective candidate = a + depth1_exact_solver_cached(right, *right_pk);
+                    if (candidate < best) { best = candidate; recorded_feature = feature; }
+                };
+                const auto& features = proxy_features_for_(ProxyLoopKind::DepthDExact);
+                if (features.empty()) for (int feature = 0; feature < n_features; ++feature) evaluate(feature);
+                else for (int feature : features) evaluate(feature);
+            }
+            if (proxy_caching_enabled) cache_lickety_if_true_(kmask, DEPTH, KTAG, best, true);
+            if (sparsification_index_enabled_) remember_proxy_split_(kmask, DEPTH, best, recorded_feature, use_kla_cache() ? KTAG : 0);
+            return best;
+        }
+
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         if (num_classes == 2) {
             count_total_pos_bbwrong_binary(
@@ -13547,14 +15016,15 @@ private:
             leaf_loss = leaf_objective(mask);
         }
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, DEPTH, pk, leaf_loss)) {
             if (proxy_caching_enabled) {
                 cache_lickety_if_true_(kmask, DEPTH, KTAG, leaf_loss,/*allow_cache=*/cache_cheap_subproblems);
             }
             return leaf_loss;
         }
 
-        int best_sum = std::numeric_limits<int>::max();
+        Objective best_sum = std::numeric_limits<Objective>::max();
+        int recorded_feature = -1;
 
         Packed L(n_words), R(n_words);
         const auto& feats = proxy_features_for_(ProxyLoopKind::DepthDExact);
@@ -13575,11 +15045,11 @@ private:
             PathKey pkL_local, pkR_local;
             make_child_pks_if_needed_(f, pk, pkLp, pkRp, pkL_local, pkR_local);
 
-            const int left_best  = depth1_exact_solver_cached(L, *pkLp);
-            const int right_best = depth1_exact_solver_cached(R, *pkRp);
-            const int sum = left_best + right_best;
+            const Objective left_best  = depth1_exact_solver_cached(L, *pkLp);
+            const Objective right_best = depth1_exact_solver_cached(R, *pkRp);
+            const Objective sum = left_best + right_best;
 
-            if (sum < best_sum) best_sum = sum;
+            if (sum < best_sum) { best_sum = sum; recorded_feature = f; }
         };
 
         if (!should_restrict_proxy_features_(ProxyLoopKind::DepthDExact)) {
@@ -13588,21 +15058,22 @@ private:
             for (int f : feats) eval_feature(f);
         }
 
-        int ans = leaf_loss;
-        if (best_sum != std::numeric_limits<int>::max()) ans = std::min(ans, best_sum);
+        Objective ans = leaf_loss;
+        if (best_sum != std::numeric_limits<Objective>::max()) ans = std::min(ans, best_sum);
 
         if (proxy_caching_enabled) cache_lickety_if_true_(kmask, DEPTH, KTAG, ans, /*allow_cache=*/true);
+        if (sparsification_index_enabled_ && ans == best_sum) remember_proxy_split_(kmask, DEPTH, ans, recorded_feature, use_kla_cache() ? KTAG : 0);
         return ans;
     }
 
-    int depth2_fixed_root_children_best_sum_bitvector_(
+    Objective depth2_fixed_root_children_best_sum_bitvector_(
         const Packed& rootL,
         const Packed& rootR,
         const std::vector<int>& feats,
-        int incumbent
+        Objective incumbent
     ) const {
-        const int leafL = leaf_objective(rootL);
-        const int leafR = leaf_objective(rootR);
+        const Objective leafL = leaf_objective(rootL);
+        const Objective leafR = leaf_objective(rootR);
 
         int bestL = leafL;
         int bestR = leafR;
@@ -13637,7 +15108,7 @@ private:
                     split_bits_count_left(rootL, X_bits[(std::size_t)f2], LL, LR, left_n);
 
                     if (left_n != 0 && left_n != nLroot) {
-                        const int candL =
+                        const Objective candL =
                             leaf_objective(LL) + leaf_objective(LR);
 
                         if (candL < bestL) {
@@ -13649,7 +15120,7 @@ private:
                     andnot_bits(rootL, X_bits[(std::size_t)f2], LR);
 
                     if (LL.any() && LR.any()) {
-                        const int candL =
+                        const Objective candL =
                             leaf_objective(LL) + leaf_objective(LR);
 
                         if (candL < bestL) {
@@ -13665,7 +15136,7 @@ private:
                     split_bits_count_left(rootR, X_bits[(std::size_t)f2], RL, RR, left_n);
 
                     if (left_n != 0 && left_n != nRroot) {
-                        const int candR =
+                        const Objective candR =
                             leaf_objective(RL) + leaf_objective(RR);
 
                         if (candR < bestR) {
@@ -13677,7 +15148,7 @@ private:
                     andnot_bits(rootR, X_bits[(std::size_t)f2], RR);
 
                     if (RL.any() && RR.any()) {
-                        const int candR =
+                        const Objective candR =
                             leaf_objective(RL) + leaf_objective(RR);
 
                         if (candR < bestR) {
@@ -13712,7 +15183,7 @@ private:
     }
 
 
-    int depthd_exact_solver_cached(const Packed& mask, int8_t depth_budget, const PathKey& pk) {
+    Objective depthd_exact_solver_cached(const Packed& mask, int8_t depth_budget, const PathKey& pk) {
         LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) return leaf_objective(mask);
         if (depth_budget == 1) return depth1_exact_solver_cached(mask, pk);
@@ -13723,7 +15194,7 @@ private:
 
 
         uint64_t kmask = 0;
-        int cached;
+        Objective cached;
 
         if (proxy_caching_enabled) {
             kmask = key_of_subproblem(mask, pk);
@@ -13733,7 +15204,7 @@ private:
         int n_sub = 0;
         int pos = 0;
         int bb_wrong = 0;
-        int leaf_loss = 0;
+        Objective leaf_loss = 0;
 
         if (num_classes == 2) {
             count_total_pos_bbwrong_binary(
@@ -13754,15 +15225,16 @@ private:
             leaf_loss = leaf_objective(mask);
         }
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             if (proxy_caching_enabled) {
                 cache_lickety_if_true_(kmask, DEPTH, KTAG, leaf_loss,/*allow_cache=*/cache_cheap_subproblems);
             }
             return leaf_loss;
         }
 
-        int best_sum = std::numeric_limits<int>::max();
-        int best_cached_sum = std::numeric_limits<int>::max();
+        Objective best_sum = std::numeric_limits<Objective>::max();
+        int recorded_feature = -1;
+        Objective best_cached_sum = std::numeric_limits<Objective>::max();
 
         Packed L(n_words), R(n_words);
         const auto& feats = proxy_features_for_(ProxyLoopKind::DepthDExact);
@@ -13783,11 +15255,15 @@ private:
             PathKey pkL_local, pkR_local;
             make_child_pks_if_needed_(f, pk, pkLp, pkRp, pkL_local, pkR_local);
 
-            const int left_best  = depthd_exact_solver_cached(L, depth_budget - 1, *pkLp);
-            const int right_best = depthd_exact_solver_cached(R, depth_budget - 1, *pkRp);
+            if constexpr (regression_objective) {
+                if (!split_can_improve_(L, R, depth_budget - 1, std::min(best_sum, leaf_loss))) return;
+            }
 
-            const int sum = left_best + right_best;
-            if (sum < best_sum) best_sum = sum;
+            const Objective left_best  = depthd_exact_solver_cached(L, depth_budget - 1, *pkLp);
+            const Objective right_best = depthd_exact_solver_cached(R, depth_budget - 1, *pkRp);
+
+            const Objective sum = left_best + right_best;
+            if (sum < best_sum) { best_sum = sum; recorded_feature = f; }
 
             update_cached_rollout_sum_if_available_(
                 best_cached_sum,
@@ -13808,28 +15284,29 @@ private:
             for (int f : feats) eval_feature(f);
         }
 
-        int ans = leaf_loss;
-        if (best_sum != std::numeric_limits<int>::max()) ans = std::min(ans, best_sum);
+        Objective ans = leaf_loss;
+        if (best_sum != std::numeric_limits<Objective>::max()) ans = std::min(ans, best_sum);
 
-        if (best_cached_sum != std::numeric_limits<int>::max()) {
+        if (best_cached_sum != std::numeric_limits<Objective>::max()) {
             ans = std::min(ans, best_cached_sum);
         }
 
         tighten_with_trie_min_if_available_(ans, kmask, depth_budget);
 
         if (proxy_caching_enabled) cache_lickety_if_true_(kmask, depth_budget, KTAG, ans, /*allow_cache=*/true);
+        if (sparsification_index_enabled_ && ans == best_sum) remember_proxy_split_(kmask, DEPTH, ans, recorded_feature, use_kla_cache() ? KTAG : 0);
         return ans;
     }
 
 
-    inline void cache_lickety_if_true_(uint64_t kmask, int8_t depth_budget, int8_t k, int val, bool allow_cache) {
+    inline void cache_lickety_if_true_(uint64_t kmask, int8_t depth_budget, int8_t k, Objective val, bool allow_cache) {
         if (!allow_cache) return;
         const bool use_kla = use_kla_cache();
         if (use_kla) lickety_cache_kla.emplace(KLA{kmask, depth_budget, k}, val);
         else         lickety_cache_k2.emplace(K2 {kmask, depth_budget},     val);
     }
 
-    inline bool try_get_lickety_cached_(uint64_t kmask, int8_t depth_budget, int8_t k, int& out_val) const {
+    inline bool try_get_lickety_cached_(uint64_t kmask, int8_t depth_budget, int8_t k, Objective& out_val) const {
         const bool use_kla = use_kla_cache();
         if (use_kla) {
             auto it = lickety_cache_kla.find(KLA{kmask, depth_budget, k});
@@ -13847,7 +15324,7 @@ private:
     inline bool try_get_trie_min_objective_(
         uint64_t kmask,
         int8_t depth_budget,
-        int& out_val
+        Objective& out_val
     ) const {
         if (!trie_cache_enabled) return false;
 
@@ -13855,41 +15332,41 @@ private:
         if (it == trie_cache.end()) return false;
         if (!it->second) return false;
 
-        const int v = it->second->min_objective;
-        if (v == std::numeric_limits<int>::max()) return false;
+        const Objective v = it->second->min_objective;
+        if (v == std::numeric_limits<Objective>::max()) return false;
 
         out_val = v;
         return true;
     }
 
     inline void tighten_with_trie_min_if_available_(
-        int& ans,
+        Objective& ans,
         uint64_t kmask,
         int8_t depth_budget
     ) const {
         if (!stronger_rollout) return;
 
-        int trie_min = 0;
+        Objective trie_min = 0;
         if (try_get_trie_min_objective_(kmask, depth_budget, trie_min)) {
             ans = std::min(ans, trie_min);
         }
     }
 
     inline void tighten_with_child_lickety_cache_sum_(
-        int& best_sum,
+        Objective& best_sum,
         const Packed& L,
         const Packed& R,
         int8_t child_depth,
         int8_t lookup_k,
         const PathKey& pkL,
         const PathKey& pkR,
-        int fallback_left,
-        int fallback_right
+        Objective fallback_left,
+        Objective fallback_right
     ) const {
         if (!stronger_rollout || !proxy_caching_enabled) return;
 
-        int left_val = fallback_left;
-        int right_val = fallback_right;
+        Objective left_val = fallback_left;
+        Objective right_val = fallback_right;
 
         bool have_left = false;
         bool have_right = false;
@@ -13906,20 +15383,20 @@ private:
     }
 
     inline void update_cached_rollout_sum_if_available_(
-        int& best_cached_sum,
+        Objective& best_cached_sum,
         const Packed& L,
         const Packed& R,
         int8_t child_depth,
         int8_t lookup_k,
         const PathKey& pkL,
         const PathKey& pkR,
-        int fallback_left,
-        int fallback_right
+        Objective fallback_left,
+        Objective fallback_right
     ) const {
         if (!stronger_rollout || !proxy_caching_enabled) return;
 
-        int left_val = fallback_left;
-        int right_val = fallback_right;
+        Objective left_val = fallback_left;
+        Objective right_val = fallback_right;
 
         bool have_left = false;
         bool have_right = false;
@@ -13936,7 +15413,7 @@ private:
     }
 
     // our modified lickety_split algorithm that is O(nk^2d^2). 
-    int lickety_split_k1(const Packed& mask, int8_t depth_budget, const PathKey& pk)
+    Objective lickety_split_k1(const Packed& mask, int8_t depth_budget, const PathKey& pk)
     {
         LiveProxyScope live_proxy_scope(*this);
         if (depth_budget == 0) return leaf_objective(mask);
@@ -13961,9 +15438,9 @@ private:
                 return it->second;
         }
 
-        const int leaf_loss = leaf_objective(mask);
+        const Objective leaf_loss = leaf_objective(mask);
 
-        if (leaf_loss <= 2 * gamma) {
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             if (cache_cheap_subproblems && proxy_caching_enabled) {
                 lickety_cache_k2.emplace(key2, leaf_loss);
             }
@@ -13971,8 +15448,8 @@ private:
         }
 
         int best_feat = -1;
-        int best_sum  = std::numeric_limits<int>::max();
-        int best_cached_sum = std::numeric_limits<int>::max();
+        Objective best_sum  = std::numeric_limits<Objective>::max();
+        Objective best_cached_sum = std::numeric_limits<Objective>::max();
 
         Packed L(n_words), R(n_words);
         Packed bestL(n_words), bestR(n_words);
@@ -13990,13 +15467,17 @@ private:
             PathKey pkL_local, pkR_local;
             make_child_pks_if_needed_(f, pk, pkLp, pkRp, pkL_local, pkR_local);
 
-            const int left_greedy =
+            if constexpr (regression_objective) {
+                if (!split_can_improve_(L, R, depth_budget - 1, std::min(best_sum, leaf_loss))) return;
+            }
+
+            const Objective left_greedy =
                 greedy_proxy_objective_(L, child_depth, *pkLp);
 
-            const int right_greedy =
+            const Objective right_greedy =
                 greedy_proxy_objective_(R, child_depth, *pkRp);
 
-            const int sum = left_greedy + right_greedy;
+            const Objective sum = left_greedy + right_greedy;
 
             if (sum < best_sum) {
                 best_sum = sum;
@@ -14036,9 +15517,10 @@ private:
             );
         }
 
-        int ans = leaf_loss;
+        Objective recorded_split = best_sum;
+        Objective ans = leaf_loss;
 
-        if (best_cached_sum != std::numeric_limits<int>::max()) {
+        if (best_cached_sum != std::numeric_limits<Objective>::max()) {
             ans = std::min(ans, best_cached_sum);
         }
 
@@ -14051,9 +15533,10 @@ private:
             PathKey pkL_local, pkR_local;
             make_child_pks_if_needed_(best_feat, pk, pkLp, pkRp, pkL_local, pkR_local);
 
-            const int left_loss  = lickety_split_k1(bestL, next_depth, *pkLp);
-            const int right_loss = lickety_split_k1(bestR, next_depth, *pkRp);
+            const Objective left_loss  = lickety_split_k1(bestL, next_depth, *pkLp);
+            const Objective right_loss = lickety_split_k1(bestR, next_depth, *pkRp);
 
+            recorded_split = std::min(recorded_split, left_loss + right_loss);
             ans = std::min(ans, left_loss + right_loss);
             ans = std::min(ans, best_sum);
         }
@@ -14063,11 +15546,12 @@ private:
         if (proxy_caching_enabled) {
             lickety_cache_k2.emplace(key2, ans);
         }
+        if (sparsification_index_enabled_ && ans == recorded_split) remember_proxy_split_(kmask, depth_budget, ans, best_feat, 0);
         return ans;
     }
 
     // a generalized lickety_split algorithm with a lookahead parameter k. we also support other proxy styles here (such as recursively applying split) that have the same flavor.
-    int generalized_lickety_split(const Packed& mask, int8_t depth_budget, int8_t k, const PathKey& pk) {
+    Objective generalized_lickety_split(const Packed& mask, int8_t depth_budget, int8_t k, const PathKey& pk) {
         LiveProxyScope live_proxy_scope(*this);
         // only do this call if also anytime is false to allow for proxy strength refinement
         if (!anytime_mode_active_ && k == 1 && lookahead_init == 1 && proxy_style == 0) {
@@ -14112,8 +15596,8 @@ private:
             }
         }
 
-        const int leaf_loss = leaf_objective(mask);
-        if (leaf_loss <= 2 * gamma) {
+        const Objective leaf_loss = leaf_objective(mask);
+        if (leaf_is_optimal_(mask, depth_budget, pk, leaf_loss)) {
             if (cache_cheap_subproblems && proxy_caching_enabled) {
                 if (use_kla) lickety_cache_kla.emplace(keyla, leaf_loss);
                 else         lickety_cache_k2.emplace(key2,  leaf_loss);
@@ -14122,8 +15606,8 @@ private:
         }
 
         int best_feat = -1;
-        int best_sum  = numeric_limits<int>::max();
-        int best_cached_sum = numeric_limits<int>::max();
+        Objective best_sum  = numeric_limits<Objective>::max();
+        Objective best_cached_sum = numeric_limits<Objective>::max();
 
         Packed L(n_words), R(n_words), bestL(n_words), bestR(n_words);
 
@@ -14140,13 +15624,17 @@ private:
             PathKey pkL_local, pkR_local;
             make_child_pks_if_needed_(f, pk, pkLp, pkRp, pkL_local, pkR_local);
 
-            const int left_loss =
+            if constexpr (regression_objective) {
+                if (!split_can_improve_(L, R, depth_budget - 1, std::min(best_sum, leaf_loss))) return;
+            }
+
+            const Objective left_loss =
                 eval_with_lookahead(L, depth_budget - 1, child_k, *pkLp);
 
-            const int right_loss =
+            const Objective right_loss =
                 eval_with_lookahead(R, depth_budget - 1, child_k, *pkRp);
 
-            const int sum = left_loss + right_loss;
+            const Objective sum = left_loss + right_loss;
 
             if (sum < best_sum) {
                 best_sum = sum;
@@ -14190,9 +15678,10 @@ private:
             andnot_bits(mask, X_bits[best_feat], bestR);
         }
 
-        int ans = leaf_loss;
+        Objective recorded_split = best_sum;
+        Objective ans = leaf_loss;
 
-        if (best_cached_sum != std::numeric_limits<int>::max()) {
+        if (best_cached_sum != std::numeric_limits<Objective>::max()) {
             ans = std::min(ans, best_cached_sum);
         }
 
@@ -14209,6 +15698,7 @@ private:
                 if (use_kla) lickety_cache_kla.emplace(keyla, ans);
                 else         lickety_cache_k2.emplace(key2,  ans);
             }
+            if (sparsification_index_enabled_ && ans == recorded_split) remember_proxy_split_(kmask, depth_budget, ans, best_feat, use_kla_cache() ? k : 0);
             return ans;
         } else {
             // styles 1/2: restart when it hits 0 (recursively applying SPLIT, so we're cycling k, k-1, k-2, ... 2 1 k)
@@ -14219,7 +15709,7 @@ private:
         if (best_feat >= 0) {
             const int next_depth = depth_budget - 1;
 
-            int left_loss, right_loss;
+            Objective left_loss, right_loss;
 
             const PathKey* pkLp = &empty_pk();
             const PathKey* pkRp = &empty_pk();
@@ -14228,6 +15718,7 @@ private:
 
             left_loss  = generalized_lickety_split(bestL, next_depth, k_recurse, *pkLp);
             right_loss = generalized_lickety_split(bestR, next_depth, k_recurse, *pkRp);
+            recorded_split = std::min(recorded_split, left_loss + right_loss);
             ans = std::min(ans, left_loss + right_loss); // do licketysplit and take the minimum of it and leaf, even if greedy doesn't perform better than the leaf.
             ans = std::min(ans, best_sum); // if greedy is allowed more features, or heuristic pruning happens, we never want to be worse than greedy
 
@@ -14240,12 +15731,17 @@ private:
             else lickety_cache_k2.emplace(key2,  ans);
         }
         
+        if (sparsification_index_enabled_ && ans == recorded_split) remember_proxy_split_(kmask, depth_budget, ans, best_feat, use_kla_cache() ? k : 0);
         return ans;
     }
 
-    int split_algorithm(const Packed& mask, int8_t depth_budget, int8_t k, const PathKey& pk) {
+    Objective split_algorithm(const Packed& mask, int8_t depth_budget, int8_t k, const PathKey& pk) {
         LiveProxyScope live_proxy_scope(*this);
         if (depth_budget <= 0) return leaf_objective(mask);
+        if constexpr (regression_objective) {
+            const Objective leaf = leaf_objective(mask);
+            if (leaf_is_optimal_(mask, depth_budget, pk, leaf)) return leaf;
+        }
         if (k > depth_budget - 1) k = depth_budget - 1; // same amount of computation is optimal
         if (k == depth_budget - 1) {
             return depthd_exact_proxy_objective_(mask, depth_budget, pk);
@@ -14262,7 +15758,7 @@ private:
         Packed L(n_words), R(n_words);
 
         int best_feat = -1;
-        int best_score = std::numeric_limits<int>::max();
+        Objective best_score = std::numeric_limits<Objective>::max();
 
         Packed bestL(n_words), bestR(n_words);
         PathKey bestPkL, bestPkR;
@@ -14281,9 +15777,12 @@ private:
             make_child_pks_if_needed_(f, pk, pkLp, pkRp, pkL_local, pkR_local);
 
             // choose the best split based on generalized_lickety_split at (d-1, k-1). with the strategy 3/4 (SPLIT algorithm), this is tracing out the splits that the SPLIT algorithm without postprocessing chose.
-            int left_score  = lickety_proxy_objective_(L, child_d, child_k, *pkLp);
-            int right_score = lickety_proxy_objective_(R, child_d, child_k, *pkRp);
-            int score = left_score + right_score;
+            if constexpr (regression_objective) {
+                if (!split_can_improve_(L, R, child_d, best_score)) return;
+            }
+            Objective left_score  = lickety_proxy_objective_(L, child_d, child_k, *pkLp);
+            Objective right_score = lickety_proxy_objective_(R, child_d, child_k, *pkRp);
+            Objective score = left_score + right_score;
 
             if (score < best_score) {
                 best_score = score;
@@ -14332,15 +15831,19 @@ private:
         // instead of recursing with a greedy tree, we apply postprocessing here.
         // we do optimal on the children because we chose a split that was already best for greedy completion (aka we are tracing out the top k splits of the SPLIT tree without postprocessing to then apply it)
         if (child_k <= 0) {
-            int left_cost  = depthd_exact_proxy_objective_(bestL, child_d, *pkLp);
-            int right_cost = depthd_exact_proxy_objective_(bestR, child_d, *pkRp);
-            return left_cost + right_cost;
+            Objective left_cost  = depthd_exact_proxy_objective_(bestL, child_d, *pkLp);
+            Objective right_cost = depthd_exact_proxy_objective_(bestR, child_d, *pkRp);
+            const Objective value = left_cost + right_cost;
+            if (sparsification_index_enabled_) remember_proxy_split_(key_of_subproblem(mask, pk), depth_budget, value, best_feat, -3 - k);
+            return value;
         }
 
         // otherwise recurse using split() itself to find the next split it made
-        int left_cost  = lickety_proxy_objective_(bestL, child_d, child_k, *pkLp);
-        int right_cost = lickety_proxy_objective_(bestR, child_d, child_k, *pkRp);
-        return left_cost + right_cost;
+        Objective left_cost  = lickety_proxy_objective_(bestL, child_d, child_k, *pkLp);
+        Objective right_cost = lickety_proxy_objective_(bestR, child_d, child_k, *pkRp);
+        const Objective value = left_cost + right_cost;
+        if (sparsification_index_enabled_) remember_proxy_split_(key_of_subproblem(mask, pk), depth_budget, value, best_feat, -3 - k);
+        return value;
     }
 
     int find_best_split_binary_known_counts(
@@ -14414,7 +15917,7 @@ private:
             return best_f;
         }
 
-        int best_sum = std::numeric_limits<int>::max();
+        Objective best_sum = std::numeric_limits<Objective>::max();
 
         auto eval_feature = [&](int f) {
             int left_n = 0;
@@ -14455,21 +15958,21 @@ private:
             const int right_bb_wrong =
                 bb_wrong_total - left_bb_wrong;
 
-            const int left_loss =
+            const Objective left_loss =
                 leaf_objective_binary_from_counts(
                     left_n,
                     left_pos,
                     left_bb_wrong
                 );
 
-            const int right_loss =
+            const Objective right_loss =
                 leaf_objective_binary_from_counts(
                     right_n,
                     right_pos,
                     right_bb_wrong
                 );
 
-            const int sum = left_loss + right_loss;
+            const Objective sum = left_loss + right_loss;
 
             if (sum < best_sum) {
                 best_sum = sum;
@@ -14518,6 +16021,9 @@ private:
 
     int find_best_split(const Packed& mask, bool use_entropy) const {
         LiveProxyScope live_proxy_scope(*this);
+#if defined(ARBORENUM_REGRESSION)
+        if (!use_deferral) return regression_score_splits_(mask, 0, n_features, false).feat;
+#endif
         if (num_classes == 2) {
             return find_best_split_binary(mask, use_entropy);
         }
@@ -14526,7 +16032,7 @@ private:
 
         Packed L(n_words);
 
-        if (use_entropy) {
+        if (use_entropy && !regression_objective) {
             // total class counts under mask
             std::vector<int> total_cnt((size_t)num_classes, 0);
             for (int c = 0; c < num_classes; ++c) {
@@ -14588,7 +16094,7 @@ private:
         } else {
             // minimize child leaf objectives: leaf_objective(L)+leaf_objective(R)
             int best_f = -1;
-            int best_sum = std::numeric_limits<int>::max();
+            Objective best_sum = std::numeric_limits<Objective>::max();
 
             Packed R(n_words);
             const auto& feats = proxy_features_for_(ProxyLoopKind::Greedy);
@@ -14606,7 +16112,7 @@ private:
                 for (int i = 0; i < n_words; ++i) R.w[i] = mask.w[i] & ~X_bits[f].w[i];
                 R.w[n_words-1] &= tail_mask;
 
-                const int sum = leaf_objective(L) + leaf_objective(R);
+                const Objective sum = leaf_objective(L) + leaf_objective(R);
                 if (sum < best_sum) { best_sum = sum; best_f = f; }
             };
 
@@ -14638,7 +16144,7 @@ private:
         int errors = std::numeric_limits<int>::max();
     };
 
-    int predict_training_sample_from_prednode_(const PredNode* node, int row) const {
+    Prediction predict_training_sample_from_prednode_(const PredNode* node, int row) const {
         const PredNode* cur = node;
         while (cur && cur->feature >= 0) {
             cur = training_value_(row, cur->feature)
@@ -14668,7 +16174,15 @@ private:
              + count_prednode_leaves_(node->right.get());
     }
 
-    int tree_training_mistakes_(const PredNode* tree) const {
+    Objective tree_training_mistakes_(const PredNode* tree) const {
+        if constexpr (regression_objective) {
+            long double error = 0;
+            for (int row = 0; row < n_samples; ++row) {
+                const long double residual = y_train[row] - predict_training_sample_from_prednode_(tree, row);
+                error += residual * residual;
+            }
+            return static_cast<Objective>(error);
+        }
         int mistakes = 0;
         for (int row = 0; row < n_samples; ++row) {
             mistakes += (
@@ -14679,9 +16193,22 @@ private:
         return mistakes;
     }
 
-    int tree_training_objective_raw_(const PredNode* tree) const {
+    Objective tree_training_objective_raw_(const PredNode* tree) const {
         return tree_training_mistakes_(tree)
              + gamma * count_prednode_leaves_(tree);
+    }
+
+    void refit_regression_leaves_(PredNode* node, const Packed& mask) const {
+        if (!node) return;
+        if (node->feature < 0) {
+            node->prediction = best_leaf_action(mask).prediction;
+            return;
+        }
+        Packed left(n_words), right(n_words);
+        and_bits(mask, X_bits[node->feature], left);
+        andnot_bits(mask, X_bits[node->feature], right);
+        refit_regression_leaves_(node->left.get(), left);
+        refit_regression_leaves_(node->right.get(), right);
     }
 
     void collect_tao_nodes_with_masks_(
@@ -14773,6 +16300,44 @@ private:
     bool optimize_tao_node_(PredNode* node, const Packed& node_mask) const {
         if (!node || node->feature < 0 || !node->left || !node->right) return false;
 
+        if constexpr (regression_objective) {
+            std::vector<std::pair<int, long double>> differences;
+            differences.reserve(node_mask.count());
+            long double baseline = 0;
+            long double total_delta = 0;
+            long double current = 0;
+            for (int word = 0; word < n_words; ++word) {
+                uint64_t bits = node_mask.w[word];
+                while (bits) {
+                    const int row = word * 64 + std::countr_zero(bits);
+                    const long double target = y_train[row];
+                    const long double left = target - predict_training_sample_from_prednode_(node->left.get(), row);
+                    const long double right = target - predict_training_sample_from_prednode_(node->right.get(), row);
+                    const long double delta = left * left - right * right;
+                    differences.emplace_back(row, delta);
+                    baseline += right * right;
+                    total_delta += delta;
+                    current += training_value_(row, node->feature) ? left * left : right * right;
+                    bits &= bits - 1;
+                }
+            }
+            int best_feature = -1;
+            bool flipped = false;
+            long double best = current;
+            for (int feature = 0; feature < n_features; ++feature) {
+                long double left_delta = 0;
+                for (const auto& [row, delta] : differences) if (training_value_(row, feature)) left_delta += delta;
+                const long double normal = baseline + left_delta;
+                const long double reverse = baseline + total_delta - left_delta;
+                if (normal < best) { best = normal; best_feature = feature; flipped = false; }
+                if (reverse < best) { best = reverse; best_feature = feature; flipped = true; }
+            }
+            if (best_feature < 0) return false;
+            node->feature = best_feature;
+            if (flipped) std::swap(node->left, node->right);
+            return true;
+        }
+
         Packed included((size_t)n_words);
         Packed want_left((size_t)n_words);
 
@@ -14830,9 +16395,12 @@ private:
         return true;
     }
 
+#include "proxy_delta.hpp"
+#include "sparsification.hpp"
+
     // not used by ArborEnum Rashomon mode, to support giving single decision tree algorithm results in package.
     shared_ptr<PredNode> build_best_tree_from_caches(const Packed& mask, int8_t depth_budget, const PathKey& pk) const {
-        const int INF = std::numeric_limits<int>::max();
+        const Objective INF = std::numeric_limits<Objective>::max();
 
         const int n_sub = count_total(mask);
         if (n_sub == 0) {
@@ -14845,8 +16413,8 @@ private:
         const BestLeafAction leaf =
         best_leaf_action(mask);
 
-        const int leaf_pred = leaf.prediction;
-        const int leaf_loss = leaf.loss;
+        const Prediction leaf_pred = leaf.prediction;
+        const Objective leaf_loss = leaf.loss;
 
         if (depth_budget <= 0) {
             auto t = make_shared<PredNode>();
@@ -14856,14 +16424,14 @@ private:
         }
 
         // helper: lookup min cached objective for (mask, depth, pk) across greedy + lickety caches
-        auto best_cached_obj = [&](const Packed& m, int8_t d, const PathKey& pk_child) -> int {
+        auto best_cached_obj = [&](const Packed& m, int8_t d, const PathKey& pk_child) -> Objective {
             if (d < 0) return 0;
             if (d==0) return leaf_objective(m);
             if (!proxy_caching_enabled) return INF;
 
             const uint64_t km = key_of_subproblem(m, pk_child);
 
-            int best = INF;
+            Objective best = INF;
 
             // greedy cache: (subproblem, depth)
             {
@@ -14891,7 +16459,7 @@ private:
         const int8_t child_d = (int8_t)(depth_budget - 1);
 
         int best_feat = -1;
-        int best_sum  = INF;
+        Objective best_sum  = INF;
 
         Packed L(n_words), R(n_words), bestL(n_words), bestR(n_words);
         PathKey bestPkL, bestPkR;
@@ -14908,11 +16476,11 @@ private:
             PathKey pkL_local, pkR_local;
             make_child_pks_if_needed_(f, pk, pkLp, pkRp, pkL_local, pkR_local);
 
-            const int left_obj  = best_cached_obj(L, child_d, *pkLp);
-            const int right_obj = best_cached_obj(R, child_d, *pkRp);
+            const Objective left_obj  = best_cached_obj(L, child_d, *pkLp);
+            const Objective right_obj = best_cached_obj(R, child_d, *pkRp);
             if (left_obj == INF || right_obj == INF) continue;
 
-            const int sum = left_obj + right_obj;
+            const Objective sum = left_obj + right_obj;
             if (sum < best_sum) {
                 best_sum = sum;
                 best_feat = f;
@@ -14978,7 +16546,7 @@ private:
         }
 
         uint64_t cum = 0;
-        int target_obj = -1;
+        Objective target_obj = -1;
         uint64_t k_within = 0;
 
         // hist is sorted by objective ascending
@@ -14997,7 +16565,7 @@ private:
         return get_kth_tree_with_objective(result.get(), target_obj, k_within);
     }
 
-    shared_ptr<PredNode> get_kth_tree_with_objective(const TreeTrieNode* node, int target_obj, uint64_t k) const {
+    shared_ptr<PredNode> get_kth_tree_with_objective(const TreeTrieNode* node, Objective target_obj, uint64_t k) const {
         if (!node) {
             throw runtime_error("Null node in get_kth_tree_with_objective");
         }
@@ -15025,16 +16593,20 @@ private:
 
             // for each L histogram entry, we go over it. R is sorted by obj, so we can binary search to find each r_obj that pairs to sum to exactly this target_obj.
             for (const auto& le : L->hist) {
-                int l_obj = le.obj;
+                Objective l_obj = le.obj;
                 uint64_t lc = le.cnt;
-                int r_obj = target_obj - l_obj;
+                Objective r_obj = target_obj - l_obj;
                 // binary search r_obj in R->hist
-                auto it = lower_bound(
-                    R->hist.begin(), R->hist.end(),
-                    HistEntry{r_obj, 0},
-                    hist_less
-                );
-                if (it != R->hist.end() && it->obj == r_obj) {
+                auto it = [&] {
+                    if constexpr (regression_objective) {
+                        return lower_bound(R->hist.begin(), R->hist.end(), target_obj,
+                            [l_obj](const HistEntry& entry, Objective target) { return l_obj + entry.obj < target; });
+                    } else {
+                        return lower_bound(R->hist.begin(), R->hist.end(), HistEntry{r_obj, 0}, hist_less);
+                    }
+                }();
+                while (it != R->hist.end() && (regression_objective ? l_obj + it->obj == target_obj : it->obj == r_obj)) {
+                    r_obj = it->obj;
                     uint64_t rc = it->cnt;
                     uint64_t pairs = lc * rc;
 
@@ -15055,6 +16627,8 @@ private:
                     }
 
                     total_here += pairs;
+                    if constexpr (!regression_objective) break;
+                    ++it;
                 }
 
             }
@@ -15069,11 +16643,11 @@ private:
     void predict_tree_recursive(
         const PredNode* node,
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        const std::vector<int>& bb_pred_row,
-        std::vector<uint8_t>& out,
+        const std::vector<Prediction>& bb_pred_row,
+        std::vector<OutputPrediction>& out,
         const std::vector<int>& idx,
         bool use_placeholder,
-        int defer_placeholder
+        Prediction defer_placeholder
     ) const {
         if (!node) return;
 
@@ -15083,17 +16657,17 @@ private:
                 DEFER_PREDICTION
             ) {
                 for (int row : idx) {
-                    const int p =
+                    const Prediction p =
                         use_placeholder
                             ? defer_placeholder
                             : bb_pred_row[(size_t)row];
 
                     out[(size_t)row] =
-                        static_cast<uint8_t>(p);
+                        static_cast<OutputPrediction>(p);
                 }
             } else {
-                const uint8_t pred =
-                    static_cast<uint8_t>(
+                const OutputPrediction pred =
+                    static_cast<OutputPrediction>(
                         node->prediction
                     );
 
@@ -15146,7 +16720,7 @@ private:
         }
     }
 
-    void collect_paths(const PredNode* node, std::vector<int>& current, std::vector<std::vector<int>>& paths, std::vector<int>& preds) const {
+    void collect_paths(const PredNode* node, std::vector<int>& current, std::vector<std::vector<int>>& paths, std::vector<Prediction>& preds) const {
         if (!node) {
             throw std::logic_error("collect_paths: encountered null node");
         }
@@ -15408,8 +16982,8 @@ private:
 
     static inline Packed
     build_eval_bb_wrong_bits_(
-        const std::vector<int>& y_eval,
-        const std::vector<int>& bb_pred_eval,
+        const std::vector<Prediction>& y_eval,
+        const std::vector<Prediction>& bb_pred_eval,
         int num_classes,
         int n_words,
         uint64_t tail_mask
@@ -15425,6 +16999,8 @@ private:
         }
 
         Packed wrong((size_t)n_words);
+
+        if constexpr (regression_objective) return wrong;
 
         for (
             int i = 0;
@@ -15518,7 +17094,7 @@ private:
     }
 
     static inline std::vector<ObjBucketMulti> to_sorted_buckets_multi_(
-        std::unordered_map<int, std::vector<PackedPredMulti>>& acc
+        std::unordered_map<Objective, std::vector<PackedPredMulti>>& acc
     ) {
         std::vector<ObjBucketMulti> out;
         out.reserve(acc.size());
@@ -15536,21 +17112,21 @@ private:
     // core recursion: returns buckets of predictions grouped by objective for ALL trees rooted at node with obj <= budget.
     std::vector<ObjBucketMulti> collect_preds_by_obj_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& eval_mask, // does not decrease size, just gets sparser
         const EvalCtx& ctx
     ) const {
         if (!node) return {};
         if (budget < 0) return {};
 
-        if (node->min_objective == std::numeric_limits<int>::max()) return {};
+        if (node->min_objective == std::numeric_limits<Objective>::max()) return {};
         if (node->min_objective > budget) return {};
 
         // accumulate as obj (training) -> list of preds on evaluation (Packed)
-        //std::unordered_map<int, std::vector<Packed>> acc;
-        std::unordered_map<int, std::vector<PackedPredMulti>> acc;
+        //std::unordered_map<Objective, std::vector<Packed>> acc;
+        std::unordered_map<Objective, std::vector<PackedPredMulti>> acc;
         // heuristic reserve
-        const int max_objs = budget - node->min_objective + 1;
+        const int max_objs = regression_objective ? 16 : static_cast<int>(budget - node->min_objective + 1);
         acc.reserve((size_t)std::max(1, max_objs));
 
         // leaves at this node
@@ -15580,20 +17156,20 @@ private:
         }
 
         // splits
-        const int INF = std::numeric_limits<int>::max();
+        const Objective INF = std::numeric_limits<Objective>::max();
 
         for (const auto& split : node->splits) {
             const TreeTrieNode* L = split.left.get();
             const TreeTrieNode* R = split.right.get();
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
             if (minL == INF || minR == INF) continue;
 
             // cap child budgets using the other side's min objective so everything found will pair with exactly one subtree on the other side
-            int bL = budget - minR;
-            int bR = budget - minL;
+            Objective bL = feasible_child_budget_(L, budget, minR);
+            Objective bR = feasible_child_budget_(R, budget, minL);
             if (bL < 0 || bR < 0) continue;
 
             // also cap by the budgets actually used to build those trie nodes. should never change anything (assuming we do iterative budget refinement, otherwise this is needed for tightening).
@@ -15616,7 +17192,7 @@ private:
             // we'll two-pointer for each left obj to find all right objs <= (budget - l_obj).
             // size_t r_hi = 0; // exclusive upper bound index in Rb
             // for (size_t li = 0; li < Lb.size(); ++li) {
-            //     const int lo = Lb[li].obj; // smallest objective initially
+            //     const Objective lo = Lb[li].obj; // smallest objective initially
             //     if (lo > budget) break;
             //     const int rem = budget - lo; // how far do we have to look
 
@@ -15625,17 +17201,17 @@ private:
             //     auto it_end = std::upper_bound(R_objs.begin(), R_objs.end(), rem);
             //     size_t r_hi = static_cast<size_t>(std::distance(R_objs.begin(), it_end));
 
-            std::vector<int> R_objs;
+            std::vector<Objective> R_objs;
             R_objs.reserve(Rb.size());
             for (const auto& rb : Rb) {
                 R_objs.push_back(rb.obj); // don't need predictions here
             }
 
             for (size_t li = 0; li < Lb.size(); ++li) {
-                const int lo = Lb[li].obj;
+                const Objective lo = Lb[li].obj;
                 if (lo > budget) break;
 
-                const int rem = budget - lo;
+                const Objective rem = objective_remainder(budget, lo);
 
                 auto it_end = std::upper_bound(R_objs.begin(), R_objs.end(), rem);
                 const size_t r_hi = static_cast<size_t>(
@@ -15646,8 +17222,9 @@ private:
 
                 // cross product (filtered)
                 for (size_t ri = 0; ri < r_hi; ++ri) { // r_hi is one past the last valid
-                    const int ro = Rb[ri].obj; // objective value for that bucket
-                    const int tot = lo + ro; // additivity of objectives
+                    const Objective ro = Rb[ri].obj; // objective value for that bucket
+                    const Objective tot = lo + ro; // additivity of objectives
+                    if constexpr (regression_objective) { if (tot > budget) continue; }
 
                     // combine each left pred with each right pred (disjoint masks so OR is correct)
                     const auto& Lpreds = Lb[li].preds;
@@ -15678,19 +17255,19 @@ private:
     }
 
     struct ObjMistakeBucket {
-        int obj;
-        std::vector<int> mistakes; // one entry per tree at this objective
+        Objective obj;
+        std::vector<Objective> mistakes; // one entry per tree at this objective
     };
 
 
     struct ObjDeferralBucket {
-        int obj;
+        Objective obj;
         std::vector<int> deferrals;
     };
 
  
     static inline std::vector<ObjDeferralBucket> to_sorted_deferral_buckets_(
-        std::unordered_map<int, std::vector<int>>& acc
+        std::unordered_map<Objective, std::vector<int>>& acc
     ) {
         std::vector<ObjDeferralBucket> out;
         out.reserve(acc.size());
@@ -15712,21 +17289,21 @@ private:
 
     std::vector<ObjDeferralBucket> collect_deferrals_by_obj_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& eval_mask,
         const EvalCtx& ctx
     ) const {
         if (!node) return {};
         if (budget < 0) return {};
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
 
         if (node->min_objective == INF) return {};
         if (node->min_objective > budget) return {};
 
-        std::unordered_map<int, std::vector<int>> acc;
+        std::unordered_map<Objective, std::vector<int>> acc;
 
-        const int max_objs = budget - node->min_objective + 1;
+        const int max_objs = regression_objective ? 16 : static_cast<int>(budget - node->min_objective + 1);
         acc.reserve((size_t)std::max(1, max_objs));
 
         // leaf alternatives
@@ -15748,13 +17325,13 @@ private:
             const TreeTrieNode* R = split.right.get();
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
 
             if (minL == INF || minR == INF) continue;
 
-            int bL = budget - minR;
-            int bR = budget - minL;
+            Objective bL = feasible_child_budget_(L, budget, minR);
+            Objective bR = feasible_child_budget_(R, budget, minL);
 
             if (bL < 0 || bR < 0) continue;
 
@@ -15786,7 +17363,7 @@ private:
 
             if (Lb.empty() || Rb.empty()) continue;
 
-            std::vector<int> R_objs;
+            std::vector<Objective> R_objs;
             R_objs.reserve(Rb.size());
             for (const auto& rb : Rb) {
                 R_objs.push_back(rb.obj);
@@ -15795,7 +17372,7 @@ private:
             for (const auto& lb : Lb) {
                 if (lb.obj > bL) continue;
 
-                const int rem = budget - lb.obj;
+                const Objective rem = objective_remainder(budget, lb.obj);
 
                 auto it_end = std::upper_bound(R_objs.begin(), R_objs.end(), rem);
                 const int j_end = (int)std::distance(R_objs.begin(), it_end);
@@ -15803,7 +17380,7 @@ private:
                 for (int j = 0; j < j_end; ++j) {
                     const auto& rb = Rb[(size_t)j];
 
-                    const int total_obj = lb.obj + rb.obj;
+                    const Objective total_obj = lb.obj + rb.obj;
                     if (total_obj > budget) continue;
 
                     auto& vec = acc[total_obj];
@@ -15823,7 +17400,7 @@ private:
 
 
     static inline std::vector<ObjMistakeBucket> to_sorted_mistake_buckets_(
-        std::unordered_map<int, std::vector<int>>& acc
+        std::unordered_map<Objective, std::vector<Objective>>& acc
     ) {
         std::vector<ObjMistakeBucket> out;
         out.reserve(acc.size());
@@ -15843,14 +17420,19 @@ private:
         return out;
     }
 
-    static inline std::vector<Packed> build_eval_y_bits_(
-        const std::vector<int>& y_eval,
+    static inline EvalTargets build_eval_y_bits_(
+        const std::vector<Prediction>& y_eval,
         int num_classes,
         int n_words,
         uint64_t tail_mask
     ) {
-        std::vector<Packed> Y_eval((size_t)num_classes, Packed((size_t)n_words));
+        EvalTargets Y_eval((size_t)num_classes, Packed((size_t)n_words));
 
+#if defined(ARBORENUM_REGRESSION)
+        Y_eval.targets = y_eval;
+        for (double value : y_eval) if (!std::isfinite(value)) throw std::invalid_argument("Evaluation targets must be finite.");
+        return Y_eval;
+#endif
         for (int c = 0; c < num_classes; ++c) {
             clear_eval(Y_eval[(size_t)c]);
         }
@@ -15894,33 +17476,36 @@ private:
 
     std::vector<ObjMistakeBucket> collect_mistakes_by_obj_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& eval_mask,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval
     ) const {
         if (!node) return {};
         if (budget < 0) return {};
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
 
         if (node->min_objective == INF) return {};
         if (node->min_objective > budget) return {};
 
         // training objective maps to list of eval misclassification counts,
         // one scalar per tree
-        std::unordered_map<int, std::vector<int>> acc;
+        std::unordered_map<Objective, std::vector<Objective>> acc;
 
-        const int max_objs = budget - node->min_objective + 1;
+        const int max_objs = regression_objective ? 16 : static_cast<int>(budget - node->min_objective + 1);
         acc.reserve((size_t)std::max(1, max_objs));
 
         // leaf alternatives
         for (const auto& leaf : node->leaves) {
             if (leaf.loss > budget) continue;
 
-            int mistakes = 0;
+            Objective mistakes = 0;
 
+            if constexpr (regression_objective) {
+                mistakes = exact_wrong_count_for_leaf_(eval_mask, leaf.prediction, ctx, Y_eval_bits, BBwrong_eval);
+            } else
             if (ctx.n_words > 0) {
                 if (leaf.prediction == DEFER_PREDICTION) {
                     if (!BBwrong_eval) {
@@ -15960,13 +17545,13 @@ private:
             const TreeTrieNode* R = split.right.get();
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
 
             if (minL == INF || minR == INF) continue;
 
-            int bL = budget - minR;
-            int bR = budget - minL;
+            Objective bL = feasible_child_budget_(L, budget, minR);
+            Objective bR = feasible_child_budget_(R, budget, minL);
 
             if (bL < 0 || bR < 0) continue;
 
@@ -16000,17 +17585,17 @@ private:
 
             if (Lb.empty() || Rb.empty()) continue;
 
-            std::vector<int> R_objs;
+            std::vector<Objective> R_objs;
             R_objs.reserve(Rb.size());
             for (const auto& rb : Rb) {
                 R_objs.push_back(rb.obj);
             }
 
             for (const auto& lb : Lb) {
-                const int lo = lb.obj;
+                const Objective lo = lb.obj;
                 if (lo > budget) break;
 
-                const int rem = budget - lo;
+                const Objective rem = objective_remainder(budget, lo);
 
                 auto it_end = std::upper_bound(R_objs.begin(), R_objs.end(), rem);
                 const size_t r_hi = (size_t)std::distance(R_objs.begin(), it_end);
@@ -16018,16 +17603,17 @@ private:
                 if (r_hi == 0) continue;
 
                 for (size_t ri = 0; ri < r_hi; ++ri) {
-                    const int ro = Rb[ri].obj;
-                    const int tot = lo + ro;
+                    const Objective ro = Rb[ri].obj;
+                    const Objective tot = lo + ro;
+                    if constexpr (regression_objective) { if (tot > budget) continue; }
 
                     const auto& Lmis = lb.mistakes;
                     const auto& Rmis = Rb[ri].mistakes;
 
                     auto& dest = acc[tot];                    
 
-                    for (int lm : Lmis) {
-                        for (int rm : Rmis) {
+                    for (Objective lm : Lmis) {
+                        for (Objective rm : Rmis) {
                             dest.push_back(lm + rm);
                         }
                     }
@@ -16050,12 +17636,12 @@ private:
     };
 
     struct ExactReplacementCounts_ {
-        int64_t original_mistakes = 0;
+        std::conditional_t<regression_objective, double, int64_t> original_mistakes = 0;
         std::vector<double> replacement_expected_mistakes;
     };
 
     struct ObjExactReplacementBucket_ {
-        int obj = 0;
+        Objective obj = 0;
         std::vector<ExactReplacementCounts_> counts;
     };
 
@@ -16113,7 +17699,7 @@ private:
     static inline std::vector<ObjExactReplacementBucket_>
     to_sorted_exact_replacement_buckets_(
         std::unordered_map<
-            int,
+            Objective,
             std::vector<ExactReplacementCounts_>
         >& acc
     ) {
@@ -16139,13 +17725,27 @@ private:
         return out;
     }
 
-    inline int exact_wrong_count_for_leaf_(
+    inline Objective exact_wrong_count_for_leaf_(
         const Packed& target_rows,
-        int prediction,
+        Prediction prediction,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval
     ) const {
+#if defined(ARBORENUM_REGRESSION)
+        long double error = 0;
+        for (int word = 0; word < ctx.n_words; ++word) {
+            uint64_t bits = target_rows.w[word];
+            while (bits) {
+                const int row = word * 64 + std::countr_zero(bits);
+                const double fitted = prediction == DEFER_PREDICTION ? Y_eval_bits.bb_predictions.at(row) : prediction;
+                const long double residual = Y_eval_bits.targets[row] - fitted;
+                error += residual * residual;
+                bits &= bits - 1;
+            }
+        }
+        return static_cast<Objective>(error);
+#endif
         if (ctx.n_words <= 0) return 0;
 
         if (prediction == DEFER_PREDICTION) {
@@ -16162,7 +17762,7 @@ private:
             );
         }
 
-        if (prediction < 0 || prediction >= num_classes) {
+        if (!regression_objective && (prediction < 0 || prediction >= num_classes)) {
             throw std::runtime_error(
                 "Leaf prediction is outside valid class range."
             );
@@ -16181,6 +17781,47 @@ private:
         return n_here - correct;
     }
 
+    std::vector<double> regression_replacement_weights_(
+        const ExactReplacementState_& state, const EvalCtx& ctx,
+        const std::vector<int>* groups, const std::vector<double>* inverse_sizes) const {
+        std::vector<double> weights;
+        if (!groups) return {static_cast<double>(state.replacement_values.count()) / ctx.n_eval};
+        weights.assign(inverse_sizes->size(), 0);
+        for (int word = 0; word < ctx.n_words; ++word) {
+            uint64_t bits = state.replacement_values.w[word];
+            while (bits) {
+                const int row = word * 64 + std::countr_zero(bits);
+                ++weights[(*groups)[row]];
+                bits &= bits - 1;
+            }
+        }
+        for (std::size_t group = 0; group < weights.size(); ++group) weights[group] *= (*inverse_sizes)[group];
+        return weights;
+    }
+
+    double regression_expected_replacement_loss_(
+        const ExactReplacementState_& state, Prediction prediction, const EvalCtx& ctx,
+        const EvalTargets& labels, const std::vector<int>* groups,
+        const std::vector<double>* inverse_sizes) const {
+#if defined(ARBORENUM_REGRESSION)
+        const auto weights = regression_replacement_weights_(state, ctx, groups, inverse_sizes);
+        long double error = 0;
+        for (int word = 0; word < ctx.n_words; ++word) {
+            uint64_t bits = state.target_rows.w[word];
+            while (bits) {
+                const int row = word * 64 + std::countr_zero(bits);
+                const double fitted = prediction == DEFER_PREDICTION ? labels.bb_predictions.at(row) : prediction;
+                const long double residual = labels.targets[row] - fitted;
+                error += residual * residual * weights[groups ? (*groups)[row] : 0];
+                bits &= bits - 1;
+            }
+        }
+        return static_cast<double>(error);
+#else
+        return 0;
+#endif
+    }
+
     static inline int exact_ctz64_(uint64_t bits) {
     #if defined(_MSC_VER)
         unsigned long bit_index = 0;
@@ -16194,7 +17835,7 @@ private:
     std::vector<ObjExactReplacementBucket_>
     collect_exact_replacement_mistakes_by_obj_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
 
         // ordinary, unmodified evaluation rows at this graph node.
         const Packed& original_mask,
@@ -16210,7 +17851,7 @@ private:
         const std::vector<int>& internal_to_variable,
 
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
 
         // matched_group_of_row_by_variable_eval[j][i]
@@ -16233,7 +17874,7 @@ private:
     ) const {
         if (!node || budget < 0) return {};
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
 
         if (node->min_objective == INF ||
             node->min_objective > budget) {
@@ -16244,12 +17885,11 @@ private:
             static_cast<int>(states.size());
 
         std::unordered_map<
-            int,
+            Objective,
             std::vector<ExactReplacementCounts_>
         > acc;
 
-        const int max_objs =
-            budget - node->min_objective + 1;
+        const int max_objs = regression_objective ? 16 : static_cast<int>(budget - node->min_objective + 1);
 
         acc.reserve((size_t)std::max(1, max_objs));
 
@@ -16274,7 +17914,7 @@ private:
             );
 
             if (
-                leaf.prediction != DEFER_PREDICTION &&
+                !regression_objective && leaf.prediction != DEFER_PREDICTION &&
                 (leaf.prediction < 0 ||
                  leaf.prediction >= num_classes)
             ) {
@@ -16306,6 +17946,13 @@ private:
                     continue;
                 }
 
+                if constexpr (regression_objective) {
+                    const auto* groups = matched_group_of_row_by_variable_eval ? &(*matched_group_of_row_by_variable_eval)[variable] : nullptr;
+                    const auto* inverse = matched_group_inv_size_by_variable_eval ? &(*matched_group_inv_size_by_variable_eval)[variable] : nullptr;
+                    here.replacement_expected_mistakes[variable] = regression_expected_replacement_loss_(state, leaf.prediction, ctx, Y_eval_bits, groups, inverse);
+                    continue;
+                }
+
                 const bool matched_effectively_uniform =
                     matched_group_effectively_uniform_by_variable_eval !=
                         nullptr &&
@@ -16318,7 +17965,7 @@ private:
                     matched_group_of_row_by_variable_eval == nullptr ||
                     matched_effectively_uniform
                 ) {
-                    const int wrong_target_rows =
+                    const Objective wrong_target_rows =
                         exact_wrong_count_for_leaf_(
                             state.target_rows,
                             leaf.prediction,
@@ -16475,13 +18122,13 @@ private:
 
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
 
             if (minL == INF || minR == INF) continue;
 
-            int bL = budget - minR;
-            int bR = budget - minL;
+            Objective bL = feasible_child_budget_(L, budget, minR);
+            Objective bR = feasible_child_budget_(R, budget, minL);
 
             if (bL < 0 || bR < 0) continue;
 
@@ -16695,7 +18342,7 @@ private:
 
             if (Lb.empty() || Rb.empty()) continue;
 
-            std::vector<int> R_objs;
+            std::vector<Objective> R_objs;
             R_objs.reserve(Rb.size());
 
             for (const auto& rb : Rb) {
@@ -16705,7 +18352,7 @@ private:
             for (const auto& lb : Lb) {
                 if (lb.obj > bL) continue;
 
-                const int rem = budget - lb.obj;
+                const Objective rem = objective_remainder(budget, lb.obj);
 
                 auto it_end =
                     std::upper_bound(
@@ -16723,7 +18370,7 @@ private:
                 for (size_t ri = 0; ri < r_hi; ++ri) {
                     const auto& rb = Rb[ri];
 
-                    const int total_obj =
+                    const Objective total_obj =
                         lb.obj + rb.obj;
 
                     if (total_obj > budget) continue;
@@ -16773,7 +18420,7 @@ private:
     };
 
     struct ObjExactGlobalImportanceExtremaBucket_ {
-        int obj = 0;
+        Objective obj = 0;
         ExactGlobalImportanceExtrema_ extrema;
     };
 
@@ -16783,7 +18430,7 @@ private:
     };
 
     struct ObjExactLocalImportanceExtremaBucket_ {
-        int obj = 0;
+        Objective obj = 0;
         ExactLocalImportanceExtrema_ extrema;
     };
 
@@ -16929,7 +18576,7 @@ private:
 
     static inline std::vector<ObjExactGlobalImportanceExtremaBucket_>
     to_sorted_global_importance_extrema_buckets_(
-        std::unordered_map<int, ExactGlobalImportanceExtrema_>& acc
+        std::unordered_map<Objective, ExactGlobalImportanceExtrema_>& acc
     ) {
         std::vector<ObjExactGlobalImportanceExtremaBucket_> out;
         out.reserve(acc.size());
@@ -16955,7 +18602,7 @@ private:
 
     static inline std::vector<ObjExactLocalImportanceExtremaBucket_>
     to_sorted_local_importance_extrema_buckets_(
-        std::unordered_map<int, ExactLocalImportanceExtrema_>& acc
+        std::unordered_map<Objective, ExactLocalImportanceExtrema_>& acc
     ) {
         std::vector<ObjExactLocalImportanceExtremaBucket_> out;
         out.reserve(acc.size());
@@ -16982,10 +18629,10 @@ private:
     double exact_replacement_expected_mistakes_for_leaf_variable_(
         const ExactReplacementState_& state,
         int variable,
-        int prediction,
-        int original_mistakes,
+        Prediction prediction,
+        Objective original_mistakes,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<std::vector<int>>*
             matched_group_of_row_by_variable_eval,
@@ -16999,6 +18646,12 @@ private:
             return static_cast<double>(original_mistakes);
         }
 
+        if constexpr (regression_objective) {
+            const auto* groups = matched_group_of_row_by_variable_eval ? &(*matched_group_of_row_by_variable_eval)[variable] : nullptr;
+            const auto* inverse = matched_group_inv_size_by_variable_eval ? &(*matched_group_inv_size_by_variable_eval)[variable] : nullptr;
+            return regression_expected_replacement_loss_(state, prediction, ctx, Y_eval_bits, groups, inverse);
+        }
+
         const bool matched_effectively_uniform =
             matched_group_effectively_uniform_by_variable_eval != nullptr &&
             (*matched_group_effectively_uniform_by_variable_eval)[
@@ -17009,7 +18662,7 @@ private:
             matched_group_of_row_by_variable_eval == nullptr ||
             matched_effectively_uniform
         ) {
-            const int wrong_target_rows =
+            const Objective wrong_target_rows =
                 exact_wrong_count_for_leaf_(
                     state.target_rows,
                     prediction,
@@ -17125,15 +18778,28 @@ private:
     std::vector<double> exact_local_importance_for_leaf_variable_(
         const Packed& original_mask,
         const ExactReplacementState_& state,
-        int prediction,
+        Prediction prediction,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<int>* matched_group_of_row_eval,
         const std::vector<double>* matched_group_inv_size_eval,
         bool matched_effectively_uniform,
         ExactMatchedScratch_* matched_scratch
     ) const {
+#if defined(ARBORENUM_REGRESSION)
+        std::vector<double> result(static_cast<std::size_t>(ctx.n_eval), 0);
+        if (!state.replacement_feature_used) return result;
+        const auto weights = regression_replacement_weights_(state, ctx, matched_group_of_row_eval, matched_group_inv_size_eval);
+        for (int row = 0; row < ctx.n_eval; ++row) {
+            const double fitted = prediction == DEFER_PREDICTION ? Y_eval_bits.bb_predictions.at(row) : prediction;
+            const long double residual = Y_eval_bits.targets[row] - fitted;
+            const long double loss = residual * residual;
+            if ((original_mask.w[row >> 6] >> (row & 63)) & 1ULL) result[row] -= static_cast<double>(loss);
+            if ((state.target_rows.w[row >> 6] >> (row & 63)) & 1ULL) result[row] += static_cast<double>(loss * weights[matched_group_of_row_eval ? (*matched_group_of_row_eval)[row] : 0]);
+        }
+        return result;
+#endif
         std::vector<double> local(
             static_cast<std::size_t>(ctx.n_eval),
             0.0
@@ -17311,13 +18977,13 @@ private:
     std::vector<ObjExactGlobalImportanceExtremaBucket_>
     collect_exact_global_importance_extrema_by_obj_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& original_mask,
         const Packed& replacement_root_mask,
         const std::vector<ExactReplacementState_>& states,
         const std::vector<int>& internal_to_variable,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<std::vector<int>>*
             matched_group_of_row_by_variable_eval,
@@ -17329,7 +18995,7 @@ private:
     ) const {
         if (!node || budget < 0) return {};
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
 
         if (
             node->min_objective == INF ||
@@ -17341,17 +19007,17 @@ private:
         const int number_of_variables =
             static_cast<int>(states.size());
 
-        std::unordered_map<int, ExactGlobalImportanceExtrema_> acc;
+        std::unordered_map<Objective, ExactGlobalImportanceExtrema_> acc;
         acc.reserve(
             static_cast<std::size_t>(
-                std::max(1, budget - node->min_objective + 1)
+                std::max(Objective(1), budget - node->min_objective + 1)
             )
         );
 
         for (const auto& leaf : node->leaves) {
             if (leaf.loss > budget) continue;
 
-            const int original_mistakes =
+            const Objective original_mistakes =
                 exact_wrong_count_for_leaf_(
                     original_mask,
                     leaf.prediction,
@@ -17407,13 +19073,13 @@ private:
 
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
 
             if (minL == INF || minR == INF) continue;
 
-            int bL = budget - minR;
-            int bR = budget - minL;
+            Objective bL = feasible_child_budget_(L, budget, minR);
+            Objective bR = feasible_child_budget_(R, budget, minL);
 
             if (bL < 0 || bR < 0) continue;
 
@@ -17608,14 +19274,14 @@ private:
 
             if (Lb.empty() || Rb.empty()) continue;
 
-            std::vector<int> R_objs;
+            std::vector<Objective> R_objs;
             R_objs.reserve(Rb.size());
             for (const auto& rb : Rb) {
                 R_objs.push_back(rb.obj);
             }
 
             for (const auto& lb : Lb) {
-                const int rem = budget - lb.obj;
+                const Objective rem = objective_remainder(budget, lb.obj);
 
                 auto it_end =
                     std::upper_bound(
@@ -17631,7 +19297,7 @@ private:
 
                 for (std::size_t ri = 0; ri < r_hi; ++ri) {
                     const auto& rb = Rb[ri];
-                    const int total_obj = lb.obj + rb.obj;
+                    const Objective total_obj = lb.obj + rb.obj;
                     if (total_obj > budget) continue;
 
                     update_global_extrema_from_sum_(
@@ -17649,14 +19315,14 @@ private:
     std::vector<ObjExactLocalImportanceExtremaBucket_>
     collect_exact_local_importance_extrema_by_obj_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& original_mask,
         const Packed& replacement_root_mask,
         const ExactReplacementState_& state,
         int variable,
         const std::vector<int>& internal_to_variable,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<int>* matched_group_of_row_eval,
         const std::vector<double>* matched_group_inv_size_eval,
@@ -17665,7 +19331,7 @@ private:
     ) const {
         if (!node || budget < 0) return {};
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
 
         if (
             node->min_objective == INF ||
@@ -17674,10 +19340,10 @@ private:
             return {};
         }
 
-        std::unordered_map<int, ExactLocalImportanceExtrema_> acc;
+        std::unordered_map<Objective, ExactLocalImportanceExtrema_> acc;
         acc.reserve(
             static_cast<std::size_t>(
-                std::max(1, budget - node->min_objective + 1)
+                std::max(Objective(1), budget - node->min_objective + 1)
             )
         );
 
@@ -17711,13 +19377,13 @@ private:
 
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
 
             if (minL == INF || minR == INF) continue;
 
-            int bL = budget - minR;
-            int bR = budget - minL;
+            Objective bL = feasible_child_budget_(L, budget, minR);
+            Objective bR = feasible_child_budget_(R, budget, minL);
 
             if (bL < 0 || bR < 0) continue;
 
@@ -17894,14 +19560,14 @@ private:
 
             if (Lb.empty() || Rb.empty()) continue;
 
-            std::vector<int> R_objs;
+            std::vector<Objective> R_objs;
             R_objs.reserve(Rb.size());
             for (const auto& rb : Rb) {
                 R_objs.push_back(rb.obj);
             }
 
             for (const auto& lb : Lb) {
-                const int rem = budget - lb.obj;
+                const Objective rem = objective_remainder(budget, lb.obj);
 
                 auto it_end =
                     std::upper_bound(
@@ -17917,7 +19583,7 @@ private:
 
                 for (std::size_t ri = 0; ri < r_hi; ++ri) {
                     const auto& rb = Rb[ri];
-                    const int total_obj = lb.obj + rb.obj;
+                    const Objective total_obj = lb.obj + rb.obj;
                     if (total_obj > budget) continue;
 
                     update_local_extrema_from_sum_(
@@ -18067,9 +19733,9 @@ private:
     void exact_local_importance_for_leaf_variable_into_(
         const Packed& original_mask,
         const ExactReplacementState_& state,
-        int prediction,
+        Prediction prediction,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<int>* matched_group_of_row_eval,
         const std::vector<double>* matched_group_inv_size_eval,
@@ -18077,6 +19743,11 @@ private:
         ExactMatchedScratch_* matched_scratch,
         std::vector<double>& local
     ) const {
+        if constexpr (regression_objective) {
+            local = exact_local_importance_for_leaf_variable_(original_mask, state, prediction, ctx, Y_eval_bits, BBwrong_eval,
+                matched_group_of_row_eval, matched_group_inv_size_eval, matched_effectively_uniform, matched_scratch);
+            return;
+        }
         local.assign(static_cast<std::size_t>(ctx.n_eval), 0.0);
 
         if (!state.replacement_feature_used) {
@@ -18235,10 +19906,13 @@ private:
     }
 
 
+    using LocalNumerator = std::conditional_t<regression_objective, double, int32_t>;
+    using LocalNumeratorTotal = std::conditional_t<regression_objective, double, int64_t>;
+
     struct ExactLocalImportanceNumeratorExtrema_ {
-        std::vector<int32_t> point;
-        std::vector<int32_t> lower;
-        std::vector<int32_t> upper;
+        std::vector<LocalNumerator> point;
+        std::vector<LocalNumerator> lower;
+        std::vector<LocalNumerator> upper;
         bool all_zero = false;
 
         inline bool empty() const {
@@ -18254,14 +19928,14 @@ private:
         std::unordered_map<const TreeTrieNode*, std::vector<uint64_t>>;
 
     static inline void fast_update_minmax_i32_(
-        int32_t* dst_lower,
-        int32_t* dst_upper,
-        const int32_t* cand_lower,
-        const int32_t* cand_upper,
+        LocalNumerator* dst_lower,
+        LocalNumerator* dst_upper,
+        const LocalNumerator* cand_lower,
+        const LocalNumerator* cand_upper,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         for (; i + 16 <= n; i += 16) {
             const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
             const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
@@ -18278,13 +19952,13 @@ private:
     }
 
     static inline void fast_update_minmax_point_i32_(
-        int32_t* dst_lower,
-        int32_t* dst_upper,
-        const int32_t* cand,
+        LocalNumerator* dst_lower,
+        LocalNumerator* dst_upper,
+        const LocalNumerator* cand,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         for (; i + 16 <= n; i += 16) {
             const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
             const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
@@ -18300,16 +19974,16 @@ private:
     }
 
     static inline void fast_update_minmax_sum_i32_(
-        int32_t* dst_lower,
-        int32_t* dst_upper,
-        const int32_t* left_lower,
-        const int32_t* left_upper,
-        const int32_t* right_lower,
-        const int32_t* right_upper,
+        LocalNumerator* dst_lower,
+        LocalNumerator* dst_upper,
+        const LocalNumerator* left_lower,
+        const LocalNumerator* left_upper,
+        const LocalNumerator* right_lower,
+        const LocalNumerator* right_upper,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         for (; i + 16 <= n; i += 16) {
             const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
             const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
@@ -18324,22 +19998,22 @@ private:
         }
     #endif
         for (; i < n; ++i) {
-            const int32_t lo = left_lower[i] + right_lower[i];
-            const int32_t up = left_upper[i] + right_upper[i];
+            const LocalNumerator lo = left_lower[i] + right_lower[i];
+            const LocalNumerator up = left_upper[i] + right_upper[i];
             dst_lower[i] = std::min(dst_lower[i], lo);
             dst_upper[i] = std::max(dst_upper[i], up);
         }
     }
 
     static inline void fast_update_minmax_point_sum_i32_(
-        int32_t* dst_lower,
-        int32_t* dst_upper,
-        const int32_t* left,
-        const int32_t* right,
+        LocalNumerator* dst_lower,
+        LocalNumerator* dst_upper,
+        const LocalNumerator* left,
+        const LocalNumerator* right,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         for (; i + 16 <= n; i += 16) {
             const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
             const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
@@ -18351,22 +20025,22 @@ private:
         }
     #endif
         for (; i < n; ++i) {
-            const int32_t c = left[i] + right[i];
+            const LocalNumerator c = left[i] + right[i];
             dst_lower[i] = std::min(dst_lower[i], c);
             dst_upper[i] = std::max(dst_upper[i], c);
         }
     }
 
     static inline void fast_update_minmax_point_interval_sum_i32_(
-        int32_t* dst_lower,
-        int32_t* dst_upper,
-        const int32_t* point,
-        const int32_t* int_lower,
-        const int32_t* int_upper,
+        LocalNumerator* dst_lower,
+        LocalNumerator* dst_upper,
+        const LocalNumerator* point,
+        const LocalNumerator* int_lower,
+        const LocalNumerator* int_upper,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         for (; i + 16 <= n; i += 16) {
             const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
             const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
@@ -18378,20 +20052,20 @@ private:
         }
     #endif
         for (; i < n; ++i) {
-            const int32_t lo = point[i] + int_lower[i];
-            const int32_t up = point[i] + int_upper[i];
+            const LocalNumerator lo = point[i] + int_lower[i];
+            const LocalNumerator up = point[i] + int_upper[i];
             dst_lower[i] = std::min(dst_lower[i], lo);
             dst_upper[i] = std::max(dst_upper[i], up);
         }
     }
 
     static inline void fast_include_zero_i32_(
-        int32_t* dst_lower,
-        int32_t* dst_upper,
+        LocalNumerator* dst_lower,
+        LocalNumerator* dst_upper,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         const __m512i z = _mm512_setzero_si512();
         for (; i + 16 <= n; i += 16) {
             const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
@@ -18401,18 +20075,18 @@ private:
         }
     #endif
         for (; i < n; ++i) {
-            dst_lower[i] = std::min<int32_t>(dst_lower[i], 0);
-            dst_upper[i] = std::max<int32_t>(dst_upper[i], 0);
+            dst_lower[i] = std::min<LocalNumerator>(dst_lower[i], 0);
+            dst_upper[i] = std::max<LocalNumerator>(dst_upper[i], 0);
         }
     }
 
     static inline void fast_add_inplace_i32_(
-        int32_t* dst,
-        const int32_t* src,
+        LocalNumerator* dst,
+        const LocalNumerator* src,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         for (; i + 16 <= n; i += 16) {
             const __m512i a = _mm512_loadu_si512((const void*)(dst + i));
             const __m512i b = _mm512_loadu_si512((const void*)(src + i));
@@ -18423,13 +20097,13 @@ private:
     }
 
     static inline void fast_add_point_to_interval_inplace_i32_(
-        int32_t* lower,
-        int32_t* upper,
-        const int32_t* point,
+        LocalNumerator* lower,
+        LocalNumerator* upper,
+        const LocalNumerator* point,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         for (; i + 16 <= n; i += 16) {
             const __m512i p = _mm512_loadu_si512((const void*)(point + i));
             const __m512i lo = _mm512_loadu_si512((const void*)(lower + i));
@@ -18445,14 +20119,14 @@ private:
     }
 
     static inline void fast_add_interval_inplace_i32_(
-        int32_t* dst_lower,
-        int32_t* dst_upper,
-        const int32_t* src_lower,
-        const int32_t* src_upper,
+        LocalNumerator* dst_lower,
+        LocalNumerator* dst_upper,
+        const LocalNumerator* src_lower,
+        const LocalNumerator* src_upper,
         std::size_t n
     ) {
         std::size_t i = 0;
-    #if ArborEnum_USE_AVX512
+    #if ArborEnum_USE_AVX512 && !defined(ARBORENUM_REGRESSION)
         for (; i + 16 <= n; i += 16) {
             const __m512i dlo = _mm512_loadu_si512((const void*)(dst_lower + i));
             const __m512i dup = _mm512_loadu_si512((const void*)(dst_upper + i));
@@ -18468,13 +20142,13 @@ private:
         }
     }
 
-    static inline int64_t fast_sum_i32_(
-        const int32_t* x,
+    static inline LocalNumeratorTotal fast_sum_i32_(
+        const LocalNumerator* x,
         std::size_t n
     ) {
-        int64_t total = 0;
+        LocalNumeratorTotal total = 0;
         for (std::size_t i = 0; i < n; ++i) {
-            total += static_cast<int64_t>(x[i]);
+            total += static_cast<LocalNumeratorTotal>(x[i]);
         }
         return total;
     }
@@ -18740,15 +20414,33 @@ private:
         ExactLocalImportanceNumeratorExtrema_& acc,
         const Packed& original_mask,
         const ExactReplacementState_& state,
-        int prediction,
+        Prediction prediction,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<int>* matched_group_of_row_eval,
         const std::vector<int>* matched_group_size_eval,
         bool matched_effectively_uniform,
         ExactMatchedScratch_* matched_scratch
     ) const {
+        if constexpr (regression_objective) {
+            std::vector<double> inverse;
+            if (matched_group_size_eval) {
+                inverse.resize(matched_group_size_eval->size());
+                for (std::size_t i = 0; i < inverse.size(); ++i) inverse[i] = (*matched_group_size_eval)[i] ? 1.0 / (*matched_group_size_eval)[i] : 0;
+            }
+            auto local = exact_local_importance_for_leaf_variable_(original_mask, state, prediction, ctx, Y_eval_bits, BBwrong_eval,
+                matched_group_of_row_eval, matched_group_size_eval ? &inverse : nullptr, matched_effectively_uniform, matched_scratch);
+            ExactLocalImportanceNumeratorExtrema_ candidate;
+            candidate.point.resize(local.size());
+            for (std::size_t row = 0; row < local.size(); ++row) {
+                const double scale = matched_group_of_row_eval && !matched_effectively_uniform
+                    ? (*matched_group_size_eval)[(*matched_group_of_row_eval)[row]] : ctx.n_eval;
+                candidate.point[row] = static_cast<LocalNumerator>(local[row] * scale);
+            }
+            merge_numerator_extrema_move_(acc, std::move(candidate), local.size());
+            return;
+        }
         const std::size_t n = static_cast<std::size_t>(ctx.n_eval);
 
         if (!state.replacement_feature_used) {
@@ -18867,7 +20559,7 @@ private:
                     const int row = (wi << 6) + bit;
                     special &= special - 1;
 
-                    int32_t value = 0;
+                    LocalNumerator value = 0;
 
                     if (grouped) {
                         const int group =
@@ -18923,7 +20615,7 @@ private:
             }
 
             for (int bit = 0; bit < count; ++bit) {
-                int32_t value = 0;
+                LocalNumerator value = 0;
 
                 if ((special >> bit) & 1ULL) {
                     if (grouped) {
@@ -18962,14 +20654,14 @@ private:
     ExactLocalImportanceNumeratorExtrema_
     collect_exact_local_importance_numerator_extrema_at_most_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& original_mask,
         const Packed& replacement_root_mask,
         const ExactReplacementState_& state,
         int variable,
         const std::vector<int>& internal_to_variable,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<int>* matched_group_of_row_eval,
         const std::vector<int>* matched_group_size_eval,
@@ -18981,7 +20673,7 @@ private:
 
         if (!node || budget < 0) return acc;
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
 
         if (
             node->min_objective == INF ||
@@ -19027,8 +20719,8 @@ private:
             const TreeTrieNode* R = split.right.get();
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
             if (minL == INF || minR == INF) continue;
             if (minL + minR > budget) continue;
 
@@ -19158,10 +20850,10 @@ private:
             }
 
             if (split_variable != variable) {
-                const int left_budget =
-                    std::min(L->budget, budget - minR);
-                const int right_budget =
-                    std::min(R->budget, budget - minL);
+                const Objective left_budget =
+                    feasible_child_budget_(L, budget, minR);
+                const Objective right_budget =
+                    feasible_child_budget_(R, budget, minL);
 
                 auto left_ext =
                     collect_exact_local_importance_numerator_extrema_at_most_(
@@ -19215,10 +20907,10 @@ private:
             L->ensure_hist_built();
             R->ensure_hist_built();
 
-            const int max_left_budget =
-                std::min(L->budget, budget - minR);
-            const int max_right_budget =
-                std::min(R->budget, budget - minL);
+            const Objective max_left_budget =
+                feasible_child_budget_(L, budget, minR);
+            const Objective max_right_budget =
+                feasible_child_budget_(R, budget, minL);
 
             std::size_t left_count = 0;
             for (const auto& e : L->hist) {
@@ -19238,9 +20930,9 @@ private:
                 for (const auto& e : L->hist) {
                     if (e.obj > max_left_budget) break;
 
-                    const int left_budget = e.obj;
-                    const int right_budget =
-                        std::min(R->budget, budget - left_budget);
+                    const Objective left_budget = e.obj;
+                    const Objective right_budget =
+                        feasible_child_budget_(R, budget, left_budget);
                     if (right_budget < minR) continue;
 
                     auto left_ext =
@@ -19294,9 +20986,9 @@ private:
                 for (const auto& e : R->hist) {
                     if (e.obj > max_right_budget) break;
 
-                    const int right_budget = e.obj;
-                    const int left_budget =
-                        std::min(L->budget, budget - right_budget);
+                    const Objective right_budget = e.obj;
+                    const Objective left_budget =
+                        feasible_child_budget_(L, budget, right_budget);
                     if (left_budget < minL) continue;
 
                     auto left_ext =
@@ -19364,14 +21056,14 @@ private:
     std::vector<ExactLocalImportanceNumeratorExtrema_>
     collect_exact_local_importance_numerator_extrema_all_at_most_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& original_mask,
         const Packed& replacement_root_mask,
         const std::vector<ExactReplacementState_>& states,
         const std::vector<uint8_t>& requested,
         const std::vector<int>& internal_to_variable,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<std::vector<int>>* matched_group_of_row_by_variable_eval,
         const std::vector<std::vector<int>>* matched_group_size_by_variable_eval,
@@ -19381,7 +21073,7 @@ private:
     ) const {
         if (!node || budget < 0) return {};
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
         if (node->min_objective == INF || node->min_objective > budget) {
             return {};
         }
@@ -19455,8 +21147,8 @@ private:
             const TreeTrieNode* R = split.right.get();
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
             if (minL == INF || minR == INF) continue;
             if (minL + minR > budget) continue;
 
@@ -19586,8 +21278,8 @@ private:
                 }
             }
 
-            const int left_budget = std::min(L->budget, budget - minR);
-            const int right_budget = std::min(R->budget, budget - minL);
+            const Objective left_budget = feasible_child_budget_(L, budget, minR);
+            const Objective right_budget = feasible_child_budget_(R, budget, minL);
 
             std::vector<uint8_t> shared_requested = active;
             const std::size_t split_j = static_cast<std::size_t>(split_variable);
@@ -19672,10 +21364,10 @@ private:
             L->ensure_hist_built();
             R->ensure_hist_built();
 
-            const int max_left_budget =
-                std::min(L->budget, budget - minR);
-            const int max_right_budget =
-                std::min(R->budget, budget - minL);
+            const Objective max_left_budget =
+                feasible_child_budget_(L, budget, minR);
+            const Objective max_right_budget =
+                feasible_child_budget_(R, budget, minL);
 
             std::size_t left_count = 0;
             for (const auto& e : L->hist) {
@@ -19693,8 +21385,8 @@ private:
             if (left_count <= right_count) {
                 for (const auto& e : L->hist) {
                     if (e.obj > max_left_budget) break;
-                    const int bL = e.obj;
-                    const int bR = std::min(R->budget, budget - bL);
+                    const Objective bL = e.obj;
+                    const Objective bR = feasible_child_budget_(R, budget, bL);
                     if (bR < minR) continue;
 
                     auto left_ext =
@@ -19744,8 +21436,8 @@ private:
             } else {
                 for (const auto& e : R->hist) {
                     if (e.obj > max_right_budget) break;
-                    const int bR = e.obj;
-                    const int bL = std::min(L->budget, budget - bR);
+                    const Objective bR = e.obj;
+                    const Objective bL = feasible_child_budget_(L, budget, bR);
                     if (bL < minL) continue;
 
                     auto left_ext =
@@ -19809,14 +21501,14 @@ private:
     ExactLocalImportanceExtrema_
     collect_exact_local_importance_extrema_at_most_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& original_mask,
         const Packed& replacement_root_mask,
         const ExactReplacementState_& state,
         int variable,
         const std::vector<int>& internal_to_variable,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<int>* matched_group_of_row_eval,
         const std::vector<double>* matched_group_inv_size_eval,
@@ -19827,7 +21519,7 @@ private:
 
         if (!node || budget < 0) return acc;
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
 
         if (
             node->min_objective == INF ||
@@ -19879,8 +21571,8 @@ private:
             const TreeTrieNode* R = split.right.get();
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
             if (minL == INF || minR == INF) continue;
             if (minL + minR > budget) continue;
 
@@ -20015,10 +21707,10 @@ private:
             // fixed to its minimum-objective subtree, freeing all remaining
             // budget for the child that matters to that row.
             if (split_variable != variable) {
-                const int left_budget =
-                    std::min(L->budget, budget - minR);
-                const int right_budget =
-                    std::min(R->budget, budget - minL);
+                const Objective left_budget =
+                    feasible_child_budget_(L, budget, minR);
+                const Objective right_budget =
+                    feasible_child_budget_(R, budget, minL);
 
                 auto left_ext =
                     collect_exact_local_importance_extrema_at_most_(
@@ -20077,10 +21769,10 @@ private:
             L->ensure_hist_built();
             R->ensure_hist_built();
 
-            const int max_left_budget =
-                std::min(L->budget, budget - minR);
-            const int max_right_budget =
-                std::min(R->budget, budget - minL);
+            const Objective max_left_budget =
+                feasible_child_budget_(L, budget, minR);
+            const Objective max_right_budget =
+                feasible_child_budget_(R, budget, minL);
 
             std::size_t left_count = 0;
             for (const auto& e : L->hist) {
@@ -20111,9 +21803,9 @@ private:
                 for (const auto& e : L->hist) {
                     if (e.obj > max_left_budget) break;
 
-                    const int left_budget = e.obj;
-                    const int right_budget =
-                        std::min(R->budget, budget - left_budget);
+                    const Objective left_budget = e.obj;
+                    const Objective right_budget =
+                        feasible_child_budget_(R, budget, left_budget);
                     if (right_budget < minR) continue;
 
                     auto left_ext =
@@ -20176,9 +21868,9 @@ private:
                 for (const auto& e : R->hist) {
                     if (e.obj > max_right_budget) break;
 
-                    const int right_budget = e.obj;
-                    const int left_budget =
-                        std::min(L->budget, budget - right_budget);
+                    const Objective right_budget = e.obj;
+                    const Objective left_budget =
+                        feasible_child_budget_(L, budget, right_budget);
                     if (left_budget < minL) continue;
 
                     auto left_ext =
@@ -20256,13 +21948,13 @@ private:
     ExactAllLocalImportanceExtrema_
     collect_exact_all_local_importance_extrema_at_most_(
         const TreeTrieNode* node,
-        int budget,
+        Objective budget,
         const Packed& original_mask,
         const Packed& replacement_root_mask,
         const std::vector<ExactReplacementState_>& states,
         const std::vector<int>& internal_to_variable,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<std::vector<int>>*
             matched_group_of_row_by_variable_eval,
@@ -20275,7 +21967,7 @@ private:
 
         if (!node || budget < 0) return acc;
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
         if (
             node->min_objective == INF ||
             node->min_objective > budget
@@ -20383,8 +22075,8 @@ private:
             const TreeTrieNode* R = split.right.get();
             if (!L || !R) continue;
 
-            const int minL = L->min_objective;
-            const int minR = R->min_objective;
+            const Objective minL = L->min_objective;
+            const Objective minR = R->min_objective;
             if (minL == INF || minR == INF) continue;
             if (minL + minR > budget) continue;
 
@@ -20522,10 +22214,10 @@ private:
                 }
             }
 
-            const int left_budget =
-                std::min(L->budget, budget - minR);
-            const int right_budget =
-                std::min(R->budget, budget - minL);
+            const Objective left_budget =
+                feasible_child_budget_(L, budget, minR);
+            const Objective right_budget =
+                feasible_child_budget_(R, budget, minL);
 
             // one batched traversal for every variable at the maximum budget each
             // side can receive when the sibling is fixed to its optimal objective.
@@ -20608,8 +22300,8 @@ private:
             L->ensure_hist_built();
             R->ensure_hist_built();
 
-            const int max_left_budget = left_budget;
-            const int max_right_budget = right_budget;
+            const Objective max_left_budget = left_budget;
+            const Objective max_right_budget = right_budget;
 
             std::size_t left_count = 0;
             for (const auto& e : L->hist) {
@@ -20639,13 +22331,13 @@ private:
                     : nullptr;
 
             if (left_count <= right_count) {
-                int last_right_budget = -1;
+                Objective last_right_budget = -1;
                 ExactLocalImportanceExtrema_ last_right_ext;
 
                 for (const auto& e : L->hist) {
                     if (e.obj > max_left_budget) break;
-                    const int lb = e.obj;
-                    const int rb = std::min(R->budget, budget - lb);
+                    const Objective lb = e.obj;
+                    const Objective rb = feasible_child_budget_(R, budget, lb);
                     if (rb < minR) continue;
 
                     auto lext =
@@ -20704,13 +22396,13 @@ private:
                     );
                 }
             } else {
-                int last_left_budget = -1;
+                Objective last_left_budget = -1;
                 ExactLocalImportanceExtrema_ last_left_ext;
 
                 for (const auto& e : R->hist) {
                     if (e.obj > max_right_budget) break;
-                    const int rb = e.obj;
-                    const int lb = std::min(L->budget, budget - rb);
+                    const Objective rb = e.obj;
+                    const Objective lb = feasible_child_budget_(L, budget, rb);
                     if (lb < minL) continue;
 
                     ExactLocalImportanceExtrema_ lext;
@@ -20787,14 +22479,14 @@ private:
 
     struct ExactReplacementIntervalEvalSetup_ {
         EvalCtx ctx;
-        int budget = 0;
+        Objective budget = 0;
         std::vector<std::vector<int>> variable_columns;
         std::vector<int> internal_to_variable;
         bool use_matched_groups = false;
         std::vector<std::vector<double>> matched_group_inv_sizes;
         std::vector<uint8_t> matched_group_effectively_uniform;
         Packed root_mask;
-        std::vector<Packed> y_bits;
+        EvalTargets y_bits;
         Packed bb_wrong;
         bool has_bb_wrong = false;
     };
@@ -20802,16 +22494,18 @@ private:
     ExactReplacementIntervalEvalSetup_
     prepare_exact_replacement_interval_eval_(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        const std::vector<int>& y_eval,
-        int budget_override,
+        const std::vector<Prediction>& y_eval,
+        Objective budget_override,
         const std::vector<std::vector<int>>& variable_columns_in,
-        const std::vector<int>& bb_pred_eval,
+        const std::vector<Prediction>& bb_pred_eval,
         const std::vector<std::vector<int>>&
             matched_group_of_row_by_variable_eval,
         const std::vector<std::vector<int>>&
-            matched_group_size_by_variable_eval
+            matched_group_size_by_variable_eval,
+        const TreeTrieNode* graph = nullptr
     ) const {
-        if (!result) {
+        if (!graph) graph = result.get();
+        if (!graph) {
             throw std::runtime_error(
                 "No Rashomon trie has been constructed. Call fit() first."
             );
@@ -20834,7 +22528,7 @@ private:
         out.budget =
             (budget_override >= 0)
                 ? budget_override
-                : result->budget;
+                : graph->budget;
 
         if (!variable_columns_in.empty()) {
             out.variable_columns = variable_columns_in;
@@ -21069,6 +22763,10 @@ private:
                 out.ctx.tail_mask
             );
 
+#if defined(ARBORENUM_REGRESSION)
+        out.y_bits.bb_predictions = bb_pred_eval;
+#endif
+
         if (use_deferral) {
             if (bb_pred_eval.empty()) {
                 throw std::runtime_error(
@@ -21091,7 +22789,7 @@ private:
     }
 
     struct ExactImportanceFrontierPoint_ {
-        int obj = 0;
+        Objective obj = 0;
         double value = 0.0;
     };
 
@@ -21107,14 +22805,14 @@ private:
     // sparse by variable. a variable is absent iff its importance is
     // identically zero for every feasible completion represented here.
     struct ExactGlobalImportanceFrontiers_ {
-        int min_feasible_obj = std::numeric_limits<int>::max();
+        Objective min_feasible_obj = std::numeric_limits<Objective>::max();
         std::vector<ExactSparseFeatureImportanceFrontiers_> features;
     };
 
 
     struct ExactDivisiveFrontierPoint_ {
-        int obj = 0;
-        int original = 0;
+        Objective obj = 0;
+        Objective original = 0;
         double replacement = 0.0;
     };
 
@@ -21122,8 +22820,8 @@ private:
         std::vector<ExactDivisiveFrontierPoint_>;
 
     struct ExactBaseLossFrontierPoint_ {
-        int obj = 0;
-        int original = 0;
+        Objective obj = 0;
+        Objective original = 0;
     };
 
     using ExactBaseLossFrontier_ =
@@ -21136,14 +22834,14 @@ private:
     };
 
     struct ExactGlobalDivisiveFrontiers_ {
-        int min_feasible_obj = std::numeric_limits<int>::max();
+        Objective min_feasible_obj = std::numeric_limits<Objective>::max();
         ExactBaseLossFrontier_ base_lower;
         ExactBaseLossFrontier_ base_upper;
         std::vector<ExactSparseFeatureDivisiveFrontiers_> features;
     };
 
     struct ExactGlobalDivisiveFrontierCacheEntry_ {
-        int solved_budget = -1;
+        Objective solved_budget = -1;
         ExactGlobalDivisiveFrontiers_ frontiers;
     };
 
@@ -21196,7 +22894,7 @@ private:
     struct ExactGlobalImportanceFrontierCacheEntry_ {
         // the entry contains all frontier breakpoints through this budget.
         // it may therefore answer any later query with a smaller budget.
-        int solved_budget = -1;
+        Objective solved_budget = -1;
         ExactGlobalImportanceFrontiers_ frontiers;
     };
 
@@ -21207,8 +22905,8 @@ private:
         >;
 
     struct ExactFeatureFrontierAccumulator_ {
-        std::map<int, double> lower;
-        std::map<int, double> upper;
+        std::map<Objective, double> lower;
+        std::map<Objective, double> upper;
     };
 
     template <typename T>
@@ -21556,8 +23254,8 @@ private:
     // maintain an at-most-budget lower frontier in-place.
     // frontier invariant: objective strictly increases and value strictly decreases.
     static inline void insert_exact_min_frontier_point_(
-        std::map<int, double>& frontier,
-        int obj,
+        std::map<Objective, double>& frontier,
+        Objective obj,
         double value
     ) {
         auto it = frontier.lower_bound(obj);
@@ -21597,8 +23295,8 @@ private:
     // maintain an at-most-budget upper frontier in-place.
     // frontier invariant: objective strictly increases and value strictly increases.
     static inline void insert_exact_max_frontier_point_(
-        std::map<int, double>& frontier,
-        int obj,
+        std::map<Objective, double>& frontier,
+        Objective obj,
         double value
     ) {
         auto it = frontier.lower_bound(obj);
@@ -21637,7 +23335,7 @@ private:
 
     static inline ExactImportanceFrontier_
     exact_frontier_map_to_vector_(
-        const std::map<int, double>& frontier
+        const std::map<Objective, double>& frontier
     ) {
         ExactImportanceFrontier_ out;
         out.reserve(frontier.size());
@@ -21651,13 +23349,13 @@ private:
 
     static inline double exact_frontier_value_at_budget_(
         const ExactImportanceFrontier_& frontier,
-        int budget
+        Objective budget
     ) {
         const auto it = std::upper_bound(
             frontier.begin(),
             frontier.end(),
             budget,
-            [](int b, const ExactImportanceFrontierPoint_& p) {
+            [](Objective b, const ExactImportanceFrontierPoint_& p) {
                 return b < p.obj;
             }
         );
@@ -21735,9 +23433,9 @@ private:
 
 
     static inline void insert_exact_base_min_frontier_point_(
-        std::map<int, int>& frontier,
-        int obj,
-        int original
+        std::map<Objective, Objective>& frontier,
+        Objective obj,
+        Objective original
     ) {
         auto it = frontier.lower_bound(obj);
 
@@ -21767,9 +23465,9 @@ private:
     }
 
     static inline void insert_exact_base_max_frontier_point_(
-        std::map<int, int>& frontier,
-        int obj,
-        int original
+        std::map<Objective, Objective>& frontier,
+        Objective obj,
+        Objective original
     ) {
         auto it = frontier.lower_bound(obj);
 
@@ -21800,8 +23498,8 @@ private:
 
     static inline void insert_exact_divisive_min_frontier_point_(
         ExactDivisiveFrontier_& frontier,
-        int obj,
-        int original,
+        Objective obj,
+        Objective original,
         double replacement
     ) {
         for (const auto& p : frontier) {
@@ -21832,7 +23530,7 @@ private:
             frontier.begin(),
             frontier.end(),
             obj,
-            [](int o, const ExactDivisiveFrontierPoint_& p) {
+            [](Objective o, const ExactDivisiveFrontierPoint_& p) {
                 return o < p.obj;
             }
         );
@@ -21845,8 +23543,8 @@ private:
 
     static inline void insert_exact_divisive_max_frontier_point_(
         ExactDivisiveFrontier_& frontier,
-        int obj,
-        int original,
+        Objective obj,
+        Objective original,
         double replacement
     ) {
         for (const auto& p : frontier) {
@@ -21877,7 +23575,7 @@ private:
             frontier.begin(),
             frontier.end(),
             obj,
-            [](int o, const ExactDivisiveFrontierPoint_& p) {
+            [](Objective o, const ExactDivisiveFrontierPoint_& p) {
                 return o < p.obj;
             }
         );
@@ -21890,7 +23588,7 @@ private:
 
     static inline ExactBaseLossFrontier_
     exact_base_frontier_map_to_vector_(
-        const std::map<int, int>& frontier
+        const std::map<Objective, Objective>& frontier
     ) {
         ExactBaseLossFrontier_ out;
         out.reserve(frontier.size());
@@ -21960,10 +23658,10 @@ private:
 
     static inline void insert_exact_divisive_neutral_from_base_maps_(
         ExactDivisiveFeatureFrontierAccumulator_& acc,
-        const std::map<int, int>& base_lower,
-        const std::map<int, int>& base_upper
+        const std::map<Objective, Objective>& base_lower,
+        const std::map<Objective, Objective>& base_upper
     ) {
-        auto add = [&](const std::map<int, int>& base) {
+        auto add = [&](const std::map<Objective, Objective>& base) {
             for (const auto& [obj, original] : base) {
                 const double replacement = static_cast<double>(original);
                 insert_exact_divisive_min_frontier_point_(
@@ -21982,7 +23680,7 @@ private:
         ExactDivisiveFeatureFrontierAccumulator_& acc,
         const ExactBaseLossFrontier_& base_lower,
         const ExactBaseLossFrontier_& base_upper,
-        int budget
+        Objective budget
     ) {
         auto add = [&](const ExactBaseLossFrontier_& base) {
             for (const auto& p : base) {
@@ -22009,7 +23707,7 @@ private:
 
     void require_exact_importance_eval_is_training_(
         const ExactReplacementIntervalEvalSetup_& setup,
-        const std::vector<int>& y_eval
+        const std::vector<Prediction>& y_eval
     ) const {
         if (setup.ctx.n_eval != n_samples) {
             throw std::runtime_error(
@@ -22056,9 +23754,9 @@ private:
 
     static inline void insert_zero_for_sparse_feature_accumulator_(
         ExactFeatureFrontierAccumulator_& acc,
-        int obj
+        Objective obj
     ) {
-        if (obj == std::numeric_limits<int>::max()) return;
+        if (obj == std::numeric_limits<Objective>::max()) return;
         insert_exact_min_frontier_point_(acc.lower, obj, 0.0);
         insert_exact_max_frontier_point_(acc.upper, obj, 0.0);
     }
@@ -22067,14 +23765,14 @@ private:
     collect_exact_global_importance_frontiers_cached_(
         const TreeTrieNode* node,
         int remaining_depth,
-        int delta,
+        Objective delta,
         const Packed& original_mask,
         const Packed& replacement_root_mask,
         const ExactSparseReplacementStates_& states,
         const ExactImportanceSemanticPath_& semantic_path,
         const std::vector<int>& internal_to_variable,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<std::vector<int>>*
             matched_group_of_row_by_variable_eval,
@@ -22089,12 +23787,12 @@ private:
             return nullptr;
         }
 
-        constexpr int INF = std::numeric_limits<int>::max();
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
 
         // The canonical node stores the largest budget ever solved there.
         // Reducing the root budget by delta shifts that largest reachable
         // node budget down by the same delta.
-        const int budget = node->budget - delta;
+        const Objective budget = node->budget - delta;
 
         if (
             budget < 0 ||
@@ -22125,14 +23823,14 @@ private:
         // previously unseen variable is discovered later, all earlier
         // alternatives had zero importance for it, so this single number is
         // sufficient to seed its zero point exactly.
-        int prior_min_feasible_obj = INF;
+        Objective prior_min_feasible_obj = INF;
         bool saw_solution = false;
 
         // OR alternatives: leaves.
         for (const auto& leaf : node->leaves) {
             if (leaf.loss > budget) continue;
 
-            const int original_mistakes =
+            const Objective original_mistakes =
                 exact_wrong_count_for_leaf_(
                     original_mask,
                     leaf.prediction,
@@ -22218,8 +23916,8 @@ private:
 
                 if (!L || !R) continue;
 
-                const int minL = L->min_objective;
-                const int minR = R->min_objective;
+                const Objective minL = L->min_objective;
+                const Objective minR = R->min_objective;
 
                 if (minL == INF || minR == INF) continue;
                 if (minL + minR > budget) continue;
@@ -22344,8 +24042,8 @@ private:
                 const auto& LF = left_entry->frontiers;
                 const auto& RF = right_entry->frontiers;
 
-                const int left_budget = L->budget - delta;
-                const int right_budget = R->budget - delta;
+                const Objective left_budget = L->budget - delta;
+                const Objective right_budget = R->budget - delta;
 
                 if (
                     LF.min_feasible_obj == INF ||
@@ -22356,7 +24054,7 @@ private:
                     continue;
                 }
 
-                const int split_min_obj =
+                const Objective split_min_obj =
                     LF.min_feasible_obj + RF.min_feasible_obj;
 
                 if (split_min_obj > budget) continue;
@@ -22413,12 +24111,13 @@ private:
                             if (lp.obj > left_budget) break;
                             if (lp.obj > budget) break;
 
-                            const int rem_parent = budget - lp.obj;
-                            const int rem =
+                            const Objective rem_parent = objective_remainder(budget, lp.obj);
+                            const Objective rem =
                                 std::min(rem_parent, right_budget);
 
                             for (const auto& rp : right_feature->lower) {
                                 if (rp.obj > rem) break;
+                                if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
 
                                 insert_exact_min_frontier_point_(
                                     parent_feature.lower,
@@ -22433,12 +24132,13 @@ private:
                             if (lp.obj > left_budget) break;
                             if (lp.obj > budget) break;
 
-                            const int rem_parent = budget - lp.obj;
-                            const int rem =
+                            const Objective rem_parent = objective_remainder(budget, lp.obj);
+                            const Objective rem =
                                 std::min(rem_parent, right_budget);
 
                             for (const auto& rp : right_feature->upper) {
                                 if (rp.obj > rem) break;
+                                if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
 
                                 insert_exact_max_frontier_point_(
                                     parent_feature.upper,
@@ -22450,11 +24150,11 @@ private:
                     } else if (left_feature) {
                         // right side is identically zero for this feature.
                         // only its cheapest feasible completion can matter.
-                        const int zero_obj = RF.min_feasible_obj;
+                        const Objective zero_obj = RF.min_feasible_obj;
 
                         for (const auto& lp : left_feature->lower) {
                             if (lp.obj > left_budget) break;
-                            const int total_obj = lp.obj + zero_obj;
+                            const Objective total_obj = lp.obj + zero_obj;
                             if (total_obj > budget) break;
 
                             insert_exact_min_frontier_point_(
@@ -22466,7 +24166,7 @@ private:
 
                         for (const auto& lp : left_feature->upper) {
                             if (lp.obj > left_budget) break;
-                            const int total_obj = lp.obj + zero_obj;
+                            const Objective total_obj = lp.obj + zero_obj;
                             if (total_obj > budget) break;
 
                             insert_exact_max_frontier_point_(
@@ -22477,11 +24177,11 @@ private:
                         }
                     } else if (right_feature) {
                         // left side is identically zero for this feature
-                        const int zero_obj = LF.min_feasible_obj;
+                        const Objective zero_obj = LF.min_feasible_obj;
 
                         for (const auto& rp : right_feature->lower) {
                             if (rp.obj > right_budget) break;
-                            const int total_obj = zero_obj + rp.obj;
+                            const Objective total_obj = zero_obj + rp.obj;
                             if (total_obj > budget) break;
 
                             insert_exact_min_frontier_point_(
@@ -22493,7 +24193,7 @@ private:
 
                         for (const auto& rp : right_feature->upper) {
                             if (rp.obj > right_budget) break;
-                            const int total_obj = zero_obj + rp.obj;
+                            const Objective total_obj = zero_obj + rp.obj;
                             if (total_obj > budget) break;
 
                             insert_exact_max_frontier_point_(
@@ -22546,14 +24246,14 @@ private:
     collect_exact_global_divisive_frontiers_cached_(
         const TreeTrieNode* node,
         int remaining_depth,
-        int delta,
+        Objective delta,
         const Packed& original_mask,
         const Packed& replacement_root_mask,
         const ExactSparseReplacementStates_& states,
         const ExactImportanceSemanticPath_& semantic_path,
         const std::vector<int>& internal_to_variable,
         const EvalCtx& ctx,
-        const std::vector<Packed>& Y_eval_bits,
+        const EvalTargets& Y_eval_bits,
         const Packed* BBwrong_eval,
         const std::vector<std::vector<int>>*
             matched_group_of_row_by_variable_eval,
@@ -22566,8 +24266,8 @@ private:
     ) const {
         if (!node || remaining_depth < 0) return nullptr;
 
-        constexpr int INF = std::numeric_limits<int>::max();
-        const int budget = node->budget - delta;
+        constexpr Objective INF = std::numeric_limits<Objective>::max();
+        const Objective budget = node->budget - delta;
 
         if (
             budget < 0 ||
@@ -22590,15 +24290,15 @@ private:
         }
 
         std::map<int, ExactDivisiveFeatureFrontierAccumulator_> feature_acc;
-        std::map<int, int> base_lower_acc;
-        std::map<int, int> base_upper_acc;
-        int prior_min_feasible_obj = INF;
+        std::map<Objective, Objective> base_lower_acc;
+        std::map<Objective, Objective> base_upper_acc;
+        Objective prior_min_feasible_obj = INF;
         bool saw_solution = false;
 
         for (const auto& leaf : node->leaves) {
             if (leaf.loss > budget) continue;
 
-            const int original_mistakes =
+            const Objective original_mistakes =
                 exact_wrong_count_for_leaf_(
                     original_mask,
                     leaf.prediction,
@@ -22695,8 +24395,8 @@ private:
                 const TreeTrieNode* R = split.right.get();
                 if (!L || !R) continue;
 
-                const int minL = L->min_objective;
-                const int minR = R->min_objective;
+                const Objective minL = L->min_objective;
+                const Objective minR = R->min_objective;
                 if (minL == INF || minR == INF) continue;
                 if (minL + minR > budget) continue;
 
@@ -22817,8 +24517,8 @@ private:
 
                 const auto& LF = left_entry->frontiers;
                 const auto& RF = right_entry->frontiers;
-                const int left_budget = L->budget - delta;
-                const int right_budget = R->budget - delta;
+                const Objective left_budget = L->budget - delta;
+                const Objective right_budget = R->budget - delta;
 
                 if (
                     LF.min_feasible_obj == INF ||
@@ -22829,19 +24529,20 @@ private:
                     continue;
                 }
 
-                const int split_min_obj =
+                const Objective split_min_obj =
                     LF.min_feasible_obj + RF.min_feasible_obj;
                 if (split_min_obj > budget) continue;
 
-                std::map<int, int> split_base_lower;
-                std::map<int, int> split_base_upper;
+                std::map<Objective, Objective> split_base_lower;
+                std::map<Objective, Objective> split_base_upper;
 
                 for (const auto& lp : LF.base_lower) {
                     if (lp.obj > left_budget || lp.obj > budget) break;
-                    const int rem =
-                        std::min(budget - lp.obj, right_budget);
+                    const Objective rem =
+                        std::min(objective_remainder(budget, lp.obj), right_budget);
                     for (const auto& rp : RF.base_lower) {
                         if (rp.obj > rem) break;
+                        if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
                         insert_exact_base_min_frontier_point_(
                             split_base_lower,
                             lp.obj + rp.obj,
@@ -22852,10 +24553,11 @@ private:
 
                 for (const auto& lp : LF.base_upper) {
                     if (lp.obj > left_budget || lp.obj > budget) break;
-                    const int rem =
-                        std::min(budget - lp.obj, right_budget);
+                    const Objective rem =
+                        std::min(objective_remainder(budget, lp.obj), right_budget);
                     for (const auto& rp : RF.base_upper) {
                         if (rp.obj > rem) break;
+                        if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
                         insert_exact_base_max_frontier_point_(
                             split_base_upper,
                             lp.obj + rp.obj,
@@ -22911,10 +24613,11 @@ private:
                     if (left_feature && right_feature) {
                         for (const auto& lp : left_feature->lower) {
                             if (lp.obj > left_budget || lp.obj > budget) break;
-                            const int rem =
-                                std::min(budget - lp.obj, right_budget);
+                            const Objective rem =
+                                std::min(objective_remainder(budget, lp.obj), right_budget);
                             for (const auto& rp : right_feature->lower) {
                                 if (rp.obj > rem) break;
+                                if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
                                 insert_exact_divisive_min_frontier_point_(
                                     parent_feature.lower,
                                     lp.obj + rp.obj,
@@ -22926,10 +24629,11 @@ private:
 
                         for (const auto& lp : left_feature->upper) {
                             if (lp.obj > left_budget || lp.obj > budget) break;
-                            const int rem =
-                                std::min(budget - lp.obj, right_budget);
+                            const Objective rem =
+                                std::min(objective_remainder(budget, lp.obj), right_budget);
                             for (const auto& rp : right_feature->upper) {
                                 if (rp.obj > rem) break;
+                                if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
                                 insert_exact_divisive_max_frontier_point_(
                                     parent_feature.upper,
                                     lp.obj + rp.obj,
@@ -22942,10 +24646,11 @@ private:
                         auto combine_min = [&](const ExactBaseLossFrontier_& base) {
                             for (const auto& lp : left_feature->lower) {
                                 if (lp.obj > left_budget || lp.obj > budget) break;
-                                const int rem =
-                                    std::min(budget - lp.obj, right_budget);
+                                const Objective rem =
+                                    std::min(objective_remainder(budget, lp.obj), right_budget);
                                 for (const auto& rp : base) {
                                     if (rp.obj > rem) break;
+                                    if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
                                     insert_exact_divisive_min_frontier_point_(
                                         parent_feature.lower,
                                         lp.obj + rp.obj,
@@ -22962,10 +24667,11 @@ private:
                         auto combine_max = [&](const ExactBaseLossFrontier_& base) {
                             for (const auto& lp : left_feature->upper) {
                                 if (lp.obj > left_budget || lp.obj > budget) break;
-                                const int rem =
-                                    std::min(budget - lp.obj, right_budget);
+                                const Objective rem =
+                                    std::min(objective_remainder(budget, lp.obj), right_budget);
                                 for (const auto& rp : base) {
                                     if (rp.obj > rem) break;
+                                    if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
                                     insert_exact_divisive_max_frontier_point_(
                                         parent_feature.upper,
                                         lp.obj + rp.obj,
@@ -22982,10 +24688,11 @@ private:
                         auto combine_min = [&](const ExactBaseLossFrontier_& base) {
                             for (const auto& rp : right_feature->lower) {
                                 if (rp.obj > right_budget || rp.obj > budget) break;
-                                const int rem =
-                                    std::min(budget - rp.obj, left_budget);
+                                const Objective rem =
+                                    std::min(objective_remainder(budget, rp.obj), left_budget);
                                 for (const auto& lp : base) {
                                     if (lp.obj > rem) break;
+                                    if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
                                     insert_exact_divisive_min_frontier_point_(
                                         parent_feature.lower,
                                         lp.obj + rp.obj,
@@ -23002,10 +24709,11 @@ private:
                         auto combine_max = [&](const ExactBaseLossFrontier_& base) {
                             for (const auto& rp : right_feature->upper) {
                                 if (rp.obj > right_budget || rp.obj > budget) break;
-                                const int rem =
-                                    std::min(budget - rp.obj, left_budget);
+                                const Objective rem =
+                                    std::min(objective_remainder(budget, rp.obj), left_budget);
                                 for (const auto& lp : base) {
                                     if (lp.obj > rem) break;
+                                    if constexpr (regression_objective) { if (lp.obj + rp.obj > budget) break; }
                                     insert_exact_divisive_max_frontier_point_(
                                         parent_feature.upper,
                                         lp.obj + rp.obj,
@@ -23074,9 +24782,452 @@ private:
         return entry;
     }
 
+    // conservative paired Wald bounds for divisive model reliance across the
+    // entire stored Rashomon graph, without enumerating individual trees.
+    // we use Fmax = min(A+B, 2*m-A-B).
+    // the endpoints returned for each variable are extrema of
+    //   B/A +/- z * sqrt(m/(m-1) * B*Fmax/A^3).
+    // this is a the tighest possible bound without further assumptions (i.e., actually having the covariance)
+    // DP stores one entry (A,B) -> minimum training objective
+    // pruning conditions are weaker than we would like
+    std::vector<ExactImportanceInterval>
+    get_divisive_wald_marginal_bounds_packed_trie(
+        const std::vector<std::vector<uint8_t>>& X_recipient,
+        const std::vector<std::vector<uint8_t>>& X_donor,
+        const std::vector<Prediction>& y_recipient,
+        double z_value,
+        Objective budget_override = -1,
+        const std::vector<std::vector<int>>& variable_columns_in = {}
+    ) const {
+        if (!result) {
+            throw std::runtime_error("Fit a Rashomon graph before computing Wald bounds.");
+        }
+        if (use_deferral) {
+            throw std::runtime_error("This Wald method currently supports non-deferring trees only.");
+        }
+        if (!std::isfinite(z_value) || z_value < 0.0) {
+            throw std::runtime_error("z_value must be finite and nonnegative.");
+        }
 
+        const EvalCtx original = build_eval_ctx_(X_recipient, n_features);
+        const EvalCtx donor = build_eval_ctx_(X_donor, n_features);
+        const int m = original.n_eval;
+        if (m < 2 || donor.n_eval != m || static_cast<int>(y_recipient.size()) != m) {
+            throw std::runtime_error("Recipient X, donor X, and recipient y must align, with m >= 2.");
+        }
+        const int Q = budget_override >= 0 ? budget_override : result->budget;
+        if (Q > result->budget) {
+            throw std::runtime_error("Requested budget exceeds the fitted graph's root budget.");
+        }
+
+        // binary columns first, then each group of thresholds for a continuous feature
+        std::vector<std::vector<int>> groups = variable_columns_in;
+        if (groups.empty()) {
+            const int first_cont = first_continuous_feature_();
+            for (int f = 0; f < first_cont; ++f) groups.push_back({f});
+            for (int g = 0; g < static_cast<int>(continuous_starts.size()); ++g) {
+                std::vector<int> cols;
+                for (int f = continuous_starts[static_cast<size_t>(g)];
+                     f < continuous_group_end_(g); ++f) cols.push_back(f);
+                groups.push_back(std::move(cols));
+            }
+        }
+        std::vector<int> used(static_cast<size_t>(n_features), 0);
+        for (const auto& group : groups) {
+            if (group.empty()) throw std::runtime_error("Empty variable group.");
+            for (int col : group) {
+                if (col < 0 || col >= n_features || ++used[static_cast<size_t>(col)] != 1) {
+                    throw std::runtime_error("Variable groups must be disjoint and in range.");
+                }
+            }
+        }
+        for (int count : used) {
+            if (count != 1) throw std::runtime_error("Variable groups must cover every internal feature.");
+        }
+
+        const auto labels = build_eval_y_bits_(
+            y_recipient, num_classes, original.n_words, original.tail_mask);
+        const Packed full = eval_root_mask_(original.n_words, original.tail_mask);
+        const uint64_t stride = static_cast<uint64_t>(m) + 1ULL;
+        using Table = std::unordered_map<uint64_t, int>;  // (A,B) -> min objective
+
+        auto pack_counts = [stride](int A, int B) -> uint64_t {
+            return static_cast<uint64_t>(A) * stride + static_cast<uint64_t>(B);
+        };
+        auto insert_min = [&](Table& table, int A, int B, int q) {
+            if (q > Q) return;
+            const uint64_t key = pack_counts(A, B);
+            auto it = table.find(key);
+            if (it == table.end()) table.emplace(key, q);
+            else if (q < it->second) it->second = q;
+        };
+
+        auto solve = [&](auto&& self,
+                         const TreeTrieNode* node,
+                         const Packed& maskA,
+                         const Packed& maskB,
+                         const EvalCtx& changed) -> Table {
+            Table out;
+            if (!node || node->min_objective > Q) return out;
+
+            for (const auto& leaf : node->leaves) {
+                if (leaf.loss > Q) continue;
+                const int pred = leaf.prediction;
+                if (pred < 0 || pred >= num_classes) {
+                    throw std::runtime_error("Leaf has an invalid class prediction.");
+                }
+                const int A = count_eval_mask_(maskA, original.n_words)
+                    - popcount_and_eval_(maskA, labels[static_cast<size_t>(pred)], original.n_words);
+                const int B = count_eval_mask_(maskB, original.n_words)
+                    - popcount_and_eval_(maskB, labels[static_cast<size_t>(pred)], original.n_words);
+                insert_min(out, A, B, leaf.loss);
+            }
+
+            for (const auto& split : node->splits) {
+                const TreeTrieNode* left = split.left.get();
+                const TreeTrieNode* right = split.right.get();
+                if (!left || !right) continue;
+                if (left->min_objective == std::numeric_limits<Objective>::max() ||
+                    right->min_objective == std::numeric_limits<Objective>::max() ||
+                    static_cast<int64_t>(left->min_objective) + right->min_objective > Q) continue;
+                const int col = split.feature;
+                if (col < 0 || col >= n_features) throw std::runtime_error("Invalid graph split.");
+
+                Packed aL(static_cast<size_t>(original.n_words));
+                Packed aR(static_cast<size_t>(original.n_words));
+                Packed bL(static_cast<size_t>(original.n_words));
+                Packed bR(static_cast<size_t>(original.n_words));
+                and_bits_eval(maskA, original.X_bits_eval[static_cast<size_t>(col)],
+                              aL, original.n_words, original.tail_mask);
+                andnot_bits_eval(maskA, original.X_bits_eval[static_cast<size_t>(col)],
+                                 aR, original.n_words, original.tail_mask);
+                and_bits_eval(maskB, changed.X_bits_eval[static_cast<size_t>(col)],
+                              bL, original.n_words, original.tail_mask);
+                andnot_bits_eval(maskB, changed.X_bits_eval[static_cast<size_t>(col)],
+                                 bR, original.n_words, original.tail_mask);
+
+                Table LT = self(self, left, aL, bL, changed);
+                Table RT = self(self, right, aR, bR, changed);
+                for (const auto& [keyL, qL] : LT) {
+                    const int AL = static_cast<int>(keyL / stride);
+                    const int BL = static_cast<int>(keyL % stride);
+                    for (const auto& [keyR, qR] : RT) {
+                        const int q = qL + qR;
+                        if (q > Q) continue;
+                        const int AR = static_cast<int>(keyR / stride);
+                        const int BR = static_cast<int>(keyR % stride);
+                        insert_min(out, AL + AR, BL + BR, q);
+                    }
+                }
+            }
+            return out;
+        };
+
+        std::vector<ExactImportanceInterval> bounds;
+        bounds.reserve(groups.size());
+        const double prefactor = z_value * std::sqrt(static_cast<double>(m) / (m - 1));
+        for (const auto& group : groups) {
+            EvalCtx changed = original; // copy packed columns, no O(m * p) row matrix
+            for (int col : group) {
+                changed.X_bits_eval[static_cast<size_t>(col)] =
+                    donor.X_bits_eval[static_cast<size_t>(col)];
+            }
+            const Table root = solve(solve, result.get(), full, full, changed);
+            if (root.empty()) throw std::runtime_error("No feasible Rashomon trees at this budget.");
+            double lower = std::numeric_limits<double>::infinity();
+            double upper = -std::numeric_limits<double>::infinity();
+            for (const auto& [key, q] : root) {
+                if (q > Q) continue;
+                const int A = static_cast<int>(key / stride);
+                const int B = static_cast<int>(key % stride);
+                if (A == 0) {
+                    throw std::runtime_error(
+                        "A feasible tree has zero recipient errors: divisive Wald is undefined.");
+                }
+                const int Fmax = std::min(A + B, 2 * m - A - B);
+                const double ratio = static_cast<double>(B) / A;
+                const double halfwidth = prefactor * std::sqrt(
+                    static_cast<double>(B) * Fmax /
+                    (static_cast<double>(A) * A * A));
+                lower = std::min(lower, ratio - halfwidth);
+                upper = std::max(upper, ratio + halfwidth);
+            }
+            bounds.emplace_back(lower, upper);
+        }
+        return bounds;
+    }
+
+    std::vector<ExactImportanceInterval>
+    get_divisive_wald_structural_bounds_packed_trie_(
+        const std::vector<std::vector<uint8_t>>& X_recipient,
+        const std::vector<std::vector<uint8_t>>& X_donor,
+        const std::vector<Prediction>& y_recipient,
+        double z_value,
+        bool track_Q,
+        Objective budget_override = -1,
+        const std::vector<std::vector<int>>& variable_columns_in = {}
+    ) const {
+        if (!result) {
+            throw std::runtime_error("Fit a Rashomon graph before computing Wald bounds.");
+        }
+        if (use_deferral) {
+            throw std::runtime_error("Structural Wald bounds support non-deferring trees only.");
+        }
+        if (!std::isfinite(z_value) || z_value < 0.0) {
+            throw std::runtime_error("z_value must be finite and nonnegative.");
+        }
+
+        const EvalCtx original = build_eval_ctx_(X_recipient, n_features);
+        const EvalCtx donor    = build_eval_ctx_(X_donor, n_features);
+        const int m = original.n_eval;
+        if (m < 2 || donor.n_eval != m ||
+            static_cast<int>(y_recipient.size()) != m) {
+            throw std::runtime_error("Recipient and donor rows/labels must align (m >= 2).");
+        }
+        if (budget_override < -1) {
+            throw std::runtime_error("budget_override must be >= -1.");
+        }
+        const Objective budget = budget_override < 0 ? result->budget : budget_override;
+        if (budget > result->budget) {
+            throw std::runtime_error("Requested budget exceeds the fitted graph budget.");
+        }
+
+        std::vector<std::vector<int>> groups = variable_columns_in;
+        if (groups.empty()) {
+            const int first_cont = first_continuous_feature_();
+            for (int f = 0; f < first_cont; ++f) groups.push_back({f});
+            for (int g = 0; g < static_cast<int>(continuous_starts.size()); ++g) {
+                std::vector<int> cols;
+                for (int f = continuous_starts[static_cast<size_t>(g)];
+                    f < continuous_group_end_(g); ++f) {
+                    cols.push_back(f);
+                }
+                groups.push_back(std::move(cols));
+            }
+        }
+        std::vector<int> used(static_cast<size_t>(n_features), 0);
+        for (const auto& group : groups) {
+            if (group.empty()) throw std::runtime_error("Empty variable group.");
+            for (int col : group) {
+                if (col < 0 || col >= n_features ||
+                    ++used[static_cast<size_t>(col)] != 1) {
+                    throw std::runtime_error("Variable groups must be disjoint and in range.");
+                }
+            }
+        }
+        for (int count : used) {
+            if (count != 1) {
+                throw std::runtime_error("Variable groups must cover every internal feature.");
+            }
+        }
+
+        const auto labels = build_eval_y_bits_(
+            y_recipient, num_classes, original.n_words, original.tail_mask);
+        const Packed full = eval_root_mask_(original.n_words, original.tail_mask);
+
+        struct State {
+            int A, B, E, Q;
+            bool operator==(const State& o) const noexcept {
+                return A == o.A && B == o.B && E == o.E && Q == o.Q;
+            }
+        };
+        struct StateHash {
+            size_t operator()(const State& s) const noexcept {
+                uint64_t h = mix64(static_cast<uint64_t>(s.A));
+                h ^= mix64(static_cast<uint64_t>(s.B) + 0x9e3779b97f4a7c15ULL);
+                h ^= mix64(static_cast<uint64_t>(s.E) + 0xbf58476d1ce4e5b9ULL);
+                h ^= mix64(static_cast<uint64_t>(s.Q) + 0x94d049bb133111ebULL);
+                return static_cast<size_t>(h);
+            }
+        };
+        using Table = std::unordered_map<State, int, StateHash>;
+
+        auto insert_min = [budget](Table& dst, State s, Objective obj) {
+            if (obj > budget) return;
+            auto [it, inserted] = dst.emplace(s, obj);
+            if (!inserted && obj < it->second) it->second = obj;
+        };
+
+        // each subtree is evaluated on its own original and perturbed masks.
+        // a leaf adds original errors (A), perturbed errors (B), same-leaf
+        // jointly-wrong pairs (E), and optionally same-leaf pairs (Q).
+        auto solve = [&](auto&& self, const TreeTrieNode* node,
+                        const Packed& maskA, const Packed& maskB,
+                        const EvalCtx& changed) -> Table {
+            Table out;
+            if (!node || node->min_objective > budget) return out;
+
+            for (const auto& leaf : node->leaves) {
+                if (leaf.loss > budget) continue;
+                const int pred = leaf.prediction;
+                if (pred < 0 || pred >= num_classes) {
+                    throw std::runtime_error("Invalid graph leaf prediction.");
+                }
+                const auto& correct = labels[static_cast<size_t>(pred)].w;
+                State s{0, 0, 0, 0};
+                for (int w = 0; w < original.n_words; ++w) {
+                    const uint64_t a = maskA.w[static_cast<size_t>(w)];
+                    const uint64_t b = maskB.w[static_cast<size_t>(w)];
+                    const uint64_t c = correct[static_cast<size_t>(w)];
+                    const uint64_t both = a & b;
+                    s.A += popcnt64(a & ~c);
+                    s.B += popcnt64(b & ~c);
+                    s.E += popcnt64(both & ~c);
+                    if (track_Q) s.Q += popcnt64(both);
+                }
+                insert_min(out, s, leaf.loss);
+            }
+
+            for (const auto& split : node->splits) {
+                const TreeTrieNode* left = split.left.get();
+                const TreeTrieNode* right = split.right.get();
+                if (!left || !right ||
+                    left->min_objective == std::numeric_limits<Objective>::max() ||
+                    right->min_objective == std::numeric_limits<Objective>::max() ||
+                    static_cast<int64_t>(left->min_objective) +
+                        right->min_objective > budget) {
+                    continue;
+                }
+                const int col = split.feature;
+                if (col < 0 || col >= n_features) {
+                    throw std::runtime_error("Invalid graph split feature.");
+                }
+
+                Packed aL(static_cast<size_t>(original.n_words));
+                Packed aR(static_cast<size_t>(original.n_words));
+                Packed bL(static_cast<size_t>(original.n_words));
+                Packed bR(static_cast<size_t>(original.n_words));
+                and_bits_eval(maskA, original.X_bits_eval[static_cast<size_t>(col)],
+                            aL, original.n_words, original.tail_mask);
+                andnot_bits_eval(maskA, original.X_bits_eval[static_cast<size_t>(col)],
+                                aR, original.n_words, original.tail_mask);
+                and_bits_eval(maskB, changed.X_bits_eval[static_cast<size_t>(col)],
+                            bL, original.n_words, original.tail_mask);
+                andnot_bits_eval(maskB, changed.X_bits_eval[static_cast<size_t>(col)],
+                                bR, original.n_words, original.tail_mask);
+
+                Table LT = self(self, left, aL, bL, changed);
+                Table RT = self(self, right, aR, bR, changed);
+                for (const auto& [sl, ql] : LT) {
+                    for (const auto& [sr, qr] : RT) {
+                        const int64_t sum_obj = static_cast<int64_t>(ql) + qr;
+                        if (sum_obj > budget) continue;
+                        insert_min(out,
+                            State{sl.A + sr.A, sl.B + sr.B,
+                                sl.E + sr.E, sl.Q + sr.Q},
+                            static_cast<int>(sum_obj));
+                    }
+                }
+            }
+            return out;
+        };
+
+        const double prefactor = z_value *
+            std::sqrt(static_cast<double>(m) / static_cast<double>(m - 1));
+        std::vector<ExactImportanceInterval> bounds;
+        bounds.reserve(groups.size());
+
+        for (const auto& group : groups) {
+            EvalCtx changed = original;
+            for (int col : group) {
+                changed.X_bits_eval[static_cast<size_t>(col)] =
+                    donor.X_bits_eval[static_cast<size_t>(col)];
+            }
+
+            // H: # recipient/donor pairs for which at least one of this
+            // variable's threshold bits differs. Computed once per feature.
+            int H = 0;
+            for (int w = 0; w < original.n_words; ++w) {
+                uint64_t diff = 0;
+                for (int col : group) {
+                    diff |= original.X_bits_eval[static_cast<size_t>(col)]
+                                .w[static_cast<size_t>(w)] ^
+                            donor.X_bits_eval[static_cast<size_t>(col)]
+                                .w[static_cast<size_t>(w)];
+                }
+                if (w == original.n_words - 1) diff &= original.tail_mask;
+                H += popcnt64(diff);
+            }
+
+            const Table root = solve(solve, result.get(), full, full, changed);
+            if (root.empty()) {
+                throw std::runtime_error("No feasible Rashomon trees at this budget.");
+            }
+            double lower = std::numeric_limits<double>::infinity();
+            double upper = -std::numeric_limits<double>::infinity();
+            for (const auto& [s, obj] : root) {
+                if (obj > budget) continue;
+                if (s.A == 0) {
+                    throw std::runtime_error(
+                        "A feasible tree has zero recipient errors: divisive Wald undefined.");
+                }
+                const int Fmax = std::min(s.A + s.B, 2 * m - s.A - s.B);
+                const int F_errors = s.A + s.B - 2 * s.E;
+                const int F_correct =
+                    2 * (track_Q ? (m - s.Q) : H) - s.A - s.B + 2 * s.E;
+                const int Fbound = std::min({Fmax, H, F_errors, F_correct});
+                if (Fbound < 0) {
+                    throw std::runtime_error("Inconsistent structural Wald state.");
+                }
+                const double ratio = static_cast<double>(s.B) / s.A;
+                const double halfwidth = prefactor * std::sqrt(
+                    static_cast<double>(s.B) * Fbound /
+                    (static_cast<double>(s.A) * s.A * s.A));
+                lower = std::min(lower, ratio - halfwidth);
+                upper = std::max(upper, ratio + halfwidth);
+            }
+            bounds.emplace_back(lower, upper);
+        }
+        return bounds;
+    }
 
 public:
+    std::vector<ExactImportanceInterval>
+    get_divisive_wald_3state_bounds(
+        const std::vector<std::vector<uint8_t>>& X_recipient,
+        const std::vector<std::vector<uint8_t>>& X_donor,
+        const std::vector<Prediction>& y_recipient,
+        double z_value,
+        Objective budget_override = -1,
+        const std::vector<std::vector<int>>& variable_columns = {}
+    ) const {
+        return get_divisive_wald_structural_bounds_packed_trie_(
+            X_recipient, X_donor, y_recipient, z_value,
+            false, budget_override, variable_columns);
+    }
+
+    std::vector<ExactImportanceInterval>
+    get_divisive_wald_4state_bounds(
+        const std::vector<std::vector<uint8_t>>& X_recipient,
+        const std::vector<std::vector<uint8_t>>& X_donor,
+        const std::vector<Prediction>& y_recipient,
+        double z_value,
+        Objective budget_override = -1,
+        const std::vector<std::vector<int>>& variable_columns = {}
+    ) const {
+        return get_divisive_wald_structural_bounds_packed_trie_(
+            X_recipient, X_donor, y_recipient, z_value,
+            true, budget_override, variable_columns);
+    }
+
+    std::vector<ExactImportanceInterval>
+    get_divisive_wald_marginal_bounds(
+        const std::vector<std::vector<uint8_t>>& X_recipient,
+        const std::vector<std::vector<uint8_t>>& X_donor,
+        const std::vector<Prediction>& y_recipient,
+        double z_value,
+        Objective budget_override = -1,
+        const std::vector<std::vector<int>>& variable_columns = {}
+    ) const {
+        return get_divisive_wald_marginal_bounds_packed_trie(
+            X_recipient,
+            X_donor,
+            y_recipient,
+            z_value,
+            budget_override,
+            variable_columns
+        );
+    }
 
     uint8_t reachable_prediction_mask_for_training_sample(int sample_idx) const {
         if (!result) {
@@ -23120,9 +25271,233 @@ public:
         );
     }
 
+    template <typename Count>
+    PredictionCounts<Count> prediction_counts(int sample_idx, Objective budget = -1) const {
+        budget = training_prediction_budget_(sample_idx, budget);
+        return prediction_counts_<Count>(budget, [this, sample_idx](int feature) {
+            return training_value_(sample_idx, feature);
+        });
+    }
+
+    bool has_disagreement(int sample_idx, Objective budget = -1) const {
+        budget = training_prediction_budget_(sample_idx, budget);
+        return has_disagreement_(budget, [this, sample_idx](int feature) {
+            return training_value_(sample_idx, feature);
+        });
+    }
+
+    template <typename Count>
+    std::vector<PredictionCounts<Count>> prediction_counts_for_rows(
+        const uint8_t* rows, std::size_t samples, std::size_t features, Objective budget
+    ) const {
+        budget = eval_prediction_budget_(features, budget);
+        std::vector<PredictionCounts<Count>> counts;
+        counts.reserve(samples);
+        for (std::size_t i = 0; i < samples; ++i) {
+            counts.push_back(prediction_counts_<Count>(budget, [rows, i, features](int feature) {
+                return rows[i * features + feature] != 0;
+            }));
+        }
+        return counts;
+    }
+
+    std::vector<bool> has_disagreement_for_rows(
+        const uint8_t* rows, std::size_t samples, std::size_t features, Objective budget
+    ) const {
+        if constexpr (regression_objective) {
+            budget = eval_prediction_budget_(features, budget);
+            std::vector<bool> result(samples);
+            for (std::size_t i = 0; i < samples; ++i) {
+                result[i] = has_disagreement_(budget, [rows, i, features](int feature) { return rows[i * features + feature] != 0; });
+            }
+            return result;
+        }
+
+        budget = eval_prediction_budget_(features, budget);
+        std::vector<bool> disagreement(samples, false);
+        if (samples == 0 || num_classes < 2 || !result || result->min_objective > budget) {
+            return disagreement;
+        }
+
+        const std::size_t words = (samples + 63) / 64;
+        std::vector<uint64_t> feature_masks(features * words, 0);
+        for (std::size_t i = 0; i < samples; ++i) {
+            const uint8_t* row = rows + i * features;
+            const uint64_t bit = uint64_t(1) << (i & 63);
+            const std::size_t word = i >> 6;
+            for (std::size_t feature = 0; feature < features; ++feature) {
+                if (row[feature]) {
+                    feature_masks[feature * words + word] |= bit;
+                }
+            }
+        }
+
+        struct State {
+            const TreeTrieNode* node;
+            Objective budget;
+            std::vector<uint64_t> rows;
+        };
+
+        std::vector<uint64_t> seen_any(words, 0);
+        std::vector<uint64_t> completed(words, 0);
+        std::vector<std::vector<uint64_t>> seen(
+            static_cast<std::size_t>(num_classes), std::vector<uint64_t>(words, 0)
+        );
+        std::unordered_map<
+            const TreeTrieNode*,
+            std::unordered_map<Objective, std::vector<uint64_t>>
+        > visited;
+
+        std::vector<uint64_t> initial(words, ~uint64_t(0));
+        if (samples & 63) {
+            initial.back() = (uint64_t(1) << (samples & 63)) - 1;
+        }
+        std::vector<State> stack;
+        stack.push_back({result.get(), budget, std::move(initial)});
+        std::size_t remaining_samples = samples;
+
+        while (!stack.empty() && remaining_samples != 0) {
+            State state = std::move(stack.back());
+            stack.pop_back();
+            const TreeTrieNode* node = state.node;
+            const int remaining = std::min(state.budget, node->budget);
+            if (node->min_objective > remaining) {
+                continue;
+            }
+
+            bool active = false;
+            for (std::size_t w = 0; w < words; ++w) {
+                state.rows[w] &= ~completed[w];
+                active |= state.rows[w] != 0;
+            }
+            if (!active) {
+                continue;
+            }
+
+            auto& budgets = visited[node];
+            for (const auto& entry : budgets) {
+                if (entry.first < remaining) {
+                    continue;
+                }
+                for (std::size_t w = 0; w < words; ++w) {
+                    state.rows[w] &= ~entry.second[w];
+                }
+            }
+
+            active = false;
+            for (uint64_t mask : state.rows) {
+                active |= mask != 0;
+            }
+            if (!active) {
+                continue;
+            }
+
+            auto [it, inserted] = budgets.try_emplace(remaining, words, uint64_t(0));
+            for (std::size_t w = 0; w < words; ++w) {
+                it->second[w] |= state.rows[w];
+            }
+
+            for (const auto& leaf : node->leaves) {
+                const int label = leaf.prediction;
+                if (leaf.loss > remaining || label < 0 || label >= num_classes) {
+                    continue;
+                }
+                auto& class_seen = seen[static_cast<std::size_t>(label)];
+                for (std::size_t w = 0; w < words; ++w) {
+                    const uint64_t applicable = state.rows[w] & ~completed[w];
+                    if (!applicable) {
+                        continue;
+                    }
+                    const uint64_t newly_completed = applicable & seen_any[w] & ~class_seen[w];
+                    completed[w] |= newly_completed;
+                    remaining_samples -= static_cast<std::size_t>(popcnt64(newly_completed));
+                    seen_any[w] |= applicable;
+                    class_seen[w] |= applicable;
+                    state.rows[w] = applicable & ~newly_completed;
+                }
+                if (remaining_samples == 0) {
+                    break;
+                }
+            }
+
+            if (remaining_samples == 0) {
+                break;
+            }
+
+            bool has_rows = false;
+            for (uint64_t mask : state.rows) {
+                has_rows |= mask != 0;
+            }
+            if (!has_rows) {
+                continue;
+            }
+
+            for (const auto& split : node->splits) {
+                const TreeTrieNode* left = split.left.get();
+                const TreeTrieNode* right = split.right.get();
+                if (!left || !right) {
+                    continue;
+                }
+
+                const bool left_feasible =
+                    right->min_objective <= remaining &&
+                    left->min_objective <= remaining - right->min_objective;
+                const bool right_feasible =
+                    left->min_objective <= remaining &&
+                    right->min_objective <= remaining - left->min_objective;
+                if (!left_feasible && !right_feasible) {
+                    continue;
+                }
+
+                const uint64_t* bits =
+                    feature_masks.data() + static_cast<std::size_t>(split.feature) * words;
+                std::vector<uint64_t> left_rows;
+                std::vector<uint64_t> right_rows;
+                if (left_feasible) {
+                    left_rows.resize(words);
+                }
+                if (right_feasible) {
+                    right_rows.resize(words);
+                }
+
+                bool any_left = false;
+                bool any_right = false;
+                for (std::size_t w = 0; w < words; ++w) {
+                    if (left_feasible) {
+                        const uint64_t mask = state.rows[w] & bits[w];
+                        left_rows[w] = mask;
+                        any_left |= mask != 0;
+                    }
+                    if (right_feasible) {
+                        const uint64_t mask = state.rows[w] & ~bits[w];
+                        right_rows[w] = mask;
+                        any_right |= mask != 0;
+                    }
+                }
+                if (any_left) {
+                    stack.push_back({
+                        left, remaining - right->min_objective, std::move(left_rows)
+                    });
+                }
+                if (any_right) {
+                    stack.push_back({
+                        right, remaining - left->min_objective, std::move(right_rows)
+                    });
+                }
+            }
+        }
+
+        for (std::size_t i = 0; i < samples; ++i) {
+            disagreement[i] = (completed[i >> 6] & (uint64_t(1) << (i & 63))) != 0;
+        }
+        return disagreement;
+    }
+
     bool training_sample_has_multiple_reachable_predictions(
         int sample_idx
     ) const {
+        if constexpr (regression_objective) return has_disagreement(sample_idx);
+
         const ReachableActions actions =
             reachable_actions_for_training_sample(
                 sample_idx
@@ -23136,6 +25511,11 @@ public:
     bool training_sample_can_defer(
         int sample_idx
     ) const {
+#if defined(ARBORENUM_REGRESSION)
+        const auto counts = prediction_counts<uint64_t>(sample_idx);
+        return counts.find(DEFER_PREDICTION) != counts.end();
+#endif
+
         return reachable_actions_for_training_sample(
             sample_idx
         ).can_defer;
@@ -23162,7 +25542,7 @@ public:
     // main entry: enumerate ALL valid trees under the trie root (or budget_override if >=0),
     // returning (training_objective, prediction vector on evaluation dataset) for each tree.
     // NOTE: this can be extremely large in memory if the Rashomon set is huge.
-    std::vector<PredPackWithObj> get_all_predictions_packed_trie(const std::vector<std::vector<uint8_t>>& X_row_major, int budget_override = -1) const {
+    std::vector<PredPackWithObj> get_all_predictions_packed_trie(const std::vector<std::vector<uint8_t>>& X_row_major, Objective budget_override = -1) const {
         if (!result) {
             throw std::runtime_error("No Rashomon trie has been constructed. Call fit() first.");
         }
@@ -23170,7 +25550,7 @@ public:
         EvalCtx ctx = build_eval_ctx_(X_row_major, this->n_features); // get the evaluation dataset in column major
 
         // decide budget
-        int budget = (budget_override >= 0) ? budget_override : result->budget;
+        Objective budget = (budget_override >= 0) ? budget_override : result->budget;
 
         // root eval mask = all eval rows are 1, with the padding 0s (eval_rows % 64)
         Packed root_mask = eval_root_mask_(ctx.n_words, ctx.tail_mask);
@@ -23195,7 +25575,7 @@ public:
 
     std::vector<DeferralsWithObj> get_all_deferrals_objs_packed_trie(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        int budget_override = -1
+        Objective budget_override = -1
     ) const {
         if (!result) {
             throw std::runtime_error("No Rashomon trie has been constructed. Call fit() first.");
@@ -23203,7 +25583,7 @@ public:
 
         EvalCtx ctx = build_eval_ctx_(X_row_major, this->n_features);
 
-        const int budget = (budget_override >= 0) ? budget_override : result->budget;
+        const Objective budget = (budget_override >= 0) ? budget_override : result->budget;
 
         Packed root_mask = eval_root_mask_(ctx.n_words, ctx.tail_mask);
 
@@ -23233,7 +25613,7 @@ public:
 
     std::vector<int> get_all_deferrals_packed_trie(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        int budget_override = -1
+        Objective budget_override = -1
     ) const {
         if (!result) {
             throw std::runtime_error("No Rashomon trie has been constructed. Call fit() first.");
@@ -23241,7 +25621,7 @@ public:
 
         EvalCtx ctx = build_eval_ctx_(X_row_major, this->n_features);
 
-        const int budget = (budget_override >= 0) ? budget_override : result->budget;
+        const Objective budget = (budget_override >= 0) ? budget_override : result->budget;
 
         Packed root_mask = eval_root_mask_(ctx.n_words, ctx.tail_mask);
 
@@ -23271,9 +25651,9 @@ public:
 
     std::vector<MistakesWithObj> get_all_misclassifications_objs_packed_trie(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        const std::vector<int>& y_eval,
-        int budget_override = -1,
-        const std::vector<int>& bb_pred_eval = {}
+        const std::vector<Prediction>& y_eval,
+        Objective budget_override = -1,
+        const std::vector<Prediction>& bb_pred_eval = {}
     ) const {
         if (!result) {
             throw std::runtime_error("No Rashomon trie has been constructed. Call fit() first.");
@@ -23285,17 +25665,20 @@ public:
             throw std::runtime_error("Eval y has different number of rows than Eval X.");
         }
 
-        const int budget = (budget_override >= 0) ? budget_override : result->budget;
+        const Objective budget = (budget_override >= 0) ? budget_override : result->budget;
 
         Packed root_mask = eval_root_mask_(ctx.n_words, ctx.tail_mask);
 
-        std::vector<Packed> Y_eval_bits = build_eval_y_bits_(
+        EvalTargets Y_eval_bits = build_eval_y_bits_(
             y_eval,
             num_classes,
             ctx.n_words,
             ctx.tail_mask
         );
 
+#if defined(ARBORENUM_REGRESSION)
+        Y_eval_bits.bb_predictions = bb_pred_eval;
+#endif
         Packed BBwrong_eval_storage((size_t)ctx.n_words);
         const Packed* BBwrong_eval_ptr = nullptr;
 
@@ -23338,7 +25721,7 @@ public:
         out.reserve(total);
 
         for (auto& b : buckets) {
-            for (int m : b.mistakes) {
+            for (Objective m : b.mistakes) {
                 out.push_back(MistakesWithObj{b.obj, m});
             }
         }
@@ -23346,11 +25729,11 @@ public:
         return out;
     }
 
-    std::vector<int> get_all_misclassifications_packed_trie(
+    std::vector<Objective> get_all_misclassifications_packed_trie(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        const std::vector<int>& y_eval,
-        int budget_override = -1,
-        const std::vector<int>& bb_pred_eval = {}
+        const std::vector<Prediction>& y_eval,
+        Objective budget_override = -1,
+        const std::vector<Prediction>& bb_pred_eval = {}
     ) const {
         if (!result) {
             throw std::runtime_error("No Rashomon trie has been constructed. Call fit() first.");
@@ -23362,17 +25745,20 @@ public:
             throw std::runtime_error("Eval y has different number of rows than Eval X.");
         }
 
-        const int budget = (budget_override >= 0) ? budget_override : result->budget;
+        const Objective budget = (budget_override >= 0) ? budget_override : result->budget;
 
         Packed root_mask = eval_root_mask_(ctx.n_words, ctx.tail_mask);
 
-        std::vector<Packed> Y_eval_bits = build_eval_y_bits_(
+        EvalTargets Y_eval_bits = build_eval_y_bits_(
             y_eval,
             num_classes,
             ctx.n_words,
             ctx.tail_mask
         );
 
+#if defined(ARBORENUM_REGRESSION)
+        Y_eval_bits.bb_predictions = bb_pred_eval;
+#endif
         Packed BBwrong_eval_storage((size_t)ctx.n_words);
         const Packed* BBwrong_eval_ptr = nullptr;
 
@@ -23404,7 +25790,7 @@ public:
             BBwrong_eval_ptr
         );
 
-        std::vector<int> out;
+        std::vector<Objective> out;
 
         size_t total = 0;
         for (const auto& b : buckets) {
@@ -23413,7 +25799,7 @@ public:
         out.reserve(total);
 
         for (auto& b : buckets) {
-            for (int m : b.mistakes) {
+            for (Objective m : b.mistakes) {
                 out.push_back(m);
             }
         }
@@ -23426,10 +25812,10 @@ public:
     std::vector<ExactImportanceInterval>
     get_exact_replacement_divisive_importance_intervals_cached_frontier_packed_trie(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        const std::vector<int>& y_eval,
-        int budget_override = -1,
+        const std::vector<Prediction>& y_eval,
+        Objective budget_override = -1,
         const std::vector<std::vector<int>>& variable_columns_in = {},
-        const std::vector<int>& bb_pred_eval = {},
+        const std::vector<Prediction>& bb_pred_eval = {},
         const std::vector<std::vector<int>>&
             matched_group_of_row_by_variable_eval = {},
         const std::vector<std::vector<int>>&
@@ -23463,7 +25849,7 @@ public:
             );
         }
 
-        const int delta = result->budget - setup.budget;
+        const Objective delta = result->budget - setup.budget;
         const int number_of_variables =
             static_cast<int>(setup.variable_columns.size());
 
@@ -23524,13 +25910,13 @@ public:
 
         if (
             root_frontiers.min_feasible_obj ==
-                std::numeric_limits<int>::max() ||
+                std::numeric_limits<Objective>::max() ||
             root_frontiers.min_feasible_obj > setup.budget
         ) {
             return {};
         }
 
-        int min_original = std::numeric_limits<int>::max();
+        Objective min_original = std::numeric_limits<Objective>::max();
         for (const auto& p : root_frontiers.base_lower) {
             if (p.obj > setup.budget) break;
             min_original = p.original;
@@ -23596,10 +25982,10 @@ public:
     std::vector<ExactImportanceInterval>
     get_exact_replacement_importance_intervals_cached_frontier_packed_trie(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        const std::vector<int>& y_eval,
-        int budget_override = -1,
+        const std::vector<Prediction>& y_eval,
+        Objective budget_override = -1,
         const std::vector<std::vector<int>>& variable_columns_in = {},
-        const std::vector<int>& bb_pred_eval = {},
+        const std::vector<Prediction>& bb_pred_eval = {},
         const std::vector<std::vector<int>>&
             matched_group_of_row_by_variable_eval = {},
         const std::vector<std::vector<int>>&
@@ -23635,7 +26021,7 @@ public:
             );
         }
 
-        const int delta = result->budget - setup.budget;
+        const Objective delta = result->budget - setup.budget;
 
         const int number_of_variables =
             static_cast<int>(setup.variable_columns.size());
@@ -23705,7 +26091,7 @@ public:
 
         if (
             root_frontiers.min_feasible_obj ==
-                std::numeric_limits<int>::max() ||
+                std::numeric_limits<Objective>::max() ||
             root_frontiers.min_feasible_obj > setup.budget
         ) {
             return {};
@@ -23758,6 +26144,10 @@ public:
         return out;
     }
 
+#if defined(ARBORENUM_REGRESSION)
+#include "regression_importance.hpp"
+#endif
+
     // if sum_samplewise_extrema=false, returns
     //   [ min_f Phi_j(f), max_f Phi_j(f) ]
     // if sum_samplewise_extrema=true, returns a wider range
@@ -23766,16 +26156,28 @@ public:
     std::vector<ExactImportanceInterval>
     get_exact_replacement_importance_intervals_packed_trie(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        const std::vector<int>& y_eval,
-        int budget_override = -1,
+        const std::vector<Prediction>& y_eval,
+        Objective budget_override = -1,
         const std::vector<std::vector<int>>& variable_columns_in = {},
-        const std::vector<int>& bb_pred_eval = {},
+        const std::vector<Prediction>& bb_pred_eval = {},
         const std::vector<std::vector<int>>&
             matched_group_of_row_by_variable_eval = {},
         const std::vector<std::vector<int>>&
             matched_group_size_by_variable_eval = {},
-        bool sum_samplewise_extrema = false
+        bool sum_samplewise_extrema = false,
+        bool optimize_leaf_values = false
     ) const {
+#if defined(ARBORENUM_REGRESSION)
+        std::shared_ptr<TreeTrieNode> single_graph;
+        if (optimize_leaf_values && !result && !sum_samplewise_extrema && matched_group_of_row_by_variable_eval.empty()) {
+            if (trained_depth_budget < 0) throw std::runtime_error("Fit the model first.");
+            const Packed train = regression_importance_train_mask_();
+            const auto tree = single_tree_refined_override_ ? single_tree_refined_override_
+                : build_best_tree_from_caches(train, trained_depth_budget, empty_pk());
+            single_graph = regression_importance_graph_(tree.get(), train);
+            single_graph->budget = budget_override >= 0 ? budget_override : single_graph->min_objective;
+        }
+#endif
         auto setup =
             prepare_exact_replacement_interval_eval_(
                 X_row_major,
@@ -23785,11 +26187,19 @@ public:
                 bb_pred_eval,
                 matched_group_of_row_by_variable_eval,
                 matched_group_size_by_variable_eval
+#if defined(ARBORENUM_REGRESSION)
+                , single_graph.get()
+#endif
             );
 
         if (setup.ctx.n_eval <= 0) {
             return {};
         }
+
+#if defined(ARBORENUM_REGRESSION)
+        if (optimize_leaf_values && !sum_samplewise_extrema && !setup.use_matched_groups)
+            return regression_continuous_importance_(setup, result ? result.get() : single_graph.get());
+#endif
 
         const int number_of_variables =
             static_cast<int>(setup.variable_columns.size());
@@ -23967,7 +26377,7 @@ public:
 
             if (!setup.use_matched_groups || matched_effectively_uniform) {
                 if (extrema.is_point()) {
-                    const int64_t point_sum = fast_sum_i32_(
+                    const LocalNumeratorTotal point_sum = fast_sum_i32_(
                         extrema.point.data(),
                         static_cast<std::size_t>(setup.ctx.n_eval)
                     );
@@ -23977,11 +26387,11 @@ public:
                         static_cast<double>(point_sum) * scale;
                     out[j] = {value, value};
                 } else {
-                    const int64_t lower_sum = fast_sum_i32_(
+                    const LocalNumeratorTotal lower_sum = fast_sum_i32_(
                         extrema.lower.data(),
                         static_cast<std::size_t>(setup.ctx.n_eval)
                     );
-                    const int64_t upper_sum = fast_sum_i32_(
+                    const LocalNumeratorTotal upper_sum = fast_sum_i32_(
                         extrema.upper.data(),
                         static_cast<std::size_t>(setup.ctx.n_eval)
                     );
@@ -24087,7 +26497,7 @@ public:
 
             if (!setup.use_matched_groups || matched_effectively_uniform) {
                 if (extrema.is_point()) {
-                    const int64_t point_sum =
+                    const LocalNumeratorTotal point_sum =
                         fast_sum_i32_(
                             extrema.point.data(),
                             static_cast<std::size_t>(setup.ctx.n_eval)
@@ -24100,13 +26510,13 @@ public:
                     continue;
                 }
 
-                const int64_t lower_sum =
+                const LocalNumeratorTotal lower_sum =
                     fast_sum_i32_(
                         extrema.lower.data(),
                         static_cast<std::size_t>(setup.ctx.n_eval)
                     );
 
-                const int64_t upper_sum =
+                const LocalNumeratorTotal upper_sum =
                     fast_sum_i32_(
                         extrema.upper.data(),
                         static_cast<std::size_t>(setup.ctx.n_eval)
@@ -24171,14 +26581,14 @@ public:
     std::vector<ExactReplacementMistakesWithObj>
     get_all_exact_replacement_misclassifications_packed_trie(
         const std::vector<std::vector<uint8_t>>& X_row_major,
-        const std::vector<int>& y_eval,
-        int budget_override = -1,
+        const std::vector<Prediction>& y_eval,
+        Objective budget_override = -1,
 
         // optional original-variable grouping.
         // variable_columns[j] = {threshold_col_0, threshold_col_1, ...}
         const std::vector<std::vector<int>>& variable_columns_in = {},
 
-        const std::vector<int>& bb_pred_eval = {},
+        const std::vector<Prediction>& bb_pred_eval = {},
 
         // matched_group_of_row_by_variable_eval[j][i]
         // gives the matched-group ID of evaluation row i
@@ -24215,7 +26625,7 @@ public:
             return {};
         }
 
-        const int budget =
+        const Objective budget =
             (budget_override >= 0)
                 ? budget_override
                 : result->budget;
@@ -24462,7 +26872,7 @@ public:
                 ctx.tail_mask
             );
 
-        std::vector<Packed> Y_eval_bits =
+        EvalTargets Y_eval_bits =
             build_eval_y_bits_(
                 y_eval,
                 num_classes,
@@ -24470,6 +26880,9 @@ public:
                 ctx.tail_mask
             );
 
+#if defined(ARBORENUM_REGRESSION)
+        Y_eval_bits.bb_predictions = bb_pred_eval;
+#endif
         Packed BBwrong_eval_storage((size_t)ctx.n_words);
         const Packed* BBwrong_eval_ptr = nullptr;
 
@@ -24582,5 +26995,681 @@ public:
         return out;
     }
 
+
+
+    std::vector<std::pair<double, double>>
+    get_wald_divisive_model_reliance_intervals_graph(
+        const std::vector<std::vector<uint8_t>>& X_row_major,
+        const std::vector<Prediction>& y,
+        const std::vector<std::vector<int>>& variable_columns,
+        double z_value,
+        std::uint64_t seed,
+        Objective budget_override = -1
+    ) const {
+        struct State {
+            Objective obj = 0;
+            std::vector<uint64_t> original_errors;
+            std::vector<uint64_t> perturbed_errors;
+        };
+
+        struct CacheKey {
+            const TreeTrieNode* node = nullptr;
+            Objective budget = 0;
+            std::vector<uint64_t> original_mask;
+            std::vector<uint64_t> perturbed_mask;
+
+            bool operator==(const CacheKey& other) const {
+                return node == other.node &&
+                    budget == other.budget &&
+                    original_mask == other.original_mask &&
+                    perturbed_mask == other.perturbed_mask;
+            }
+        };
+
+        struct CacheKeyHash {
+            std::size_t operator()(const CacheKey& key) const noexcept {
+                std::size_t h = reinterpret_cast<std::size_t>(key.node);
+                h ^= static_cast<std::size_t>(key.budget) +
+                    0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+
+                for (uint64_t x : key.original_mask) {
+                    h ^= static_cast<std::size_t>(mix64(x)) +
+                        0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+                }
+
+                h ^= 0xbf58476d1ce4e5b9ULL + (h << 6) + (h >> 2);
+
+                for (uint64_t x : key.perturbed_mask) {
+                    h ^= static_cast<std::size_t>(mix64(x)) +
+                        0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+                }
+
+                return h;
+            }
+        };
+
+        struct ErrorPairKey {
+            std::vector<uint64_t> original_errors;
+            std::vector<uint64_t> perturbed_errors;
+
+            bool operator==(const ErrorPairKey& other) const {
+                return original_errors == other.original_errors &&
+                    perturbed_errors == other.perturbed_errors;
+            }
+        };
+
+        struct ErrorPairKeyHash {
+            std::size_t operator()(const ErrorPairKey& key) const noexcept {
+                std::size_t h = 0x9e3779b97f4a7c15ULL;
+
+                for (uint64_t x : key.original_errors) {
+                    h ^= static_cast<std::size_t>(mix64(x)) +
+                        0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+                }
+
+                h ^= 0xbf58476d1ce4e5b9ULL + (h << 6) + (h >> 2);
+
+                for (uint64_t x : key.perturbed_errors) {
+                    h ^= static_cast<std::size_t>(mix64(x)) +
+                        0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+                }
+
+                return h;
+            }
+        };
+
+        if (!result) {
+            throw std::runtime_error(
+                "Fit ArborEnum before computing Wald model-reliance intervals."
+            );
+        }
+
+        if (!std::isfinite(z_value) || z_value <= 0.0) {
+            throw std::runtime_error(
+                "z_value must be finite and positive."
+            );
+        }
+
+        const int n = static_cast<int>(X_row_major.size());
+
+        if (n < 4) {
+            throw std::runtime_error(
+                "Wald model-reliance intervals require at least four evaluation rows."
+            );
+        }
+
+        if ((n & 1) != 0) {
+            throw std::runtime_error(
+                "Wald model-reliance intervals require an even number of evaluation rows."
+            );
+        }
+
+        if (static_cast<int>(y.size()) != n) {
+            throw std::runtime_error(
+                "y must have the same number of rows as X."
+            );
+        }
+
+        const int d = static_cast<int>(X_row_major[0].size());
+
+        if (d != this->n_features) {
+            throw std::runtime_error(
+                "X must have the same number of internal features used during fit."
+            );
+        }
+
+        for (const auto& row : X_row_major) {
+            if (static_cast<int>(row.size()) != d) {
+                throw std::runtime_error("X must be rectangular.");
+            }
+        }
+
+        std::vector<int> internal_to_variable(
+            static_cast<std::size_t>(d),
+            -1
+        );
+
+        for (
+            int variable = 0;
+            variable < static_cast<int>(variable_columns.size());
+            ++variable
+        ) {
+            if (variable_columns[static_cast<std::size_t>(variable)].empty()) {
+                throw std::runtime_error(
+                    "variable_columns contains an empty variable block."
+                );
+            }
+
+            for (
+                int feature :
+                variable_columns[static_cast<std::size_t>(variable)]
+            ) {
+                if (feature < 0 || feature >= d) {
+                    throw std::runtime_error(
+                        "variable_columns contains an out-of-range internal feature."
+                    );
+                }
+
+                if (
+                    internal_to_variable[static_cast<std::size_t>(feature)] !=
+                    -1
+                ) {
+                    throw std::runtime_error(
+                        "An internal feature appears in more than one variable block."
+                    );
+                }
+
+                internal_to_variable[static_cast<std::size_t>(feature)] =
+                    variable;
+            }
+        }
+
+        std::vector<int> permutation(static_cast<std::size_t>(n));
+        std::iota(permutation.begin(), permutation.end(), 0);
+
+        std::mt19937_64 rng(seed);
+        std::shuffle(permutation.begin(), permutation.end(), rng);
+
+        const int m = n / 2;
+        const int n_words = (m + 63) / 64;
+        const int tail_bits = m & 63;
+        const uint64_t local_tail_mask =
+            tail_bits == 0
+                ? ~0ULL
+                : ((1ULL << tail_bits) - 1ULL);
+
+        std::vector<std::vector<uint64_t>> original_feature_bits(
+            static_cast<std::size_t>(d),
+            std::vector<uint64_t>(
+                static_cast<std::size_t>(n_words),
+                0ULL
+            )
+        );
+
+        std::vector<std::vector<uint64_t>> donor_feature_bits(
+            static_cast<std::size_t>(d),
+            std::vector<uint64_t>(
+                static_cast<std::size_t>(n_words),
+                0ULL
+            )
+        );
+
+        int max_class = -1;
+
+        for (int yi : y) {
+            if (yi < 0) {
+                throw std::runtime_error(
+                    "y must contain nonnegative class labels."
+                );
+            }
+
+            max_class = std::max(max_class, yi);
+        }
+
+        for (int i = 0; i < m; ++i) {
+            const int recipient =
+                permutation[static_cast<std::size_t>(i)];
+            const int donor =
+                permutation[static_cast<std::size_t>(i + m)];
+            const std::size_t word =
+                static_cast<std::size_t>(i >> 6);
+            const uint64_t bit = 1ULL << (i & 63);
+
+            for (int feature = 0; feature < d; ++feature) {
+                if (
+                    X_row_major[static_cast<std::size_t>(recipient)]
+                               [static_cast<std::size_t>(feature)] != 0
+                ) {
+                    original_feature_bits[
+                        static_cast<std::size_t>(feature)
+                    ][word] |= bit;
+                }
+
+                if (
+                    X_row_major[static_cast<std::size_t>(donor)]
+                               [static_cast<std::size_t>(feature)] != 0
+                ) {
+                    donor_feature_bits[
+                        static_cast<std::size_t>(feature)
+                    ][word] |= bit;
+                }
+            }
+        }
+
+        if (max_class < 0) {
+            throw std::runtime_error(
+                "y contains no valid class labels."
+            );
+        }
+
+        std::vector<std::vector<uint64_t>> wrong_bits(
+            static_cast<std::size_t>(max_class + 1),
+            std::vector<uint64_t>(
+                static_cast<std::size_t>(n_words),
+                0ULL
+            )
+        );
+
+        for (int i = 0; i < m; ++i) {
+            const int recipient =
+                permutation[static_cast<std::size_t>(i)];
+            const int yi = y[static_cast<std::size_t>(recipient)];
+            const std::size_t word =
+                static_cast<std::size_t>(i >> 6);
+            const uint64_t bit = 1ULL << (i & 63);
+
+            for (int c = 0; c <= max_class; ++c) {
+                if (c != yi) {
+                    wrong_bits[static_cast<std::size_t>(c)][word] |= bit;
+                }
+            }
+        }
+
+        std::vector<uint64_t> root_mask(
+            static_cast<std::size_t>(n_words),
+            ~0ULL
+        );
+        root_mask.back() &= local_tail_mask;
+
+        const Objective root_budget =
+            budget_override >= 0
+                ? budget_override
+                : result->budget;
+
+        if (root_budget > result->budget) {
+            throw std::runtime_error(
+                "budget_override cannot exceed the fitted Rashomon graph budget."
+            );
+        }
+
+        if (root_budget < result->min_objective) {
+            return {};
+        }
+
+        auto popcount = [](const std::vector<uint64_t>& bits) {
+            int total = 0;
+
+            for (uint64_t x : bits) {
+                total += popcnt64(x);
+            }
+
+            return total;
+        };
+
+        auto xor_popcount = [](
+            const std::vector<uint64_t>& a,
+            const std::vector<uint64_t>& b
+        ) {
+            int total = 0;
+
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                total += popcnt64(a[i] ^ b[i]);
+            }
+
+            return total;
+        };
+
+        auto bit_and = [](
+            const std::vector<uint64_t>& a,
+            const std::vector<uint64_t>& b
+        ) {
+            std::vector<uint64_t> out(a.size(), 0ULL);
+
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                out[i] = a[i] & b[i];
+            }
+
+            return out;
+        };
+
+        auto bit_andnot = [local_tail_mask](
+            const std::vector<uint64_t>& a,
+            const std::vector<uint64_t>& b
+        ) {
+            std::vector<uint64_t> out(a.size(), 0ULL);
+
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                out[i] = a[i] & ~b[i];
+            }
+
+            if (!out.empty()) {
+                out.back() &= local_tail_mask;
+            }
+
+            return out;
+        };
+
+        auto bit_or = [](
+            const std::vector<uint64_t>& a,
+            const std::vector<uint64_t>& b
+        ) {
+            std::vector<uint64_t> out(a.size(), 0ULL);
+
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                out[i] = a[i] | b[i];
+            }
+
+            return out;
+        };
+
+        auto insert_state = [](
+            std::unordered_map<ErrorPairKey, int, ErrorPairKeyHash>& states,
+            State state
+        ) {
+            ErrorPairKey key{
+                std::move(state.original_errors),
+                std::move(state.perturbed_errors)
+            };
+
+            auto it = states.find(key);
+
+            if (it == states.end()) {
+                states.emplace(std::move(key), state.obj);
+            } else if (state.obj < it->second) {
+                it->second = state.obj;
+            }
+        };
+
+        std::vector<std::pair<double, double>> out(
+            variable_columns.size(),
+            {1.0, 1.0}
+        );
+
+        for (
+            int variable = 0;
+            variable < static_cast<int>(variable_columns.size());
+            ++variable
+        ) {
+            using StateVector = std::vector<State>;
+            // using Cache = std::unordered_map<
+            //     CacheKey,
+            //     std::shared_ptr<StateVector>,
+            //     CacheKeyHash
+            // >;
+
+            // Cache cache;
+            // cache.reserve(1024);
+
+            std::function<std::shared_ptr<StateVector>(
+                const TreeTrieNode*,
+                int,
+                const std::vector<uint64_t>&,
+                const std::vector<uint64_t>&
+            )> solve;
+
+            solve = [
+                &
+            ](
+                const TreeTrieNode* node,
+                Objective budget,
+                const std::vector<uint64_t>& original_mask,
+                const std::vector<uint64_t>& perturbed_mask
+            ) -> std::shared_ptr<StateVector> {
+                if (
+                    !node ||
+                    budget < 0 ||
+                    node->min_objective > budget
+                ) {
+                    return std::make_shared<StateVector>();
+                }
+
+                const Objective effective_budget =
+                    std::min(budget, node->budget);
+
+                // CacheKey cache_key{
+                //     node,
+                //     effective_budget,
+                //     original_mask,
+                //     perturbed_mask
+                // };
+
+                // auto cached = cache.find(cache_key);
+
+                // if (cached != cache.end()) {
+                //     return cached->second;
+                // }
+
+                std::unordered_map<ErrorPairKey, int, ErrorPairKeyHash> unique_states;
+
+                for (const auto& leaf : node->leaves) {
+                    if (leaf.loss > effective_budget) {
+                        continue;
+                    }
+
+                    if (leaf.prediction < 0) {
+                        throw std::runtime_error(
+                            "Wald model-reliance intervals do not support deferred leaf predictions."
+                        );
+                    }
+
+                    const std::vector<uint64_t>* wrong = nullptr;
+
+                    if (leaf.prediction <= max_class) {
+                        wrong = &wrong_bits[
+                            static_cast<std::size_t>(leaf.prediction)
+                        ];
+                    } else {
+                        wrong = &root_mask;
+                    }
+
+                    State state;
+                    state.obj = leaf.loss;
+                    state.original_errors = bit_and(
+                        original_mask,
+                        *wrong
+                    );
+                    state.perturbed_errors = bit_and(
+                        perturbed_mask,
+                        *wrong
+                    );
+
+                    insert_state(
+                        unique_states,
+                        std::move(state)
+                    );
+                }
+
+                for (const auto& split : node->splits) {
+                    if (!split.left || !split.right) {
+                        continue;
+                    }
+
+                    const int feature = split.feature;
+
+                    if (feature < 0 || feature >= d) {
+                        throw std::runtime_error(
+                            "Rashomon graph contains an out-of-range split feature."
+                        );
+                    }
+
+                    const auto& original_split_bits =
+                        original_feature_bits[
+                            static_cast<std::size_t>(feature)
+                        ];
+
+                    const auto& perturbed_split_bits =
+                        internal_to_variable[
+                            static_cast<std::size_t>(feature)
+                        ] == variable
+                            ? donor_feature_bits[
+                                static_cast<std::size_t>(feature)
+                            ]
+                            : original_split_bits;
+
+                    auto original_left = bit_and(
+                        original_mask,
+                        original_split_bits
+                    );
+
+                    auto original_right = bit_andnot(
+                        original_mask,
+                        original_split_bits
+                    );
+
+                    auto perturbed_left = bit_and(
+                        perturbed_mask,
+                        perturbed_split_bits
+                    );
+
+                    auto perturbed_right = bit_andnot(
+                        perturbed_mask,
+                        perturbed_split_bits
+                    );
+
+                    const Objective left_budget = std::min(
+                        split.left->budget,
+                        effective_budget - split.right->min_objective
+                    );
+
+                    const Objective right_budget = std::min(
+                        split.right->budget,
+                        effective_budget - split.left->min_objective
+                    );
+
+                    if (
+                        left_budget < split.left->min_objective ||
+                        right_budget < split.right->min_objective
+                    ) {
+                        continue;
+                    }
+
+                    auto left_states = solve(
+                        split.left.get(),
+                        left_budget,
+                        original_left,
+                        perturbed_left
+                    );
+
+                    auto right_states = solve(
+                        split.right.get(),
+                        right_budget,
+                        original_right,
+                        perturbed_right
+                    );
+
+                    for (const auto& left_state : *left_states) {
+                        if (left_state.obj > effective_budget) {
+                            continue;
+                        }
+
+                        for (const auto& right_state : *right_states) {
+                            const Objective obj =
+                                left_state.obj + right_state.obj;
+
+                            if (obj > effective_budget) {
+                                continue;
+                            }
+
+                            State state;
+                            state.obj = obj;
+                            state.original_errors = bit_or(
+                                left_state.original_errors,
+                                right_state.original_errors
+                            );
+                            state.perturbed_errors = bit_or(
+                                left_state.perturbed_errors,
+                                right_state.perturbed_errors
+                            );
+
+                            insert_state(
+                                unique_states,
+                                std::move(state)
+                            );
+                        }
+                    }
+                }
+
+                auto solved = std::make_shared<StateVector>();
+                solved->reserve(unique_states.size());
+
+                while (!unique_states.empty()) {
+                    auto node = unique_states.extract(unique_states.begin());
+
+                    if (node.mapped() <= effective_budget) {
+                        State state;
+                        state.obj = node.mapped();
+
+                        state.original_errors =
+                            std::move(node.key().original_errors);
+
+                        state.perturbed_errors =
+                            std::move(node.key().perturbed_errors);
+
+                        solved->push_back(std::move(state));
+                    }
+                }
+
+                // cache.emplace(std::move(cache_key), solved);
+                return solved;
+            };
+
+            auto root_states = solve(
+                result.get(),
+                root_budget,
+                root_mask,
+                root_mask
+            );
+
+            if (root_states->empty()) {
+                throw std::runtime_error(
+                    "No feasible Rashomon trees remain at the requested budget."
+                );
+            }
+
+            double min_lower =
+                std::numeric_limits<double>::infinity();
+            double max_upper =
+                -std::numeric_limits<double>::infinity();
+
+            for (const auto& state : *root_states) {
+                const int A = popcount(state.original_errors);
+
+                if (A == 0) {
+                    throw std::runtime_error(
+                        "Divisive Wald model reliance is undefined because a feasible tree has zero original evaluation loss."
+                    );
+                }
+
+                const int B = popcount(state.perturbed_errors);
+                const int F = xor_popcount(
+                    state.original_errors,
+                    state.perturbed_errors
+                );
+
+                const double mean_mr =
+                    static_cast<double>(B) /
+                    static_cast<double>(A);
+
+                const double variance =
+                    (static_cast<double>(m) /
+                     static_cast<double>(m - 1)) *
+                    (static_cast<double>(B) *
+                     static_cast<double>(F)) /
+                    (static_cast<double>(A) *
+                     static_cast<double>(A) *
+                     static_cast<double>(A));
+
+                const double half_width =
+                    z_value * std::sqrt(variance);
+
+                min_lower = std::min(
+                    min_lower,
+                    mean_mr - half_width
+                );
+
+                max_upper = std::max(
+                    max_upper,
+                    mean_mr + half_width
+                );
+            }
+
+            out[static_cast<std::size_t>(variable)] = {
+                min_lower,
+                max_upper
+            };
+        }
+
+        return out;
+    }
 
 };

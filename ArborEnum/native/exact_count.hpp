@@ -9,7 +9,7 @@
 #include <vector>
 #include <array>
 
-namespace arborenum::live {
+namespace ARBORENUM_LIVE_NAMESPACE {
 // Only the nonnegative arithmetic required by inside/outside tree counting.
 // Counts never saturate at the engine's legacy uint64_t histogram limit.
 class ExactCount {

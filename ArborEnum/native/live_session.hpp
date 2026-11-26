@@ -1,14 +1,15 @@
 #pragma once
 #include "graph_queries.hpp"
+#include "session_api.hpp"
 #include "xgboost_warm_start.hpp"
 #include <condition_variable>
 #include <future>
 #include <queue>
 #include <deque>
 
-namespace arborenum::live {
-class QueryUnavailable : public std::runtime_error { public: using std::runtime_error::runtime_error; };
-class Session {
+namespace ARBORENUM_LIVE_NAMESPACE {
+using arborenum::service::QueryUnavailable;
+class Session : public arborenum::service::SessionApi {
     struct Request {
         std::string operation;
         json body;
@@ -29,8 +30,8 @@ class Session {
     bool ready_ = false;
     uint64_t checkpoint_ = 0, query_count_ = 0, node_queries_ = 0, completion_queries_ = 0, analysis_queries_ = 0;
     size_t last_visited_ = 0;
-    int requested_budget_ = -1, active_budget_ = -1;
-    std::atomic<int> graph_budget_{-1}, root_minimum_{-1};
+    Objective requested_budget_ = -1, active_budget_ = -1;
+    std::atomic<Objective> graph_budget_{-1}, root_minimum_{-1};
     double node_query_handler_seconds_ = 0.0;
     json meta_ = json::object();
     std::queue<std::shared_ptr<Request>> requests_;
@@ -61,14 +62,14 @@ class Session {
     void pump(ArborEnum& model, const json& meta, const Dataset& data, std::stop_token lifetime) {
         for (int batch = 0; batch < 8; ++batch) {
             std::shared_ptr<Request> request;
-            int query_budget;
+            Objective query_budget;
             {
                 std::lock_guard lock(mutex_);
                 if (requests_.empty()) { pending_.store(false, std::memory_order_relaxed); return; }
                 request = std::move(requests_.front()); requests_.pop(); active_request_ = request;
                 // Exploration follows the requested bound immediately; enumeration
                 // adopts it independently at its next refinement boundary.
-                query_budget = requested_budget_ >= 0 ? requested_budget_ : active_budget_ < 0 ? INT_MAX : active_budget_;
+                query_budget = requested_budget_ >= 0 ? requested_budget_ : active_budget_ < 0 ? std::numeric_limits<Objective>::max() : active_budget_;
                 pending_.store(!requests_.empty(), std::memory_order_relaxed);
             }
             try {
@@ -145,7 +146,7 @@ class Session {
                     proxy[i].push_back(bit);
                 }
             }
-            model.prepare_continuous_data(numeric, bin, data.y, seed, proxy, settings_.max_thresholds, settings_.abstain ? data.y : std::vector<int>{});
+            model.prepare_continuous_data(numeric, bin, data.y, seed, proxy, settings_.max_thresholds, settings_.abstain ? data.y : std::vector<Prediction>{});
             json registry = json::array();
             for (size_t f = 0; f < binary.size(); ++f) registry.push_back({{"internalFeature", f}, {"originalFeature", binary[f]}, {"originalName", data.names[binary[f]]}, {"threshold", binary_cuts[f]}, {"kind", "binary_threshold"}, {"continuousGroup", nullptr}});
             auto starts = model.get_continuous_starts();
@@ -155,7 +156,7 @@ class Session {
             }
             for (const auto* ids : {&settings_.proxy_features, &settings_.initial_features})
                 for (int id : *ids) if (static_cast<size_t>(id) >= registry.size()) throw std::invalid_argument("Threshold feature ID is outside the prepared feature registry");
-            meta = {{"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", static_cast<int>(std::llround(settings_.lambda * n))}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
+            meta = {{"task", regression_objective ? "regression" : "classification"}, {"defer_prediction", wire_prediction(DEFER_PREDICTION)}, {"schemaVersion", 2}, {"originalFeatureNames", data.names}, {"proxy_delta", settings_.proxy_delta}, {"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", rounded_objective(settings_.lambda * n)}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
             // The proxy can use learned thresholds without activating them in enumeration.
             const auto& initial_features = settings_.initial_features;
             auto proxy_features = settings_.proxy_features;
@@ -172,7 +173,7 @@ class Session {
                 {"initial_threshold_ids", initial_features},
                 {"proxy_threshold_ids", proxy_features}};
             { std::lock_guard lock(mutex_); meta_ = meta; phase_ = "running"; }
-            model.live_round_budget = [&](int current) {
+            model.live_round_budget = [&](Objective current) {
                 std::lock_guard lock(mutex_);
                 active_budget_ = requested_budget_ < 0 ? current : requested_budget_;
                 return active_budget_;
@@ -197,6 +198,9 @@ class Session {
                 model.live_poll();
             };
             model.live_stop_requested = [&] { return cancel_search_.load() || lifetime.stop_requested(); };
+            model.set_proxy_delta(settings_.proxy_delta);
+            model.set_sparsification(settings_.sparsification, settings_.sparsification_seed, settings_.sparsification_cache);
+            model.set_regression_options(settings_.equivalent_points, settings_.continuous_kmeans, settings_.kmeans_min_depth);
             model.set_key_mode(settings_.key_mode == "exact" ? ArborEnum::KeyMode::EXACT : settings_.key_mode == "lits_exact" ? ArborEnum::KeyMode::LITS_EXACT : settings_.key_mode == "hash128" ? ArborEnum::KeyMode::HASH128 : ArborEnum::KeyMode::HASH64);
             model.set_trie_cache_enabled(settings_.trie_cache);
             model.set_greedy_split_mode(settings_.greedy_split);
@@ -314,8 +318,9 @@ public:
         try { return {{"state", "complete"}, {"result", request->future.get()}}; }
         catch (const std::exception& error) { return {{"state", "failed"}, {"error", error.what()}}; }
     }
-    void request_budget(int budget) {
-        if (budget < 0) throw std::invalid_argument("Budget must be a nonnegative integer");
+    void request_budget(double value) override {
+        if (!std::isfinite(value) || value < 0 || value >= std::numeric_limits<Objective>::max() || (!regression_objective && std::floor(value) != value)) throw std::invalid_argument("Invalid objective budget");
+        const Objective budget = static_cast<Objective>(value);
         std::lock_guard lock(mutex_);
         if (!ready_) throw QueryUnavailable("Wait for the first feasible tree before changing its budget");
         requested_budget_ = budget;
@@ -328,7 +333,7 @@ public:
     }
     json status() const {
         std::lock_guard lock(mutex_);
-        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"analysis_queries", analysis_queries_}, {"active_budget", active_budget_ < 0 ? graph_budget_.load() : active_budget_}, {"requested_budget", requested_budget_}, {"graph_budget", graph_budget_.load()}, {"root_minimum", root_minimum_.load()}, {"sample_count", meta_.value("root_n", size_t(0))}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
+        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"analysis_queries", analysis_queries_}, {"active_budget", active_budget_ < 0 ? graph_budget_.load() : active_budget_}, {"requested_budget", requested_budget_}, {"graph_budget", graph_budget_.load()}, {"root_minimum", root_minimum_.load()}, {"task", regression_objective ? "regression" : "classification"}, {"sample_count", meta_.value("root_n", size_t(0))}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
     }
 };
 }

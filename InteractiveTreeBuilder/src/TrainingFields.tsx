@@ -15,6 +15,7 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
   const continuous = (key: Key, label: string) => <label key={key}>{label}<select aria-label={label} value={s[key] === null ? 'auto' : String(s[key])} onChange={e => change(key, e.target.value === 'auto' ? null : e.target.value === 'true')}><option value="auto">Follow proxy mode</option><option value="false">Binarized</option><option value="true">Continuous</option></select></label>;
   return <>
     <div className="live-fields">
+      {select('task', 'Task', [['classification', 'Classification'], ['regression', 'Regression']])}
       {number('lambda_reg', 'Leaf penalty', 'Penalty per leaf.', 0, undefined, .001)}
       {number('depth_budget', 'Maximum depth', undefined, 0, 127, 1)}
       {number('rashomon_mult', 'Rashomon multiplier')}
@@ -39,18 +40,30 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
         {number('lookahead_k', 'Lookahead depth', 'Higher values improve the initial proxy at greater search cost.', 0, s.depth_budget, 1)}
         {select('key_mode', 'Subproblem identity', [['hash', '64-bit hash'], ['hash128', '128-bit hash'], ['exact', 'Exact bitvectors'], ['lits_exact', 'Exact literal sets']])}
         <label>Proxy search style<select aria-label="Proxy search style" value={s.proxy_style} onChange={e => change('proxy_style', Number(e.target.value))}><option value={0}>Recursive best split</option><option value={1}>Block split</option><option value={3}>Split without postprocessing</option></select></label>
-        {mode('greedy_split_mode', 'Greedy split criterion', ['Entropy', 'Entropy with exact depth-one solve', 'Child leaf objective'])}
+        {mode('greedy_split_mode', 'Greedy split criterion', s.task === 'regression' ? ['Squared error reduction', 'Squared error with exact depth-one solve', 'Child leaf objective'] : ['Entropy', 'Entropy with exact depth-one solve', 'Child leaf objective'])}
         {select('greedy_continuous_mode', 'Greedy feature evaluation', [['binary', 'Binarized thresholds'], ['numerical', 'Numerical features']])}
         {number('multiplicative_slack', 'Extra multiplicative slack', 'Additional slack applied to objective bounds.')}
       </div>
       <div className="training-toggles">
         {toggle('additive', 'Additive Rashomon tolerance', 'Interpret each multiplier as extra objective per sample instead of a relative increase.')}
         {toggle('rule_list_mode', 'Guarantee rule-list recovery', 'Ensure rule lists are recovered within the objective bound, alongside other tree structures.')}
-        {toggle('majority_leaf_only', 'Majority class leaves only', 'Exclude ordinary non-majority class leaves; Abstain remains a separate action.')}
+        {toggle('majority_leaf_only', s.task === 'regression' ? 'Mean prediction leaves' : 'Majority class leaves only', s.task === 'regression' ? 'Regression always stores the minimizing leaf value.' : 'Exclude ordinary non-majority class leaves; Abstain remains a separate action.')}
         {toggle('use_multipass', 'Multipass search', 'Use repeated passes during the native search.')}
         {toggle('stronger_rollout', 'Stronger rollout', 'Spend additional work improving rollout bounds.')}
         {toggle('evaluated_use_min_objectives', 'Reuse minimum objectives', 'Use known minimum objectives for evaluated subproblems.')}
       </div>
+      <h3>Enumeration sparsification</h3>
+      <div className="live-fields">
+        {number('proxy_delta', 'Proxy extension depth', 'Attach this many proxy-only levels below the enumeration depth.', 0, 127 - s.depth_budget, 1)}
+        <label>Sparsification probabilities<input aria-label="Sparsification probabilities" value={s.sparsification_probability} placeholder="Disabled" onChange={e => change('sparsification_probability', e.target.value)}/><small>One probability per enumeration depth, starting at remaining depth 1. Blank or all zeros keeps full enumeration.</small></label>
+        {number('sparsification_seed', 'Sparsification seed', undefined, 0, 2147483647, 1)}
+      </div>
+      <div className="training-toggles">{toggle('sparsification_cache_proxy_splits', 'Cache proxy split indexes', 'Faster proxy lookup when sparsifying. Turn off to scan objective caches instead.')}</div>
+      {s.sparsification_probability.split(',').some(value => Number(value) > 0) && <p>Threshold refinement and budget expansion remain available. Proxy strengthening is skipped while sparsification is enabled.</p>}
+      {s.task === 'regression' && <><h3>Regression bounds</h3><div className="training-toggles">
+        {toggle('regression_equivalent_points', 'Equivalent-points bound', 'Strengthen the k-means bound for rows with identical feature values.')}
+        {toggle('regression_continuous_kmeans', 'K-means neighborhood tightening', 'Apply the additional k-means bound during continuous threshold pruning.')}
+      </div><div className="live-fields">{number('regression_kmeans_min_depth', 'Minimum depth for k-means bound', 'Skip this bound below the selected remaining depth.', 0, 127, 1)}</div></>}
       <h3>Refinement and thresholds</h3>
       <div className="live-fields">
         {number('multiplier_step_size', 'Multiplier expansion step', undefined, 0)}

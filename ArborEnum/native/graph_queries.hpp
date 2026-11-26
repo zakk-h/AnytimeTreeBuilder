@@ -3,7 +3,7 @@
 #include "graph_profiles.hpp"
 #include <functional>
 
-namespace arborenum::live {
+namespace ARBORENUM_LIVE_NAMESPACE {
 // This object borrows the actual model on its owner thread. It does not own,
 // export, clone, or accumulate a second Rashomon graph.
 class GraphQueries {
@@ -12,15 +12,15 @@ class GraphQueries {
     const Dataset* data_;
     std::function<bool()> cancelled_;
     size_t visited_ = 0;
-    int requested_budget_;
-    int root_budget() const { return std::min(model_.result->budget, requested_budget_); }
-    static constexpr int INF = std::numeric_limits<int>::max();
+    Objective requested_budget_;
+    Objective root_budget() const { return std::min(model_.result->budget, requested_budget_); }
+    static constexpr Objective INF = std::numeric_limits<Objective>::max();
     struct Located {
         TreeTrieNode* node;
         Packed mask;
         json* build;
         bool scope = false, sample = false;
-        int64_t minimum = 0, allowance = 0;
+        SumObjective minimum = 0, allowance = 0;
     };
     std::vector<Located> located_;
     std::set<int> uids_;
@@ -31,8 +31,8 @@ class GraphQueries {
         if (found == node->splits.end()) throw std::invalid_argument("Selected split is not present at this path");
         return *found;
     }
-    const LeafNode& leaf(TreeTrieNode* node, int prediction) {
-        auto found = std::find_if(node->leaves.begin(), node->leaves.end(), [&](const auto& l) { return l.prediction == prediction; });
+    const LeafNode& leaf(TreeTrieNode* node, Prediction prediction) {
+        auto found = std::find_if(node->leaves.begin(), node->leaves.end(), [&](const auto& l) { return l.prediction == native_prediction(prediction); });
         if (found == node->leaves.end()) throw std::invalid_argument("Selected leaf is not present at this path");
         return *found;
     }
@@ -42,7 +42,7 @@ class GraphQueries {
     void locate(TreeTrieNode* node, Packed mask, json& build, int depth, bool in_scope,
                 bool sample, const json& constraint) {
         check(); ++visited_;
-        if (!node || depth > meta_.value("depth_budget", 127) || located_.size() >= 100000) throw std::invalid_argument("Invalid displayed tree");
+        if (!node || depth > meta_.value("depth_budget", 127) + meta_.value("proxy_delta", 0) || located_.size() >= 100000) throw std::invalid_argument("Invalid displayed tree");
         int uid = build.at("uid").get<int>();
         if (uid < 0 || !uids_.insert(uid).second) throw std::invalid_argument("Duplicate or invalid displayed node UID");
         if (uid == active_) { in_scope = true; sample = constraint.value("mode", "") == "sample"; }
@@ -73,8 +73,8 @@ class GraphQueries {
     }
     // Only the displayed tree is traversed. Propagate each ancestor's local
     // budget as well as the user root bound, subtracting its other frontier.
-    bool displayed_bounds(const std::unordered_map<int, int>& overrides = {}) {
-        constexpr int64_t impossible = INT64_MAX / 4;
+    bool displayed_bounds(const std::unordered_map<int, Objective>& overrides = {}) {
+        constexpr SumObjective impossible = std::numeric_limits<SumObjective>::max() / 4;
         std::unordered_map<int, Located*> index;
         for (auto& item : located_) index.emplace(item.build->at("uid").get<int>(), &item);
         bool feasible = true;
@@ -88,20 +88,24 @@ class GraphQueries {
         }
         located_.front().allowance = root_budget();
         for (auto& item : located_) {
-            item.allowance = std::min(item.allowance, int64_t(item.node->budget));
+            item.allowance = std::min(item.allowance, SumObjective(item.node->budget));
             if (overrides.contains(item.build->at("uid").get<int>()) || item.build->at("kind") != "split") continue;
             auto* left = index.at(item.build->at("left").at("uid").get<int>());
             auto* right = index.at(item.build->at("right").at("uid").get<int>());
-            left->allowance = item.allowance - right->minimum;
-            right->allowance = item.allowance - left->minimum;
+            left->allowance = remainder(item.allowance, right->minimum);
+            right->allowance = remainder(item.allowance, left->minimum);
         }
         return feasible && located_.front().minimum <= root_budget();
+    }
+    static SumObjective remainder(SumObjective budget, SumObjective other) {
+        if constexpr (regression_objective) return objective_remainder(budget, other);
+        else return budget - other;
     }
     void require_budget_feasible() {
         if (!partial_feasible_) throw std::invalid_argument("No completion of this partial tree fits the current budget");
     }
     struct Best {
-        int objective = INF;
+        Objective objective = INF;
         const LeafNode* leaf = nullptr;
         const SplitNode* split = nullptr;
         bool left_sample = false, right_sample = false;
@@ -111,7 +115,7 @@ class GraphQueries {
         std::set<int> forbidden;
         std::unordered_map<int, bool> truth;
         std::array<std::unordered_map<TreeTrieNode*, Best>, 2> memo;
-        int target = -1;
+        Prediction target = DEFER_PREDICTION;
         explicit Planner(GraphQueries& o, const json& c) : owner(o) {
             if (c.contains("featureTruth")) for (const auto& [key, value] : c.at("featureTruth").items()) {
                 size_t consumed = 0;
@@ -120,7 +124,7 @@ class GraphQueries {
                 truth.emplace(feature, value.get<bool>());
             }
             if (c.contains("forbiddenInternalFeatures")) for (const auto& f : c.at("forbiddenInternalFeatures")) forbidden.insert(f.get<int>());
-            if (c.value("mode", "") == "sample") target = c.at("targetPrediction").get<int>();
+            if (c.value("mode", "") == "sample") target = native_prediction(c.at("targetPrediction").get<Prediction>());
         }
         const Best& best(TreeTrieNode* node, bool sample) {
             auto& cache = memo[sample ? 1 : 0];
@@ -134,8 +138,8 @@ class GraphQueries {
                 if (auto branch = truth.find(s.feature); sample && branch != truth.end()) {
                     left = branch->second; right = !branch->second;
                 }
-                const int lo = best(s.left.get(), left).objective, ro = best(s.right.get(), right).objective;
-                if (lo < INF && ro < INF && static_cast<int64_t>(lo) + ro < result.objective && static_cast<int64_t>(lo) + ro <= node->budget)
+                const Objective lo = best(s.left.get(), left).objective, ro = best(s.right.get(), right).objective;
+                if (lo < INF && ro < INF && static_cast<SumObjective>(lo) + ro < result.objective && static_cast<SumObjective>(lo) + ro <= node->budget)
                     result = {lo + ro, nullptr, &s, left, right};
             }
             return cache.emplace(node, result).first->second;
@@ -144,26 +148,26 @@ class GraphQueries {
             const auto& b = best(node, sample);
             if (b.objective == INF) throw std::invalid_argument("No native completion satisfies these constraints");
             const int current = uid++;
-            if (b.leaf) return {{"uid", current}, {"kind", "leaf"}, {"prediction", b.leaf->prediction}};
+            if (b.leaf) return {{"uid", current}, {"kind", "leaf"}, {"prediction", wire_prediction(b.leaf->prediction)}};
             auto left = optimal(b.split->left.get(), b.left_sample, uid);
             auto right = optimal(b.split->right.get(), b.right_sample, uid);
             return {{"uid", current}, {"kind", "split"}, {"feature", b.split->feature}, {"left", std::move(left)}, {"right", std::move(right)}};
         }
-        std::pair<json, int> random(TreeTrieNode* node, int budget, int& uid, std::mt19937_64& rng) {
+        std::pair<json, Objective> random(TreeTrieNode* node, Objective budget, int& uid, std::mt19937_64& rng) {
             owner.check();
             budget = std::min(budget, node->budget);
             std::vector<Best> choices;
             for (const auto& l : node->leaves) if (l.loss <= budget) choices.push_back({l.loss, &l});
             for (const auto& s : node->splits) if (s.left && s.right) {
-                const int lo = best(s.left.get(), false).objective, ro = best(s.right.get(), false).objective;
-                if (lo < INF && ro < INF && static_cast<int64_t>(lo) + ro <= budget) choices.push_back({lo + ro, nullptr, &s});
+                const Objective lo = best(s.left.get(), false).objective, ro = best(s.right.get(), false).objective;
+                if (lo < INF && ro < INF && static_cast<SumObjective>(lo) + ro <= budget) choices.push_back({lo + ro, nullptr, &s});
             }
             if (choices.empty()) throw std::invalid_argument("No native completion fits the remaining objective budget");
             const auto chosen = choices[std::uniform_int_distribution<size_t>(0, choices.size() - 1)(rng)];
             const int current = uid++;
-            if (chosen.leaf) return {json{{"uid", current}, {"kind", "leaf"}, {"prediction", chosen.leaf->prediction}}, chosen.objective};
-            auto left = random(chosen.split->left.get(), budget - best(chosen.split->right.get(), false).objective, uid, rng);
-            auto right = random(chosen.split->right.get(), budget - left.second, uid, rng);
+            if (chosen.leaf) return {json{{"uid", current}, {"kind", "leaf"}, {"prediction", wire_prediction(chosen.leaf->prediction)}}, chosen.objective};
+            auto left = random(chosen.split->left.get(), objective_remainder(budget, best(chosen.split->right.get(), false).objective), uid, rng);
+            auto right = random(chosen.split->right.get(), objective_remainder(budget, left.second), uid, rng);
             return {json{{"uid", current}, {"kind", "split"}, {"feature", chosen.split->feature}, {"left", std::move(left.first)}, {"right", std::move(right.first)}}, left.second + right.second};
         }
     };
@@ -172,7 +176,7 @@ class GraphQueries {
     // must share a finite objective budget.
     struct AbstentionPlanner : Planner {
         struct Plan {
-            int objective, abstained;
+            Objective objective; int abstained;
             const LeafNode* leaf = nullptr;
             const SplitNode* split = nullptr;
             std::shared_ptr<const Plan> left, right;
@@ -186,25 +190,25 @@ class GraphQueries {
                 return a->objective != b->objective ? a->objective < b->objective : a->abstained < b->abstained;
             });
             Frontier out;
-            int least = INF;
+            int least = INT_MAX;
             for (const auto& p : points) {
                 owner.check();
                 if (p->abstained < least) { out.push_back(p); least = p->abstained; }
             }
             return out;
         }
-        Frontier combine(const Frontier& left, const Frontier& right, const SplitNode* split, int budget) {
-            std::map<int, Ptr> points;
+        Frontier combine(const Frontier& left, const Frontier& right, const SplitNode* split, Objective budget) {
+            std::map<Objective, Ptr> points;
             for (const auto& l : left) for (const auto& r : right) {
                 owner.check();
-                const int64_t objective = int64_t(l->objective) + r->objective;
+                const Objective objective = l->objective + r->objective;
                 if (objective > budget) break; // Frontiers are sorted by objective.
                 const int abstained = l->abstained + r->abstained;
-                auto next = points.lower_bound(int(objective));
+                auto next = points.lower_bound(objective);
                 if (next != points.end() && next->first == objective && next->second->abstained <= abstained) continue;
                 if (next != points.begin() && std::prev(next)->second->abstained <= abstained) continue;
                 while (next != points.end() && next->second->abstained >= abstained) next = points.erase(next);
-                points.emplace_hint(next, int(objective), std::make_shared<Plan>(Plan{int(objective), abstained, nullptr, split, l, r}));
+                points.emplace_hint(next, objective, std::make_shared<Plan>(Plan{objective, abstained, nullptr, split, l, r}));
             }
             Frontier out;
             for (auto& [objective, plan] : points) out.push_back(std::move(plan));
@@ -217,7 +221,7 @@ class GraphQueries {
             Frontier out;
             for (const auto& l : node->leaves)
                 if ((!sample || l.prediction == target) && l.loss <= node->budget)
-                    out.push_back(std::make_shared<Plan>(Plan{l.loss, l.prediction == -1 ? int(mask.count()) : 0, &l, nullptr, {}, {}}));
+                    out.push_back(std::make_shared<Plan>(Plan{l.loss, l.prediction == DEFER_PREDICTION ? int(mask.count()) : 0, &l, nullptr, {}, {}}));
             out = prune(std::move(out));
             for (const auto& s : node->splits) {
                 owner.check();
@@ -246,7 +250,7 @@ class GraphQueries {
             if (kind == "leaf") {
                 const auto& l = owner.leaf(item.node, build.at("prediction"));
                 if (item.scope && item.sample && l.prediction != target) throw std::invalid_argument("An existing leaf conflicts with the required prediction");
-                return {std::make_shared<Plan>(Plan{l.loss, l.prediction == -1 ? int(item.mask.count()) : 0, &l, nullptr, {}, {}})};
+                return {std::make_shared<Plan>(Plan{l.loss, l.prediction == DEFER_PREDICTION ? int(item.mask.count()) : 0, &l, nullptr, {}, {}})};
             }
             const int feature = build.at("feature");
             if (item.scope && forbidden.count(feature)) throw std::invalid_argument("A forbidden feature is already selected in this subtree");
@@ -257,7 +261,7 @@ class GraphQueries {
         json materialize(const Ptr& plan, int& uid) {
             owner.check();
             const int current = uid++;
-            if (plan->leaf) return {{"uid", current}, {"kind", "leaf"}, {"prediction", plan->leaf->prediction}};
+            if (plan->leaf) return {{"uid", current}, {"kind", "leaf"}, {"prediction", wire_prediction(plan->leaf->prediction)}};
             auto left = materialize(plan->left, uid);
             auto right = materialize(plan->right, uid);
             return {{"uid", current}, {"kind", "split"}, {"feature", plan->split->feature}, {"left", std::move(left)}, {"right", std::move(right)}};
@@ -274,7 +278,7 @@ class GraphQueries {
         }
     };
 public:
-    GraphQueries(ArborEnum& model, const json& meta, std::function<bool()> cancelled = {}, const Dataset* data = nullptr, int budget = INT_MAX) : model_(model), meta_(meta), data_(data), cancelled_(std::move(cancelled)), requested_budget_(budget) {}
+    GraphQueries(ArborEnum& model, const json& meta, std::function<bool()> cancelled = {}, const Dataset* data = nullptr, Objective budget = std::numeric_limits<Objective>::max()) : model_(model), meta_(meta), data_(data), cancelled_(std::move(cancelled)), requested_budget_(budget) {}
     size_t visited() const { return visited_; }
     json view(json tree, int active) {
         prepare(tree, active);
@@ -287,11 +291,11 @@ public:
             if (item.build->at("uid") == active) selected = &item;
         }
         if (selected && selected->build->at("kind") == "choice") {
-            const int64_t available = partial_feasible_ ? selected->allowance : -1;
-            for (const auto& l : selected->node->leaves) if (l.loss <= available && l.loss <= selected->node->budget) leaves.push_back({{"prediction", l.prediction}, {"loss", l.loss}});
-            for (const auto& s : selected->node->splits) if (TreeTrieNode::split_has_solution(s, selected->node->budget) && int64_t(s.left->min_objective) + s.right->min_objective <= available) {
+            const Objective available = partial_feasible_ ? selected->allowance : -1;
+            for (const auto& l : selected->node->leaves) if (l.loss <= available && l.loss <= selected->node->budget) leaves.push_back({{"prediction", wire_prediction(l.prediction)}, {"loss", l.loss}});
+            for (const auto& s : selected->node->splits) if (TreeTrieNode::split_has_solution(s, selected->node->budget) && Objective(s.left->min_objective) + s.right->min_objective <= available) {
                 const auto masks = model_.live_child_masks(selected->mask, s.feature);
-                splits.push_back({{"feature", s.feature}, {"minimum", static_cast<int64_t>(s.left->min_objective) + s.right->min_objective}, {"left_minimum", s.left->min_objective}, {"right_minimum", s.right->min_objective}, {"left_size", masks.first.count()}, {"right_size", masks.second.count()}});
+                splits.push_back({{"feature", s.feature}, {"minimum", static_cast<Objective>(s.left->min_objective) + s.right->min_objective}, {"left_minimum", s.left->min_objective}, {"right_minimum", s.right->min_objective}, {"left_size", masks.first.count()}, {"right_size", masks.second.count()}});
             }
         }
         return {{"root_budget", root_budget()}, {"root_minimum", model_.result->min_objective}, {"root_size", meta_.at("root_n")}, {"summaries", std::move(summaries)}, {"options", {{"uid", active}, {"leaves", std::move(leaves)}, {"splits", std::move(splits)}}}, {"visited_nodes", visited_}};
@@ -338,8 +342,8 @@ public:
                 {"abstained_samples", best->abstained}, {"objective", best->objective}};
         }
         Planner planner(*this, constraint);
-        int64_t total = 0;
-        std::unordered_map<int, int> costs;
+        Objective total = 0;
+        std::unordered_map<int, Objective> costs;
         std::vector<Located*> frontier;
         for (auto& item : located_) {
             const std::string kind = item.build->at("kind");
@@ -349,7 +353,7 @@ public:
                 if (item.scope && item.sample && l.prediction != planner.target) throw std::invalid_argument("An existing leaf conflicts with the required prediction");
                 total += l.loss;
             } else if (kind == "choice") {
-                const int minimum = item.scope ? planner.best(item.node, item.sample).objective : item.node->min_objective;
+                const Objective minimum = item.scope ? planner.best(item.node, item.sample).objective : item.node->min_objective;
                 costs.emplace(item.build->at("uid").get<int>(), minimum); total += minimum;
                 if (item.scope) frontier.push_back(&item);
             }
@@ -358,11 +362,11 @@ public:
         if (total > root_budget() || !displayed_bounds(costs)) throw std::invalid_argument("No completion satisfies these constraints and the current budget");
         std::mt19937_64 rng(seed);
         for (auto* item : frontier) {
-            const int best = planner.best(item->node, item->sample).objective;
+            const Objective best = planner.best(item->node, item->sample).objective;
             const int old_uid = item->build->at("uid");
             json filled;
             if (mode == "random") {
-                auto result = planner.random(item->node, static_cast<int>(item->allowance), next_uid, rng);
+                auto result = planner.random(item->node, static_cast<Objective>(item->allowance), next_uid, rng);
                 total += result.second - best;
                 costs[item->build->at("uid").get<int>()] = result.second;
                 filled = std::move(result.first);

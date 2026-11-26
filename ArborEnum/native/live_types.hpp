@@ -1,5 +1,14 @@
 #pragma once
+#include "../src/arborenum/cpp/native_headers.hpp"
+#include <list>
+#include <optional>
+#include <climits>
+#ifndef ARBORENUM_LIVE_NAMESPACE
+#define ARBORENUM_LIVE_NAMESPACE arborenum::live
+#endif
+namespace {
 #include "../src/arborenum/cpp/arborenum.cpp"
+}
 #include "vendor/json.hpp"
 #include <atomic>
 #include <mutex>
@@ -7,8 +16,17 @@
 #include <set>
 #include <climits>
 
-namespace arborenum::live {
+namespace ARBORENUM_LIVE_NAMESPACE {
 using json = nlohmann::json;
+inline Prediction wire_prediction(Prediction value) {
+    if constexpr (regression_objective) if (value == DEFER_PREDICTION) return -std::numeric_limits<double>::max();
+    return value;
+}
+inline Prediction native_prediction(Prediction value) {
+    if constexpr (regression_objective) if (value == -std::numeric_limits<double>::max()) return DEFER_PREDICTION;
+    return value;
+}
+using SumObjective = std::conditional_t<regression_objective, double, int64_t>;
 
 struct Settings {
     double lambda = 0.005, multiplier = 0.01, second_multiplier = 0.01;
@@ -21,9 +39,15 @@ struct Settings {
     bool trie_cache = true, cache_cheap = false, stronger_rollout = false, evaluated_min = false, additive = false;
     std::string proxy_mode = "binarized", key_mode = "hash", greedy_continuous = "binary";
     std::vector<int> proxy_features, initial_features;
+    int proxy_delta = 0, kmeans_min_depth = 2;
+    uint64_t sparsification_seed = 0;
+    bool sparsification_cache = true, equivalent_points = false, continuous_kmeans = false;
+    std::vector<double> sparsification;
     json as_json() const {
         const auto automatic = [](int v) -> json { return v < 0 ? json(nullptr) : json(bool(v)); };
-        return {{"lambda_reg", lambda}, {"rashomon_mult", multiplier}, {"second_rashomon_mult", second_multiplier},
+        return {{"proxy_delta", proxy_delta}, {"sparsification_probability", sparsification}, {"sparsification_seed", sparsification_seed},
+            {"sparsification_cache_proxy_splits", sparsification_cache}, {"regression_equivalent_points", equivalent_points},
+            {"regression_continuous_kmeans", continuous_kmeans}, {"regression_kmeans_min_depth", kmeans_min_depth}, {"lambda_reg", lambda}, {"rashomon_mult", multiplier}, {"second_rashomon_mult", second_multiplier},
             {"multiplier_step_size", multiplier_step}, {"runtime_limit_seconds", runtime}, {"memory_limit_mb", memory},
             {"xgboost_max_depth", xgb_depth}, {"xgboost_estimators", xgb_estimators},
             {"depth_budget", depth}, {"lookahead_k", lookahead}, {"refinement_width", width},
@@ -48,6 +72,12 @@ struct Settings {
             if (expected.is_number_integer() && (!value.is_number_integer() || value.get<double>() < INT_MIN || value.get<double>() > INT_MAX)) throw std::invalid_argument(key + " must be an integer");
             if (expected.is_number_float() && !value.is_number()) throw std::invalid_argument(key + " must be a number");
             if (expected.is_string() && !value.is_string()) throw std::invalid_argument(key + " must be text");
+            if (key == "sparsification_probability") {
+                if (!value.is_array()) throw std::invalid_argument("Sparsification probabilities must be a list");
+                for (const auto& probability : value) if (!probability.is_number() || !std::isfinite(probability.get<double>()) || probability.get<double>() < 0 || probability.get<double>() > 1)
+                    throw std::invalid_argument("Sparsification probabilities must be between 0 and 1");
+                continue;
+            }
             if (expected.is_array()) {
                 if (!value.is_array()) throw std::invalid_argument(key + " must be a list of threshold IDs");
                 std::set<int> seen;
@@ -58,6 +88,14 @@ struct Settings {
             }
             if (expected.is_null() && !value.is_null() && !value.is_boolean()) throw std::invalid_argument(key + " must be automatic (null), true or false");
         }
+        s.proxy_delta = j.value("proxy_delta", 0);
+        s.sparsification = j.value("sparsification_probability", s.sparsification);
+        if (j.contains("sparsification_seed") && j.at("sparsification_seed").get<double>() < 0) throw std::invalid_argument("Sparsification seed must be nonnegative");
+        s.sparsification_seed = j.value("sparsification_seed", uint64_t(0));
+        s.sparsification_cache = j.value("sparsification_cache_proxy_splits", true);
+        s.equivalent_points = j.value("regression_equivalent_points", false);
+        s.continuous_kmeans = j.value("regression_continuous_kmeans", false);
+        s.kmeans_min_depth = j.value("regression_kmeans_min_depth", 2);
         s.xgb_depth = j.value("xgboost_max_depth", s.xgb_depth); s.xgb_estimators = j.value("xgboost_estimators", s.xgb_estimators);
         s.lambda = j.value("lambda_reg", s.lambda);
         s.multiplier = j.value("rashomon_mult", s.multiplier);
@@ -88,9 +126,17 @@ struct Settings {
         if (s.proxy_mode != "hybrid" && s.proxy_mode != "continuous" && s.proxy_mode != "binarized") throw std::invalid_argument("Invalid proxy_mode");
         if (s.key_mode != "hash" && s.key_mode != "hash128" && s.key_mode != "exact" && s.key_mode != "lits_exact") throw std::invalid_argument("key_mode must be hash, hash128, exact or lits_exact");
         if (s.greedy_continuous != "binary" && s.greedy_continuous != "numerical") throw std::invalid_argument("Invalid greedy_continuous_mode");
+        if (s.proxy_delta < 0 || s.depth + s.proxy_delta > 127 || s.kmeans_min_depth < 0 || s.kmeans_min_depth > 127)
+            throw std::invalid_argument("Invalid proxy extension or k-means depth");
+        if (!s.sparsification.empty() && s.sparsification.size() != static_cast<size_t>(s.depth))
+            throw std::invalid_argument("Sparsification needs one probability per enumeration depth, indexed from remaining depth 1");
         return s;
     }
     static Settings checked(Settings s, size_t rows) {
+        if constexpr (regression_objective) {
+            if (rows == 0 || rows > static_cast<size_t>(INT_MAX)) throw std::invalid_argument("Invalid dataset size");
+            return s;
+        }
         const double gamma = std::round(s.lambda * static_cast<double>(rows));
         const double leaf_max = gamma + static_cast<double>(rows) + (s.abstain ? std::round(s.abstain_cost * rows) : 0);
         const double max_budget = leaf_max * (1 + s.second_multiplier) * (1 + s.slack);
@@ -103,23 +149,23 @@ struct Settings {
 struct Dataset {
     std::vector<std::string> names, classes;
     std::vector<std::vector<double>> X;
-    std::vector<int> y;
+    std::vector<Prediction> y;
     static Dataset parse(const json& j) {
         Dataset d;
         d.names = j.at("feature_names").get<std::vector<std::string>>();
-        d.classes = j.at("class_names").get<std::vector<std::string>>();
+        d.classes = j.value("class_names", std::vector<std::string>{});
         d.X = j.at("X").get<std::vector<std::vector<double>>>();
         for (const auto& label : j.at("y"))
-            if (!label.is_number_integer()) throw std::invalid_argument("Class IDs must be integers");
-        d.y = j.at("y").get<std::vector<int>>();
-        if (d.names.empty() || d.X.empty() || d.X.size() != d.y.size() || d.classes.empty() || d.classes.size() > 255)
+            if (regression_objective ? !label.is_number() || !std::isfinite(label.get<double>()) : !label.is_number_integer()) throw std::invalid_argument("Class IDs must be integers");
+        d.y = j.at("y").get<std::vector<Prediction>>();
+        if (d.names.empty() || d.X.empty() || d.X.size() != d.y.size() || (!regression_objective && (d.classes.empty() || d.classes.size() > 255)))
             throw std::invalid_argument("Dataset needs features, rows, matching labels and 1–255 classes");
         std::set<std::string> unique(d.names.begin(), d.names.end());
         if (unique.size() != d.names.size() || unique.count("")) throw std::invalid_argument("Feature names must be unique and nonempty");
         for (size_t i = 0; i < d.X.size(); ++i) {
             if (d.X[i].size() != d.names.size()) throw std::invalid_argument("Dataset is not rectangular");
             for (double x : d.X[i]) if (!std::isfinite(x)) throw std::invalid_argument("Features must be finite numbers");
-            if (d.y[i] < 0 || static_cast<size_t>(d.y[i]) >= d.classes.size()) throw std::invalid_argument("Label is outside class_names");
+            if (!regression_objective && (d.y[i] < 0 || static_cast<size_t>(d.y[i]) >= d.classes.size())) throw std::invalid_argument("Label is outside class_names");
         }
         return d;
     }

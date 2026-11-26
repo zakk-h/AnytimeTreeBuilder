@@ -1,4 +1,5 @@
 import numpy as np
+from sklearn.base import BaseEstimator, RegressorMixin
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 from matplotlib.lines import Line2D
@@ -13,12 +14,16 @@ from ._threshold_guessing import ThresholdGuessBinarizer
 import json
 from pathlib import Path
 from importlib.resources import files
+from statistics import NormalDist
 
 DEFER_PREDICTION = -1
 
-__all__ = ["ArborEnum", "ThresholdGuessBinarizer", "DEFER_PREDICTION"]
+__all__ = ["ArborEnumRegressor", "ArborEnumTreeRegressor", "ArborEnum", "ThresholdGuessBinarizer", "DEFER_PREDICTION"]
 
 def _json_safe(x):
+    if isinstance(x, (float, np.floating)) and not np.isfinite(x):
+        return None
+
     if isinstance(x, np.integer):
         return int(x)
 
@@ -406,6 +411,7 @@ def _shift_column_values_to_midpoints(column):
 def _split_binary_and_continuous(
     X,
     binary_unique_threshold=7,
+    shift_numerical=True,
 ):
     X = _as_2d_numeric_array(X, "X")
 
@@ -456,9 +462,8 @@ def _split_binary_and_continuous(
         else:
             # shift each observed level so the existing C++ threshold
             # generation (split on unique values) produces the midpoint cutpoints.
-            shifted_column = _shift_column_values_to_midpoints(
-                column
-            )
+            shifted_column = (_shift_column_values_to_midpoints(column)
+                              if shift_numerical else column)
 
             numerical_columns.append(
                 shifted_column.astype(
@@ -524,6 +529,7 @@ def _resolve_proxy_matrix(
     proxy_features_max_depth,
     proxy_features_random_state,
     proxy_features_column_elimination,
+    task="classification",
 ):
     X_proxy = _optional_binary_matrix(
         X_proxy,
@@ -533,9 +539,11 @@ def _resolve_proxy_matrix(
 
     if (
         proxy_settings["needs_proxy_binarization"]
+        and (task != "regression" or X_original.shape[1] > 0)
         and X_proxy.shape[1] < 2
     ):
         X_proxy = ThresholdGuessBinarizer(
+            task=task,
             n_estimators=int(proxy_features_n_estimators),
             max_depth=int(proxy_features_max_depth),
             random_state=int(proxy_features_random_state),
@@ -553,7 +561,18 @@ def _prepare_bb_pred(
     *,
     use_deferral=False,
     n_classes=None,
+    regression=False,
 ):
+    if regression:
+        result = np.empty(0, dtype=np.float64) if bb_pred is None else np.asarray(bb_pred, dtype=np.float64)
+        if result.ndim != 1 or (result.size and result.size != n_rows):
+            raise ValueError("bb_pred must be a vector matching the training rows.")
+        if not np.all(np.isfinite(result)):
+            raise ValueError("bb_pred must contain finite predictions.")
+        if use_deferral and result.size != n_rows:
+            raise ValueError("Deferral requires black-box predictions for every training row.")
+        return result
+
     if bb_pred is None:
         bb_pred_vec = np.empty(0, dtype=np.int32)
     else:
@@ -685,14 +704,72 @@ def _prepare_matched_groups_by_variable(
     return out
 
 class ArborEnum:
+    _regression = False
+    _defer_prediction = DEFER_PREDICTION
+    _target_dtype = np.int32
+    _output_dtype = np.int16
+    _objective_cast = int
+    _new_core = staticmethod(_ArborEnumCore)
+    _rid_core = staticmethod(_rid_subtractive_core)
+    _rid_continuous_core = staticmethod(_rid_subtractive_continuous_core)
+
     def __init__(self):
-        self._model = _ArborEnumCore()
+        self._model = self._new_core()
         self._rid_out = None
         self._rid_feature_indices = None
 
         self.binary_feature_specs_ = None
         self.continuous_feature_indices_ = None
         self.n_features_in_ = None
+
+    def _set_proxy_delta(self, value, depth_budget):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0:
+            raise ValueError("proxy_delta must be a nonnegative integer.")
+        value = int(value)
+        if int(depth_budget) < 0 or int(depth_budget) + value > 127:
+            raise ValueError("depth_budget + proxy_delta must be between 0 and 127.")
+        if value != getattr(self, "_proxy_delta_value", 0):
+            self._model.set_proxy_delta(value)
+            self._proxy_delta_value = value
+        return value
+
+    def _set_sparsification(self, probability, seed, depth_budget, split_cache=True):
+        if not isinstance(split_cache, (bool, np.bool_)):
+            raise ValueError("sparsification_split_cache must be a boolean.")
+        if isinstance(seed, (bool, np.bool_)) or not isinstance(seed, (int, np.integer)) or not 0 <= seed < 2**64:
+            raise ValueError("sparsification_seed must be an integer between 0 and 2**64 - 1.")
+        if probability is None:
+            values = ()
+        else:
+            array = np.asarray(probability, dtype=float)
+            if array.ndim != 1 or len(array) != int(depth_budget):
+                raise ValueError("sparsification_probability must have length depth_budget.")
+            if not np.all(np.isfinite(array)) or np.any((array < 0) | (array > 1)):
+                raise ValueError("sparsification probabilities must be finite and between 0 and 1.")
+            values = tuple(array) if np.any(array) else ()
+        config = (values, int(seed), bool(split_cache))
+        if config != getattr(self, "_sparsification_config", ((), 0, True)):
+            self._model.set_sparsification(values, int(seed), bool(split_cache))
+            self._sparsification_config = config
+
+    def get_sparsification_stats(self):
+        return dict(self._model.get_sparsification_stats())
+
+    def _prepare_bb_pred(self, *args, **kwargs):
+        return _prepare_bb_pred(*args, regression=self._regression, **kwargs)
+
+    def _resolve_proxy_matrix(self, *args, **kwargs):
+        return _resolve_proxy_matrix(*args, task="regression" if self._regression else "classification", **kwargs)
+
+    def _resolve_rid_root_budget(self, value):
+        if not self._regression:
+            return _resolve_rid_root_budget(value)
+        if value is None:
+            return -1.0
+        value = float(value)
+        if not np.isfinite(value) or value < 0:
+            raise ValueError("root_budget must be finite and nonnegative.")
+        return value
 
     def fit(
         self,
@@ -738,7 +815,13 @@ class ArborEnum:
         eta_defer=0.0,
         bb_pred=None,
         additive=False,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
         # fit directly from a mixed numerical matrix.
         # columns with at most binary_unique_threshold unique values are
         # threshold-binarized and treated as ordinary binary features. columns
@@ -756,9 +839,10 @@ class ArborEnum:
         (X_original, X_bin, X_num, self.binary_feature_specs_, self.continuous_feature_indices_,) = _split_binary_and_continuous(
             X,
             binary_unique_threshold=binary_unique_threshold,
+            shift_numerical=(not self._regression or max_number_thresholds_per_feature is None),
         )
 
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
         if y.ndim != 1:
             raise ValueError(f"y must be 1D, got shape {y.shape}")
         if y.shape[0] != X_original.shape[0]:
@@ -769,7 +853,7 @@ class ArborEnum:
 
         proxy_settings = _proxy_mode_settings(proxy_mode)
 
-        X_proxy = _resolve_proxy_matrix(
+        X_proxy = self._resolve_proxy_matrix(
             X_original=X_original,
             y=y,
             X_proxy=X_proxy,
@@ -784,7 +868,7 @@ class ArborEnum:
 
         self.root_n_ = int(n)
         self.lambda_reg_ = float(lambda_reg)
-        self.gamma_ = int(round(float(lambda_reg) * int(n)))
+        self.gamma_ = (float(lambda_reg) * int(n) if self._regression else int(round(float(lambda_reg) * int(n))))
         self.depth_budget_ = int(depth_budget)
         self.rashomon_mult_ = float(rashomon_mult)
         self.multiplicative_slack_ = float(multiplicative_slack)
@@ -797,7 +881,7 @@ class ArborEnum:
                 if proxy_settings["mode"] == "binarized":
                     X_initial = X_proxy
                 else:
-                    X_initial = y.reshape(-1, 1).astype(np.uint8)
+                    X_initial = ((y > np.mean(y)) if self._regression else y).reshape(-1, 1).astype(np.uint8)
             else:
                 X_initial = np.empty((n, 0), dtype=np.uint8)
         else:
@@ -826,6 +910,7 @@ class ArborEnum:
                 max_number_thresholds_per_feature
             ),
             bb_pred=bb_pred,
+            _feature_metadata_prepared=True,
         )
 
         self.n_features_in_ = X_original.shape[1]
@@ -871,7 +956,11 @@ class ArborEnum:
                 memory_limit_mb=memory_limit_mb,
                 use_deferral=use_deferral,
                 eta_defer=eta_defer,
-                additive=additive,         
+                additive=additive,
+                proxy_delta=proxy_delta,
+                sparsification_probability=sparsification_probability,
+                sparsification_seed=sparsification_seed,
+                sparsification_split_cache=sparsification_split_cache,
             )
 
         return self.fit_prepared(
@@ -904,9 +993,13 @@ class ArborEnum:
             stronger_rollout=stronger_rollout,
             use_deferral=use_deferral,
             eta_defer=eta_defer,
+            proxy_delta=proxy_delta,
+            sparsification_probability=sparsification_probability,
+            sparsification_seed=sparsification_seed,
+            sparsification_split_cache=sparsification_split_cache,
         )
 
-    
+
 
     def fit_binarized(
         self,
@@ -918,9 +1011,9 @@ class ArborEnum:
         multiplicative_slack=0.0,
         key_mode="hash",
         lookahead_k=1,
-        proxy_style=0, 
-        root_budget=None, 
-        use_budget_refinement=True, 
+        proxy_style=0,
+        root_budget=None,
+        use_budget_refinement=True,
         guarantee_rule_list_recovery=False,
         majority_leaf_only=False,
         cache_early_exits=False,
@@ -938,9 +1031,16 @@ class ArborEnum:
         use_deferral=False,
         eta_defer=0.0,
         bb_pred=None,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
+        binary_names = list(X.columns) if hasattr(X, "columns") else None
         X = np.asarray(X, dtype=np.uint8)
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
         if X.ndim != 2:
             raise ValueError(
                 f"X must be 2D, got shape {X.shape}"
@@ -964,7 +1064,7 @@ class ArborEnum:
                 "eta_defer must be finite and nonnegative."
             )
 
-        bb_pred_vec = _prepare_bb_pred(
+        bb_pred_vec = self._prepare_bb_pred(
             bb_pred,
             X.shape[0],
             use_deferral=bool(use_deferral),
@@ -1002,11 +1102,11 @@ class ArborEnum:
         proxy_style_int = parse_proxy_style(proxy_style)
         greedy_heur_int = parse_heuristic_for_greedy(heuristic_for_greedy)
         greedy_cont_mode = parse_greedy_continuous_mode(greedy_continuous_mode)
-        
+
         if root_budget is None:
             root_budget_int = -1
         else:
-            root_budget_int = int(root_budget)
+            root_budget_int = self._objective_cast(root_budget)
 
         key_mode_parsed = parse_key_mode(key_mode)
         self._model.fit(
@@ -1020,9 +1120,9 @@ class ArborEnum:
             bool(trie_cache_enabled),
             lookahead_k,
             root_budget_int,
-            bool(use_budget_refinement), 
-            bool(guarantee_rule_list_recovery), 
-            int(proxy_style_int), 
+            bool(use_budget_refinement),
+            bool(guarantee_rule_list_recovery),
+            int(proxy_style_int),
             bool(majority_leaf_only),
             bool(cache_early_exits),
             int(greedy_heur_int),
@@ -1040,6 +1140,10 @@ class ArborEnum:
             bb_pred_vec,
         )
 
+        if self._regression:
+            self._single_tree_mode_ = not bool(rashomon_mode)
+            self._set_binary_metadata(X, binary_names)
+            self._record_regression_fit(lambda_reg, depth_budget, lookahead_k, eta_defer)
         return self
 
 
@@ -1076,9 +1180,15 @@ class ArborEnum:
         num_subsamples=50,
         seed=0,
         reuse_caches_between_subsamples=False,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
         X = np.asarray(X, dtype=np.uint8)
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
 
         if X.ndim != 2:
             raise ValueError(
@@ -1128,7 +1238,7 @@ class ArborEnum:
                 "eta_defer must be finite and nonnegative."
             )
 
-        bb_pred_vec = _prepare_bb_pred(
+        bb_pred_vec = self._prepare_bb_pred(
             bb_pred,
             X.shape[0],
             use_deferral=bool(use_deferral),
@@ -1236,6 +1346,10 @@ class ArborEnum:
             dtype=float,
         )
 
+        if self._regression:
+            self._single_tree_mode_ = False
+            self._set_binary_metadata(X)
+            self._record_regression_fit(lambda_reg, depth_budget, lookahead_k, eta_defer)
         return self
 
     def fit_then_extend(
@@ -1271,9 +1385,15 @@ class ArborEnum:
         eta_defer=0.0,
         bb_pred=None,
         additive=False,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
         X = np.asarray(X, dtype=np.uint8)
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
 
         if X.ndim != 2:
             raise ValueError(f"X must be 2D, got shape {X.shape}")
@@ -1294,7 +1414,7 @@ class ArborEnum:
                 "eta_defer must be finite and nonnegative."
             )
 
-        bb_pred_vec = _prepare_bb_pred(
+        bb_pred_vec = self._prepare_bb_pred(
             bb_pred,
             X.shape[0],
             use_deferral=bool(use_deferral),
@@ -1411,6 +1531,10 @@ class ArborEnum:
             bb_pred_vec,
         )
 
+        if self._regression:
+            self._single_tree_mode_ = False
+            self._set_binary_metadata(X)
+            self._record_regression_fit(lambda_reg, depth_budget, lookahead_k, eta_defer)
         return self
 
     def fit_anytime(
@@ -1449,9 +1573,15 @@ class ArborEnum:
         eta_defer=0.0,
         bb_pred=None,
         additive=False,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
         X = np.asarray(X, dtype=np.uint8)
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
 
         if X.ndim != 2:
             raise ValueError(f"X must be 2D, got shape {X.shape}")
@@ -1470,7 +1600,7 @@ class ArborEnum:
                 "eta_defer must be finite and nonnegative."
             )
 
-        bb_pred_vec = _prepare_bb_pred(
+        bb_pred_vec = self._prepare_bb_pred(
             bb_pred,
             X.shape[0],
             use_deferral=bool(use_deferral),
@@ -1607,6 +1737,10 @@ class ArborEnum:
             bb_pred_vec,
         )
 
+        if self._regression:
+            self._single_tree_mode_ = False
+            self._set_binary_metadata(X)
+            self._record_regression_fit(lambda_reg, depth_budget, lookahead_k, eta_defer)
         return self
 
     def prepare_continuous_data(
@@ -1618,6 +1752,7 @@ class ArborEnum:
         X_proxy_active=None,
         max_number_thresholds_per_feature=None,
         bb_pred=None,
+        _feature_metadata_prepared=False,
     ):
         # X_num: Row-major numeric matrix, shape (n_samples, n_numeric_features).
         # by default, these columns are exhaustively threshold-binarized in C++.
@@ -1630,7 +1765,7 @@ class ArborEnum:
         # each X_active column is mapped in C++ to the nearest full binarized feature by Hamming distance.
 
         X_num = np.asarray(X_num, dtype=np.float64)
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
 
         if X_num.ndim != 2:
             raise ValueError(f"X_num must be 2D, got shape {X_num.shape}")
@@ -1700,7 +1835,7 @@ class ArborEnum:
                     "max_number_thresholds_per_feature must be positive or None."
                 )
 
-        bb_pred_vec = _prepare_bb_pred(
+        bb_pred_vec = self._prepare_bb_pred(
             bb_pred,
             n,
         )
@@ -1714,7 +1849,16 @@ class ArborEnum:
             max_thresholds,
             bb_pred_vec,
         )
-        
+
+        if self._regression:
+            self._binary_input_ = False
+            self._single_tree_mode_ = False
+            self.root_n_ = n
+            if not _feature_metadata_prepared:
+                self.n_features_in_ = X_bin.shape[1] + X_num.shape[1]
+                self.feature_names_in_ = [f"f{j}" for j in range(self.n_features_in_)]
+                self.binary_feature_specs_ = [{"original_feature": j, "cutpoint": .5, "direct": True} for j in range(X_bin.shape[1])]
+                self.continuous_feature_indices_ = list(range(X_bin.shape[1], self.n_features_in_))
         return self
 
     def fit_prepared(
@@ -1742,7 +1886,13 @@ class ArborEnum:
         stronger_rollout=False,
         use_deferral=False,
         eta_defer=0.0,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
         proxy_style_int = parse_proxy_style(proxy_style)
         greedy_heur_int = parse_heuristic_for_greedy(heuristic_for_greedy)
         greedy_cont_mode = parse_greedy_continuous_mode(greedy_continuous_mode)
@@ -1757,7 +1907,7 @@ class ArborEnum:
         if root_budget is None:
             root_budget_int = -1
         else:
-            root_budget_int = int(root_budget)
+            root_budget_int = self._objective_cast(root_budget)
 
         key_mode_parsed = parse_key_mode(key_mode)
         self._model.fit_prepared(
@@ -1768,7 +1918,7 @@ class ArborEnum:
             key_mode_parsed,
             bool(trie_cache_enabled),
             int(lookahead_k),
-            int(root_budget_int),
+            self._objective_cast(root_budget_int),
             bool(use_budget_refinement),
             bool(guarantee_rule_list_recovery),
             int(proxy_style_int),
@@ -1786,6 +1936,9 @@ class ArborEnum:
             float(eta_defer),
         )
 
+        if self._regression:
+            self._single_tree_mode_ = not bool(rashomon_mode)
+            self._record_regression_fit(lambda_reg, depth_budget, lookahead_k, eta_defer)
         return self
 
     def fit_prepared_repeated_subsamples(
@@ -1816,7 +1969,13 @@ class ArborEnum:
         num_subsamples=50,
         seed=0,
         reuse_caches_between_subsamples=False,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
         subsample_fraction = float(subsample_fraction)
 
         if (
@@ -1896,6 +2055,9 @@ class ArborEnum:
             dtype=float,
         )
 
+        if self._regression:
+            self._single_tree_mode_ = False
+            self._record_regression_fit(lambda_reg, depth_budget, lookahead_k, eta_defer)
         return self
 
     def fit_prepared_then_extend(
@@ -1926,7 +2088,13 @@ class ArborEnum:
         use_deferral=False,
         eta_defer=0.0,
         additive=False,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
         first_rashomon_mult = float(first_rashomon_mult)
         second_rashomon_mult = float(second_rashomon_mult)
 
@@ -1993,6 +2161,9 @@ class ArborEnum:
             float(eta_defer),
         )
 
+        if self._regression:
+            self._single_tree_mode_ = False
+            self._record_regression_fit(lambda_reg, depth_budget, lookahead_k, eta_defer)
         return self
 
     def fit_prepared_anytime(
@@ -2027,7 +2198,13 @@ class ArborEnum:
         use_deferral=False,
         eta_defer=0.0,
         additive=False,
+        proxy_delta=0,
+        sparsification_probability=None,
+        sparsification_seed=0,
+        sparsification_split_cache=True,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        self._set_sparsification(sparsification_probability, sparsification_seed, depth_budget, sparsification_split_cache)
         rashomon_mult = float(rashomon_mult)
 
         if second_rashomon_mult is None:
@@ -2118,6 +2295,9 @@ class ArborEnum:
             float(eta_defer),
         )
 
+        if self._regression:
+            self._single_tree_mode_ = False
+            self._record_regression_fit(lambda_reg, depth_budget, lookahead_k, eta_defer)
         return self
 
     def set_greedy_continuous_mode(self, mode="binary"):
@@ -2140,7 +2320,7 @@ class ArborEnum:
 
     def get_root_histogram(self):
         return self._model.get_root_histogram()
-    
+
     def get_tree_objective(self, tree_index: int):
         obj, obj_norm = self._model.get_tree_objective(int(tree_index))
         return obj, obj_norm
@@ -2148,11 +2328,11 @@ class ArborEnum:
     def get_tree_num_leaves(self, tree_index: int) -> int:
         paths, _ = self.get_tree_paths(tree_index)
         return len(paths)
-        
+
     def count_trees_within_mult(self, mult: float) -> int:
         hist = self.get_root_histogram()
         min_obj = self.get_min_objective()
-        thresh = round((1.0 + mult) * min_obj)
+        thresh = ((1.0 + mult) * min_obj if self._regression else round((1.0 + mult) * min_obj))
         return sum(cnt for obj, cnt in hist if obj <= thresh)
 
     def alternating_optimization(self, max_iterations=10):
@@ -2318,11 +2498,14 @@ class ArborEnum:
         )
 
         y_eval = np.ascontiguousarray(
-            np.asarray(y_eval, dtype=np.int32)
+            np.asarray(y_eval, dtype=self._target_dtype)
         )
 
         if y_eval.ndim != 1:
             raise ValueError("y_eval must be 1D.")
+
+        if self._regression and not np.all(np.isfinite(y_eval)):
+            raise ValueError("y_eval must contain only finite values.")
 
         if y_eval.shape[0] != X_internal.shape[0]:
             raise ValueError(
@@ -2374,7 +2557,7 @@ class ArborEnum:
         budget = (
             -1
             if budget_override is None
-            else int(budget_override)
+            else self._objective_cast(budget_override)
         )
 
         active_intervals = np.asarray(
@@ -2384,7 +2567,7 @@ class ArborEnum:
                     y_eval,
                     budget,
                     active_variable_columns,
-                    np.empty(0, dtype=np.int32),
+                    np.empty(0, dtype=self._target_dtype),
                     False, # global min/max, not per-sample
                 ),
             dtype=float,
@@ -2399,6 +2582,573 @@ class ArborEnum:
             intervals[active_features] = active_intervals
 
         return intervals
+
+
+    def permutation_importance_bounds(self, X_eval, y_eval, *, budget_override=None):
+        import pandas as pd
+
+        bounds = self.get_exact_replacement_importance_intervals(
+            X_eval, y_eval, budget_override=budget_override
+        )
+        return pd.DataFrame(
+            bounds,
+            index=pd.Index(self.feature_names_in_, name="feature", tupleize_cols=False),
+            columns=["min_importance", "max_importance"],
+        )
+
+    def get_wald_divisive_model_reliance_intervals(
+        self,
+        X_eval,
+        y_eval,
+        alpha_prime=0.05,
+        seed=0,
+        budget_override=None,
+    ):
+        if self._regression:
+            raise NotImplementedError("Wald confidence bounds are defined only for classification.")
+        if self.n_features_in_ is None:
+            raise RuntimeError("Fit the model first.")
+
+        X_internal = np.ascontiguousarray(
+            self.transform(X_eval),
+            dtype=np.uint8,
+        )
+
+        y_eval = np.ascontiguousarray(
+            np.asarray(y_eval, dtype=self._target_dtype)
+        )
+
+        if y_eval.ndim != 1:
+            raise ValueError("y_eval must be 1D.")
+
+        if y_eval.shape[0] != X_internal.shape[0]:
+            raise ValueError(
+                "y_eval must have the same number of rows as X_eval."
+            )
+
+        if X_internal.shape[0] < 4:
+            raise ValueError(
+                "At least four evaluation rows are required."
+            )
+
+        if X_internal.shape[0] % 2 != 0:
+            raise ValueError(
+                "An even number of evaluation rows is required."
+            )
+
+        alpha_prime = float(alpha_prime)
+
+        if not np.isfinite(alpha_prime) or not 0.0 < alpha_prime < 1.0:
+            raise ValueError(
+                "alpha_prime must be strictly between 0 and 1."
+            )
+
+        variable_columns = [
+            [] for _ in range(self.n_features_in_)
+        ]
+
+        for internal_feature, spec in enumerate(
+            self.binary_feature_specs_
+        ):
+            original_feature = int(spec["original_feature"])
+            variable_columns[original_feature].append(
+                int(internal_feature)
+            )
+
+        starts = self.get_continuous_starts()
+
+        for group, original_feature in enumerate(
+            self.continuous_feature_indices_
+        ):
+            original_feature = int(original_feature)
+            start = int(starts[group])
+            end = int(self.get_continuous_group_end(group))
+            variable_columns[original_feature].extend(
+                range(start, end)
+            )
+
+        active_features = [
+            j
+            for j, cols in enumerate(variable_columns)
+            if cols
+        ]
+
+        active_variable_columns = [
+            variable_columns[j]
+            for j in active_features
+        ]
+
+        budget = (
+            -1
+            if budget_override is None
+            else self._objective_cast(budget_override)
+        )
+
+        z_value = NormalDist().inv_cdf(
+            1.0 - alpha_prime / 4.0
+        )
+
+        active_intervals = np.asarray(
+            self._model.get_wald_divisive_model_reliance_intervals_graph(
+                X_internal,
+                y_eval,
+                active_variable_columns,
+                float(z_value),
+                int(seed),
+                budget,
+            ),
+            dtype=float,
+        )
+
+        intervals = np.ones(
+            (self.n_features_in_, 2),
+            dtype=float,
+        )
+
+        if active_features:
+            intervals[active_features] = active_intervals
+
+        return intervals
+
+
+    def get_divisive_wald_marginal_bounds(
+        self,
+        X_eval,
+        y_eval,
+        alpha_prime=0.05,
+        seed=0,
+        budget_override=None,
+    ):
+        if self._regression:
+            raise NotImplementedError("Wald confidence bounds are defined only for classification.")
+        if self.n_features_in_ is None:
+            raise RuntimeError("Fit the model first.")
+
+        X_internal = np.ascontiguousarray(
+            self.transform(X_eval), dtype=np.uint8
+        )
+        y_eval = np.ascontiguousarray(
+            np.asarray(y_eval, dtype=self._target_dtype)
+        )
+
+        if y_eval.ndim != 1:
+            raise ValueError("y_eval must be 1D.")
+
+        n = X_internal.shape[0]
+
+        if y_eval.shape[0] != n:
+            raise ValueError(
+                "y_eval must match the number of rows in X_eval."
+            )
+
+        if n < 4 or n % 2 != 0:
+            raise ValueError(
+                "X_eval must have an even number of rows >= 4."
+            )
+
+        alpha_prime = float(alpha_prime)
+        if not np.isfinite(alpha_prime) or not 0 < alpha_prime < 1:
+            raise ValueError("alpha_prime must be in (0, 1).")
+
+        seed = int(seed)
+        if seed < 0:
+            raise ValueError("seed must be nonnegative.")
+
+        # split evaluation rows into recipients and donors
+        permutation = np.random.default_rng(
+            np.random.SeedSequence([seed, 62001])
+        ).permutation(n)
+
+        m = n // 2
+        recipient_idx = permutation[:m]
+        donor_idx = permutation[m:]
+
+        X_recipient = np.ascontiguousarray(
+            X_internal[recipient_idx], dtype=np.uint8
+        )
+        X_donor = np.ascontiguousarray(
+            X_internal[donor_idx], dtype=np.uint8
+        )
+        y_recipient = np.ascontiguousarray(
+            y_eval[recipient_idx], dtype=self._target_dtype
+        )
+
+        # map original features to internal threshold columns
+        variable_columns = [
+            [] for _ in range(self.n_features_in_)
+        ]
+
+        for internal_feature, spec in enumerate(
+            self.binary_feature_specs_
+        ):
+            original_feature = int(spec["original_feature"])
+            variable_columns[original_feature].append(
+                int(internal_feature)
+            )
+
+        starts = self.get_continuous_starts()
+
+        for group, original_feature in enumerate(
+            self.continuous_feature_indices_
+        ):
+            start = int(starts[group])
+            end = int(self.get_continuous_group_end(group))
+            variable_columns[int(original_feature)].extend(
+                range(start, end)
+            )
+
+        active_features = [
+            j for j, cols in enumerate(variable_columns)
+            if cols
+        ]
+
+        active_groups = [
+            variable_columns[j] for j in active_features
+        ]
+
+        intervals = np.ones(
+            (self.n_features_in_, 2), dtype=float
+        )
+
+        if not active_features:
+            return intervals
+
+        budget = (
+            -1 if budget_override is None
+            else self._objective_cast(budget_override)
+        )
+
+        if budget < -1:
+            raise ValueError(
+                "budget_override must be nonnegative or None."
+            )
+
+        z_value = NormalDist().inv_cdf(
+            1.0 - alpha_prime / 4.0
+        )
+
+        active_intervals = np.asarray(
+            self._model.get_divisive_wald_marginal_bounds(
+                X_recipient,
+                X_donor,
+                y_recipient,
+                float(z_value),
+                budget,
+                active_groups,
+            ),
+            dtype=float,
+        )
+
+        if active_intervals.shape != (len(active_features), 2):
+            raise RuntimeError(
+                "Unexpected shape returned by C++ Wald bounds: "
+                f"{active_intervals.shape}"
+            )
+
+        intervals[active_features] = active_intervals
+
+        return intervals
+
+    def _get_divisive_wald_structural_bounds(
+        self,
+        X_eval,
+        y_eval,
+        alpha_prime,
+        seed,
+        budget_override,
+        cpp_method,
+    ):
+        if self._regression:
+            raise NotImplementedError("Wald confidence bounds are defined only for classification.")
+        if self.n_features_in_ is None:
+            raise RuntimeError("Fit the model first.")
+
+        X_internal = np.ascontiguousarray(
+            self.transform(X_eval), dtype=np.uint8
+        )
+        y_eval = np.ascontiguousarray(
+            np.asarray(y_eval, dtype=self._target_dtype)
+        )
+
+        if y_eval.ndim != 1:
+            raise ValueError("y_eval must be 1D.")
+
+        n = X_internal.shape[0]
+
+        if y_eval.shape[0] != n:
+            raise ValueError(
+                "y_eval must match the number of rows in X_eval."
+            )
+
+        if n < 4 or n % 2 != 0:
+            raise ValueError(
+                "X_eval must have an even number of rows >= 4."
+            )
+
+        alpha_prime = float(alpha_prime)
+
+        if not np.isfinite(alpha_prime) or not 0 < alpha_prime < 1:
+            raise ValueError("alpha_prime must be in (0, 1).")
+
+        seed = int(seed)
+
+        if seed < 0:
+            raise ValueError("seed must be nonnegative.")
+
+        permutation = np.random.default_rng(
+            np.random.SeedSequence([seed, 62001])
+        ).permutation(n)
+
+        m = n // 2
+        recipient_idx = permutation[:m]
+        donor_idx = permutation[m:]
+
+        X_recipient = np.ascontiguousarray(
+            X_internal[recipient_idx], dtype=np.uint8
+        )
+        X_donor = np.ascontiguousarray(
+            X_internal[donor_idx], dtype=np.uint8
+        )
+        y_recipient = np.ascontiguousarray(
+            y_eval[recipient_idx], dtype=self._target_dtype
+        )
+
+        variable_columns = [
+            [] for _ in range(self.n_features_in_)
+        ]
+
+        for internal_feature, spec in enumerate(
+            self.binary_feature_specs_
+        ):
+            original_feature = int(spec["original_feature"])
+            variable_columns[original_feature].append(
+                int(internal_feature)
+            )
+
+        starts = self.get_continuous_starts()
+
+        for group, original_feature in enumerate(
+            self.continuous_feature_indices_
+        ):
+            start = int(starts[group])
+            end = int(self.get_continuous_group_end(group))
+
+            variable_columns[int(original_feature)].extend(
+                range(start, end)
+            )
+
+        active_features = [
+            j for j, cols in enumerate(variable_columns)
+            if cols
+        ]
+
+        active_groups = [
+            variable_columns[j] for j in active_features
+        ]
+
+        intervals = np.ones(
+            (self.n_features_in_, 2), dtype=float
+        )
+
+        if not active_features:
+            return intervals
+
+        budget = (
+            -1 if budget_override is None
+            else self._objective_cast(budget_override)
+        )
+
+        if budget < -1:
+            raise ValueError(
+                "budget_override must be nonnegative or None."
+            )
+
+        z_value = NormalDist().inv_cdf(
+            1.0 - alpha_prime / 4.0
+        )
+
+        active_intervals = np.asarray(
+            getattr(self._model, cpp_method)(
+                X_recipient,
+                X_donor,
+                y_recipient,
+                float(z_value),
+                budget,
+                active_groups,
+            ),
+            dtype=float,
+        )
+
+        if active_intervals.shape != (len(active_features), 2):
+            raise RuntimeError(
+                f"Unexpected shape returned by {cpp_method}: "
+                f"{active_intervals.shape}"
+            )
+
+        intervals[active_features] = active_intervals
+
+        return intervals
+
+
+    def get_majority_divisive_wald_3state_bounds(
+        self, X, y, X_eval, y_eval, *,
+        num_subsamples=100, majority_threshold=0.8,
+        subsample_fraction=0.8, seed=0, alpha_prime=0.05,
+        vi_seed=None, **rashomon_kwargs,
+    ):
+        if self._regression:
+            raise NotImplementedError("Wald confidence bounds are defined only for classification.")
+        import inspect
+
+        num_subsamples = int(num_subsamples)
+        seed = int(seed)
+        if num_subsamples <= 0 or seed < 0 or seed >= 2**64:
+            raise ValueError("num_subsamples must be positive and seed uint64.")
+        if not 0.0 < float(majority_threshold) <= 1.0:
+            raise ValueError("majority_threshold must lie in (0,1].")
+        if not 0.0 < float(subsample_fraction) <= 1.0:
+            raise ValueError("subsample_fraction must lie in (0,1].")
+
+        sig = inspect.signature(self.fit)
+        options = sig.bind(X, y, **rashomon_kwargs)
+        options.apply_defaults()
+        f = options.arguments
+        unsupported = {
+            "second_rashomon_mult", "multiplier_step_size",
+            "proxy_refinement", "refinement_width",
+            "max_refinement_rounds", "use_deferral", "eta_defer",
+            "bb_pred", "runtime_limit_seconds", "memory_limit_mb", "proxy_delta",
+        }
+        for name in unsupported:
+            if name in rashomon_kwargs:
+                default = sig.parameters[name].default
+                if f[name] != default:
+                    raise ValueError(
+                        f"Nondefault {name} is not supported by majority "
+                        "three-state fitting.")
+        if f["early_stopping"] or not f["rashomon_mode"]:
+            raise ValueError("Majority bounds require deterministic Rashomon mode.")
+        if f["guarantee_rule_list_recovery"]:
+            raise ValueError("Rule-list recovery is not supported.")
+        if parse_greedy_continuous_mode(f["greedy_continuous_mode"]) != "binary":
+            raise ValueError("Only greedy_continuous_mode='binary' is supported.")
+
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = list(X.columns)
+        else:
+            self.feature_names_in_ = [f"f{j}" for j in range(np.asarray(X).shape[1])]
+
+        (X_original, X_bin, X_num, self.binary_feature_specs_,
+         self.continuous_feature_indices_) = _split_binary_and_continuous(
+            X, binary_unique_threshold=f["binary_unique_threshold"],
+            shift_numerical=(not self._regression or f["max_number_thresholds_per_feature"] is None))
+        y = np.asarray(y, dtype=self._target_dtype)
+        if y.ndim != 1 or y.size != X_original.shape[0]:
+            raise ValueError("y must have one label per training row.")
+        if np.any(y < 0):
+            raise ValueError("Nonnegative integer labels are required.")
+
+        proxy_settings = _proxy_mode_settings(f["proxy_mode"])
+        X_proxy = self._resolve_proxy_matrix(
+            X_original=X_original, y=y, X_proxy=f["X_proxy"],
+            proxy_settings=proxy_settings,
+            proxy_features_n_estimators=f["proxy_features_n_estimators"],
+            proxy_features_max_depth=f["proxy_features_max_depth"],
+            proxy_features_random_state=f["proxy_features_random_state"],
+            proxy_features_column_elimination=f[
+                "proxy_features_column_elimination"],
+        )
+        X_initial = (
+            np.empty((len(y), 0), dtype=np.uint8)
+            if f["X_initial"] is None
+            else _optional_binary_matrix(f["X_initial"], len(y), "X_initial")
+        )
+
+        self.root_n_ = len(y)
+        self.n_features_in_ = X_original.shape[1]
+        self.lambda_reg_ = float(f["lambda_reg"])
+        self.depth_budget_ = int(f["depth_budget"])
+        self.rashomon_mult_ = float(f["rashomon_mult"])
+        self.lookahead_k_ = int(f["lookahead_k"])
+        self.multiplicative_slack_ = float(f["multiplicative_slack"])
+        self.gamma_ = int(round(float(f["lambda_reg"]) *
+                                round(float(subsample_fraction) * len(y))))
+        self.eta_defer_ = 0.0
+        self._model.set_additive(bool(f["additive"]))
+        self.prepare_continuous_data(
+            X_num=X_num, y=y, X_bin=X_bin,
+            X_initial_active=X_initial, X_proxy_active=X_proxy,
+            max_number_thresholds_per_feature=f[
+                "max_number_thresholds_per_feature"],
+        )
+
+        self._model.fit_prepared_majority_graph(
+            lambda_reg=float(f["lambda_reg"]),
+            depth_budget=int(f["depth_budget"]),
+            rashomon_mult=float(f["rashomon_mult"]),
+            lookahead_k=int(f["lookahead_k"]),
+            root_budget=self._resolve_rid_root_budget(f["root_budget"]),
+            use_multipass=bool(f["use_budget_refinement"]),
+            rule_list_mode=False,
+            oracle_style=int(parse_proxy_style(f["proxy_style"])),
+            majority_leaf_only=bool(f["majority_leaf_only"]),
+            cache_cheap_subproblems=bool(f["cache_early_exits"]),
+            proxy_caching=bool(f["proxy_caching"]),
+            restrict_proxy_in_lickety=bool(proxy_settings["restrict_lickety"]),
+            restrict_proxy_in_depthd_exact=bool(proxy_settings["restrict_depthd"]),
+            restrict_proxy_in_greedy=bool(proxy_settings["restrict_greedy"]),
+            subsample_fraction=float(subsample_fraction),
+            num_subsamples=num_subsamples,
+            majority_threshold=float(majority_threshold),
+            seed=seed,
+            stronger_rollout=bool(f["stronger_rollout"]),
+            multiplicative_slack=float(f["multiplicative_slack"]),
+            key_mode=parse_key_mode(f["key_mode"]),
+            trie_cache_enabled=bool(f["trie_cache_enabled"]),
+            greedy_split_mode=int(parse_heuristic_for_greedy(
+                f["heuristic_for_greedy"])),
+            greedy_continuous_mode="binary",
+        )
+        return self.get_divisive_wald_3state_bounds(
+            X_eval, y_eval, alpha_prime=float(alpha_prime),
+            seed=seed if vi_seed is None else int(vi_seed),
+        )
+
+    def get_divisive_wald_3state_bounds(
+        self,
+        X_eval,
+        y_eval,
+        alpha_prime=0.05,
+        seed=0,
+        budget_override=None,
+    ):
+        return self._get_divisive_wald_structural_bounds(
+            X_eval,
+            y_eval,
+            alpha_prime,
+            seed,
+            budget_override,
+            "get_divisive_wald_3state_bounds",
+        )
+
+
+    def get_divisive_wald_4state_bounds(
+        self,
+        X_eval,
+        y_eval,
+        alpha_prime=0.05,
+        seed=0,
+        budget_override=None,
+    ):
+        return self._get_divisive_wald_structural_bounds(
+            X_eval,
+            y_eval,
+            alpha_prime,
+            seed,
+            budget_override,
+            "get_divisive_wald_4state_bounds",
+        )
+
 
     def get_exact_replacement_divisive_importance_intervals(
         self,
@@ -2415,11 +3165,14 @@ class ArborEnum:
         )
 
         y_eval = np.ascontiguousarray(
-            np.asarray(y_eval, dtype=np.int32)
+            np.asarray(y_eval, dtype=self._target_dtype)
         )
 
         if y_eval.ndim != 1:
             raise ValueError("y_eval must be 1D.")
+
+        if self._regression and not np.all(np.isfinite(y_eval)):
+            raise ValueError("y_eval must contain only finite values.")
 
         if y_eval.shape[0] != X_internal.shape[0]:
             raise ValueError(
@@ -2464,7 +3217,7 @@ class ArborEnum:
         budget = (
             -1
             if budget_override is None
-            else int(budget_override)
+            else self._objective_cast(budget_override)
         )
 
         active_intervals = np.asarray(
@@ -2474,7 +3227,7 @@ class ArborEnum:
                     y_eval,
                     budget,
                     active_variable_columns,
-                    np.empty(0, dtype=np.int32),
+                    np.empty(0, dtype=self._target_dtype),
                     [],
                     [],
                 ),
@@ -2502,7 +3255,7 @@ class ArborEnum:
         - predictions: list of class labels for each leaf, -1 denotes defer.
         """
         return self._model.get_tree_paths(int(tree_index))
-    
+
     def get_tree_paths_str(self, tree_index: int):
         """
         returns (paths_str, predictions) where:
@@ -2523,7 +3276,7 @@ class ArborEnum:
             out.append(path_str)
 
         return out, preds
-    
+
     def get_predictions(
         self,
         tree_index: int,
@@ -2535,9 +3288,9 @@ class ArborEnum:
         X_internal = self.transform(X)
 
         if bb_pred is None:
-            bb_pred_vec = np.empty(0, dtype=np.int32)
+            bb_pred_vec = np.empty(0, dtype=self._target_dtype)
         else:
-            bb_pred_vec = np.asarray(bb_pred, dtype=np.int32)
+            bb_pred_vec = np.asarray(bb_pred, dtype=self._target_dtype)
 
             if bb_pred_vec.ndim != 1:
                 raise ValueError(
@@ -2556,12 +3309,13 @@ class ArborEnum:
                 int(tree_index),
                 X_internal,
                 bb_pred_vec,
-                int(defer_placeholder),
+                self._objective_cast(defer_placeholder),
             ),
-            dtype=np.int16,
+            dtype=self._output_dtype,
         )
 
-        preds[preds == 255] = -1
+        if not self._regression:
+            preds[preds == 255] = -1
         return preds
 
 
@@ -2576,9 +3330,9 @@ class ArborEnum:
         X_internal = self.transform(X)
 
         if bb_pred is None:
-            bb_pred_vec = np.empty(0, dtype=np.int32)
+            bb_pred_vec = np.empty(0, dtype=self._target_dtype)
         else:
-            bb_pred_vec = np.asarray(bb_pred, dtype=np.int32)
+            bb_pred_vec = np.asarray(bb_pred, dtype=self._target_dtype)
 
             if bb_pred_vec.ndim != 1:
                 raise ValueError(
@@ -2596,15 +3350,16 @@ class ArborEnum:
             self._model.get_all_predictions(
                 X_internal,
                 bb_pred_vec,
-                int(defer_placeholder),
+                self._objective_cast(defer_placeholder),
                 bool(stack),
             ),
-            dtype=np.int16,
+            dtype=self._output_dtype,
         )
 
-        preds[preds == 255] = -1
+        if not self._regression:
+            preds[preds == 255] = -1
         return preds
-    
+
     def get_internal_feature_names(self, feature_names=None):
         if feature_names is None:
             feature_names = [
@@ -2655,8 +3410,8 @@ class ArborEnum:
             "trie_nodes": [
                 {
                     "id": int(node.id),
-                    "budget": int(node.budget),
-                    "min_objective": int(node.min_objective),
+                    "budget": self._objective_cast(node.budget),
+                    "min_objective": self._objective_cast(node.min_objective),
                     "subproblem_size": int(
                         node.subproblem_size
                     ),
@@ -2685,7 +3440,7 @@ class ArborEnum:
                     "right_trie_id": int(
                         split.right_trie_id
                     ),
-                    "min_objective": int(
+                    "min_objective": self._objective_cast(
                         split.min_objective
                     ),
                 }
@@ -2698,10 +3453,10 @@ class ArborEnum:
                     "parent_trie_id": int(
                         leaf.parent_trie_id
                     ),
-                    "prediction": int(
+                    "prediction": self._objective_cast(
                         leaf.prediction
                     ),
-                    "loss": int(leaf.loss),
+                    "loss": self._objective_cast(leaf.loss),
                     "subproblem_size": int(
                         leaf.subproblem_size
                     ),
@@ -2858,13 +3613,13 @@ class ArborEnum:
         originalName: sex,
         threshold: 0.5,
         kind: binary_threshold,
-        continuousGroup: None, 
+        continuousGroup: None,
         '''
 
         return {
             "featureRegistry": feature_registry,
         }
-        
+
 
     def save_builder_payload(
         self,
@@ -2948,17 +3703,17 @@ class ArborEnum:
             gamma = getattr(self, "gamma_", None)
             if lambda_reg is not None and root_n is not None:
                 value = float(lambda_reg) * int(root_n)
-                gamma = value if getattr(self, "_regression", False) else int(np.floor(value + 0.5))
+                gamma = value if self._regression else int(np.floor(value + 0.5))
 
         meta = {
             **feature_meta,
             "schemaVersion": 2,
             "originalFeatureNames": [str(name) for name in (self.feature_names_in_ if feature_names is None else feature_names)],
-            "use_deferral": any(leaf["prediction"] == DEFER_PREDICTION for leaf in graph["leaf_nodes"]),
+            "use_deferral": any(leaf["prediction"] == self._defer_prediction for leaf in graph["leaf_nodes"]),
             "proxy_delta": getattr(self, "_proxy_delta_value", 0),
 
             "featureDescriptions": feature_descriptions,
-            "task": "regression" if getattr(self, "_regression", False) else "classification",
+            "task": "regression" if self._regression else "classification",
 
             "lambda_reg": lambda_reg,
             "depth_budget": depth_budget,
@@ -3010,12 +3765,12 @@ class ArborEnum:
             and meta.get("root_n") is not None
         ):
             raw_gamma = float(lambda_reg) * int(meta["root_n"])
-            meta["gamma"] = raw_gamma if getattr(self, "_regression", False) else int(np.floor(raw_gamma + 0.5))
+            meta["gamma"] = raw_gamma if self._regression else int(np.floor(raw_gamma + 0.5))
 
         if (X is None) != (y is None):
             raise ValueError("Pass both X and y to embed an analysis dataset.")
         if class_names is not None:
-            if getattr(self, "_regression", False):
+            if self._regression:
                 raise ValueError("class_names is only available for classification graphs.")
             names = [str(name) for name in class_names]
             if not names or len(set(names)) != len(names):
@@ -3031,7 +3786,7 @@ class ArborEnum:
             if not np.all(np.isfinite(data)) or not np.all(np.isfinite(targets)):
                 raise ValueError("Analysis dataset values must be finite.")
             names = []
-            if not getattr(self, "_regression", False):
+            if not self._regression:
                 if np.any(targets < 0) or np.any(targets != np.floor(targets)):
                     raise ValueError("Classification targets must be nonnegative integer class IDs.")
                 count = int(np.max(targets)) + 1
@@ -3145,7 +3900,7 @@ class ArborEnum:
 
         return path
 
-    
+
     def plot_tree(self, tree_index: int, feature_names=None, figsize=(8, 6), ax=None, title=None, show=True):
         paths, preds = self.get_tree_paths(tree_index)
 
@@ -3284,9 +4039,9 @@ class ArborEnum:
         def _edge_label(parent_feature_idx, is_left_branch):
             name = feature_names[parent_feature_idx]
             # left branch: feature is True => no prefix
-            # right branch: feature is False => prefix "!" # no ! prefix anymore 
+            # right branch: feature is False => prefix "!" # no ! prefix anymore
             return name if is_left_branch else f"{name}"
-        
+
         def _shrink_segment(x1, y1, x2, y2, r1, r2):
             dx = x2 - x1
             dy = y2 - y1
@@ -3317,7 +4072,7 @@ class ArborEnum:
 
                 sx, sy, ex, ey = _shrink_segment(x, y, x2, y2, r_parent, r_child)
                 ax.add_line(Line2D([sx, ex], [sy, ey], color="#4D4D4D", linewidth=2.2))
-                
+
                 # if node.feature is not None and node.prediction is None:
                 #     tx, ty = _edge_label_pos(x, y, x2, y2, frac=0.52, base_offset=0.28, side_sign=+1.0)
                 #     ax.text(
@@ -3355,11 +4110,14 @@ class ArborEnum:
                 radius = internal_r
                 label = None
             else:
-                prediction = int(node.prediction)
+                prediction = self._objective_cast(node.prediction)
 
-                if prediction == -1:
+                if prediction == self._defer_prediction:
                     face = "#7A5195"
                     label = "D"
+                elif self._regression:
+                    face = "#009E73"
+                    label = f"{prediction:.6g}"
                 elif prediction == 0:
                     face = "#E69F00"
                     label = "0"
@@ -3367,7 +4125,7 @@ class ArborEnum:
                     face = "#009E73"
                     label = str(prediction)
 
-             
+
                 edge = "#4D4D4D"
                 text_color = "#111111"
                 radius = leaf_r
@@ -3418,13 +4176,13 @@ class ArborEnum:
         return fig, ax
 
 
-        
+
     def get_tree_frontier_scores(self, tree_index: int, depth_budget: int):
         # returns a list of (depth_from_root, frontier_score) for each internal node of the specified tree. Root has depth 0.
         return self._model.get_tree_frontier_scores(int(tree_index), int(depth_budget))
 
     def root_lickety_objective_lookahead1(self, depth_budget: int):
-        return int(self._model.root_lickety_objective_lookahead1(int(depth_budget)))
+        return self._objective_cast(self._model.root_lickety_objective_lookahead1(int(depth_budget)))
 
     def reachable_actions_for_training_sample(self, sample_idx: int):
         actions = self._model.reachable_actions_for_training_sample(
@@ -3442,6 +4200,34 @@ class ArborEnum:
             self._model.training_sample_can_defer(
                 int(sample_idx)
             )
+        )
+
+    def _prediction_query(self, training_query, eval_query, sample_idx, budget, X):
+        budget = -1 if budget is None else budget
+        if X is None:
+            if sample_idx is None:
+                raise TypeError("Pass sample_idx or X.")
+            return training_query(sample_idx, budget)
+        if sample_idx is not None:
+            raise TypeError("Pass either sample_idx or X, not both.")
+
+        X = np.asarray(X)
+        single_row = X.ndim == 1
+        if single_row:
+            X = X[None, :]
+        results = eval_query(self.transform(X), budget)
+        return results[0] if single_row else results
+
+    def prediction_counts(self, sample_idx=None, budget=None, *, X=None):
+        return self._prediction_query(
+            self._model.prediction_counts, self._model.prediction_counts_for_rows,
+            sample_idx, budget, X
+        )
+
+    def has_disagreement(self, sample_idx=None, budget=None, *, X=None):
+        return self._prediction_query(
+            self._model.has_disagreement, self._model.has_disagreement_for_rows,
+            sample_idx, budget, X
         )
 
     def training_sample_has_multiple_reachable_predictions(self, sample_idx: int):
@@ -3591,7 +4377,9 @@ class ArborEnum:
         importance_interval_mode=0,
         subsample=-1,
         model_reliance="subtractive",
+        proxy_delta=0,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
 
         if hasattr(X, "columns"):
             original_feature_names = list(X.columns)
@@ -3601,7 +4389,7 @@ class ArborEnum:
             ]
 
         self.rid_n_original_features_ = len(original_feature_names)
-        
+
         (
             X_original,
             X_rid,
@@ -3630,11 +4418,12 @@ class ArborEnum:
         ) = _split_binary_and_continuous(
             X_rid,
             binary_unique_threshold=2,
+            shift_numerical=(not self._regression or max_number_thresholds_per_feature is None),
         )
 
 
 
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
         if y.ndim != 1:
             raise ValueError(f"y must be 1D, got shape {y.shape}")
         if y.shape[0] != X_original.shape[0]:
@@ -3682,7 +4471,7 @@ class ArborEnum:
                 f"[1, {X_original.shape[0]}]."
             )
 
-        root_budget_int = _resolve_rid_root_budget(
+        root_budget_int = self._resolve_rid_root_budget(
             root_budget
         )
 
@@ -3723,11 +4512,11 @@ class ArborEnum:
         else:
             matched_groups_by_variable_vec = []
 
-        
 
-        n_classes = int(np.max(y)) + 1
 
-        bb_pred_vec = _prepare_bb_pred(
+        n_classes = 0 if self._regression else int(np.max(y)) + 1
+
+        bb_pred_vec = self._prepare_bb_pred(
             bb_pred,
             X_original.shape[0],
             use_deferral=bool(use_deferral),
@@ -3736,7 +4525,7 @@ class ArborEnum:
 
         proxy_settings = _proxy_mode_settings(proxy_mode)
 
-        X_proxy = _resolve_proxy_matrix(
+        X_proxy = self._resolve_proxy_matrix(
             X_original=X_rid,
             y=y,
             X_proxy=X_proxy,
@@ -3762,7 +4551,7 @@ class ArborEnum:
                 if proxy_settings["mode"] == "binarized":
                     X_initial = X_proxy
                 else:
-                    X_initial = y.reshape(-1, 1).astype(np.uint8)
+                    X_initial = ((y > np.mean(y)) if self._regression else y).reshape(-1, 1).astype(np.uint8)
             else:
                 X_initial = np.empty((n, 0), dtype=np.uint8)
         else:
@@ -3833,7 +4622,7 @@ class ArborEnum:
                 "retained original features."
             )
 
-        self._rid_out = _rid_subtractive_continuous_core(
+        self._rid_out = self._rid_continuous_core(
             X_num,
             X_bin,
             y,
@@ -3878,8 +4667,9 @@ class ArborEnum:
             bool(additive),
             int(importance_interval_mode),
             int(subsample),
-            int(root_budget_int),
+            self._objective_cast(root_budget_int),
             bool(divisive_model_reliance),
+            **({"proxy_delta": proxy_delta} if proxy_delta else {}),
         )
 
         if (
@@ -3929,9 +4719,12 @@ class ArborEnum:
         importance_interval_mode=0,
         subsample=-1,
         model_reliance="subtractive",
+        proxy_delta=0,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
+        input_names = list(X.columns) if hasattr(X, "columns") else None
         X = np.asarray(X, dtype=np.uint8)
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
 
         if X.ndim != 2:
             raise ValueError(
@@ -3991,7 +4784,7 @@ class ArborEnum:
                 f"[1, {X.shape[0]}]."
             )
 
-        root_budget_int = _resolve_rid_root_budget(
+        root_budget_int = self._resolve_rid_root_budget(
             root_budget
         )
 
@@ -4019,16 +4812,24 @@ class ArborEnum:
                 n_rid_variables,
             )
         )
-        n_classes = int(np.max(y)) + 1
+        n_classes = 0 if self._regression else int(np.max(y)) + 1
 
-        bb_pred_vec = _prepare_bb_pred(
+        bb_pred_vec = self._prepare_bb_pred(
             bb_pred,
             X.shape[0],
             use_deferral=bool(use_deferral),
             n_classes=n_classes,
         )
 
-        self._rid_out = _rid_subtractive_core(
+        self.rid_feature_names_ = (
+            input_names if binning_map is None and input_names is not None
+            else [f"f{j}" for j in (range(X.shape[1]) if binning_map is None else sorted(binning_map))]
+        )
+        self.rid_n_original_features_ = len(self.rid_feature_names_)
+        self.rid_feature_indices_ = list(range(self.rid_n_original_features_))
+        self.rid_constant_feature_indices_ = []
+        self.rid_constant_feature_names_ = []
+        self._rid_out = self._rid_core(
             X,
             y,
             int(n_boot),
@@ -4051,8 +4852,9 @@ class ArborEnum:
             bool(additive),
             int(importance_interval_mode),
             int(subsample),
-            int(root_budget_int),
+            self._objective_cast(root_budget_int),
             bool(divisive_model_reliance),
+            **({"proxy_delta": proxy_delta} if proxy_delta else {}),
         )
 
         if (
@@ -4067,7 +4869,7 @@ class ArborEnum:
                 ],
                 dtype=float,
             )
-        
+
         if "bootstrap_importance_intervals" in self._rid_out:
             self._rid_out["bootstrap_importance_intervals"] = np.asarray(
                 self._rid_out["bootstrap_importance_intervals"],
@@ -4124,9 +4926,11 @@ class ArborEnum:
         importance_interval_mode=0,
         subsample=-1,
         model_reliance="subtractive",
+        proxy_delta=0,
     ):
+        proxy_delta = self._set_proxy_delta(proxy_delta, depth_budget)
         X_num = np.asarray(X_num, dtype=np.float64)
-        y = np.asarray(y, dtype=int)
+        y = np.asarray(y, dtype=self._target_dtype)
 
         if X_num.ndim != 2:
             raise ValueError(
@@ -4188,7 +4992,7 @@ class ArborEnum:
                 f"[1, {n}]."
             )
 
-        root_budget_int = _resolve_rid_root_budget(
+        root_budget_int = self._resolve_rid_root_budget(
             root_budget
         )
 
@@ -4210,9 +5014,9 @@ class ArborEnum:
                 "eta_defer must be finite and nonnegative."
             )
 
-        n_classes = int(np.max(y)) + 1
+        n_classes = 0 if self._regression else int(np.max(y)) + 1
 
-        bb_pred_vec = _prepare_bb_pred(
+        bb_pred_vec = self._prepare_bb_pred(
             bb_pred,
             n,
             use_deferral=bool(use_deferral),
@@ -4342,7 +5146,12 @@ class ArborEnum:
             )
         )
 
-        self._rid_out = _rid_subtractive_continuous_core(
+        self.rid_n_original_features_ = X_bin.shape[1] + X_num.shape[1]
+        self.rid_feature_indices_ = list(range(self.rid_n_original_features_))
+        self.rid_feature_names_ = [f"f{j}" for j in self.rid_feature_indices_]
+        self.rid_constant_feature_indices_ = []
+        self.rid_constant_feature_names_ = []
+        self._rid_out = self._rid_continuous_core(
             X_num,
             X_bin,
             y,
@@ -4389,8 +5198,9 @@ class ArborEnum:
             bool(additive),
             int(importance_interval_mode),
             int(subsample),
-            int(root_budget_int),
+            self._objective_cast(root_budget_int),
             bool(divisive_model_reliance),
+            **({"proxy_delta": proxy_delta} if proxy_delta else {}),
         )
 
         if "bootstrap_importance_intervals" in self._rid_out:
@@ -4413,12 +5223,12 @@ class ArborEnum:
             )
 
         return self._rid_out
-    
+
     def _require_rid(self):
         if self._rid_out is None:
             raise RuntimeError("RID not computed. Call compute_rid(...) first.")
         return self._rid_out
-    
+
     def rid_plot_mean(self, feature_names=None, **kwargs):
         rid_out = self._require_rid()
         feature_names = self._resolve_rid_feature_names(
@@ -4510,7 +5320,7 @@ class ArborEnum:
             feature_names=feature_names,
             **kwargs,
         )
-        
+
     @staticmethod
     def _require_binary_predictions(preds):
         a = np.asarray(preds)
@@ -4522,7 +5332,7 @@ class ArborEnum:
     def get_p_per_sample(self, X, tree_indices=None):
         # returns p_i per sample, the proportion of models predicting 1 - require binary predicitons
         # tree_indices : iterable[int] | None. if none, uses all trees, otherwise averages over the tree indices provided.
-       
+
 
         if tree_indices is None:
             P = self.get_all_predictions(X, stack=True)
@@ -4561,7 +5371,7 @@ class ArborEnum:
         v = self.get_variance_per_sample(X, tree_indices=tree_indices)
         v = np.asarray(v, float)
         n = v.size
-    
+
         xs = np.sort(v)
         F = (np.arange(1, n + 1, dtype=float) / float(n))
 
@@ -4588,6 +5398,220 @@ class ArborEnum:
         if show:
             plt.show()
         return fig, ax
+
+class ArborEnumRegressor(RegressorMixin, ArborEnum, BaseEstimator):
+    _regression = True
+    _defer_prediction = -np.inf
+    _target_dtype = np.float64
+    _output_dtype = np.float64
+    _objective_cast = float
+
+    @staticmethod
+    def _new_core():
+        from ._regression_core import ArborEnum as RegressionCore
+        return RegressionCore()
+
+    def __init__(self, *, equivalent_points=False, continuous_kmeans_bound=False, kmeans_min_remaining_depth=2,
+                 movement_bound_mode="local", movement_cache_mb=128):
+        super().__init__()
+        from ._regression_core import rid_subtractive_model_reliance, rid_subtractive_model_reliance_continuous
+        from functools import partial
+        self._rid_core = partial(self._regression_rid, rid_subtractive_model_reliance)
+        self._rid_continuous_core = partial(self._regression_rid, rid_subtractive_model_reliance_continuous)
+        self._configure_regression(equivalent_points, continuous_kmeans_bound, kmeans_min_remaining_depth,
+                                   movement_bound_mode, movement_cache_mb)
+
+    def set_params(self, **params):
+        super().set_params(**params)
+        self._configure_regression(**self.get_params())
+        return self
+
+    def _configure_regression(self, equivalent_points, continuous_kmeans_bound, kmeans_min_remaining_depth,
+                              movement_bound_mode, movement_cache_mb):
+        self.equivalent_points = bool(equivalent_points)
+        self.continuous_kmeans_bound = bool(continuous_kmeans_bound)
+        if not isinstance(kmeans_min_remaining_depth, (int, np.integer)) or kmeans_min_remaining_depth < 0:
+            raise ValueError("kmeans_min_remaining_depth must be a nonnegative integer.")
+        self.kmeans_min_remaining_depth = int(kmeans_min_remaining_depth)
+        self._model.set_regression_options(self.equivalent_points, self.continuous_kmeans_bound,
+                                           self.kmeans_min_remaining_depth)
+        modes = {"none": 0, "local": 1, "global": 2}
+        if movement_bound_mode not in modes:
+            raise ValueError("movement_bound_mode must be 'none', 'local', or 'global'.")
+        if not isinstance(movement_cache_mb, (int, float, np.integer, np.floating)) or not np.isfinite(movement_cache_mb) or movement_cache_mb < 0:
+            raise ValueError("movement_cache_mb must be a finite nonnegative number.")
+        self.movement_bound_mode = movement_bound_mode
+        self.movement_cache_mb = float(movement_cache_mb)
+        self._model.set_regression_movement_options(modes[movement_bound_mode], int(self.movement_cache_mb * 1024 * 1024))
+
+    def _regression_rid(self, core, *args, **kwargs):
+        result = core(*args, **kwargs, equivalent_points=self.equivalent_points,
+                      continuous_kmeans_bound=self.continuous_kmeans_bound,
+                      kmeans_min_remaining_depth=self.kmeans_min_remaining_depth,
+                      movement_bound_mode={"none": 0, "local": 1, "global": 2}[self.movement_bound_mode],
+                      movement_cache_bytes=int(self.movement_cache_mb * 1024 * 1024))
+        result["loss"] = "squared_error"
+        result["model_reliance"] = "divisive" if args[-1] else "subtractive"
+        return result
+
+    def count_trees(self):
+        return 1 if getattr(self, "_single_tree_mode_", False) else super().count_trees()
+
+    def get_min_objective(self):
+        return self.get_tree_objective(0)[0] if getattr(self, "_single_tree_mode_", False) else super().get_min_objective()
+
+    def get_root_histogram(self):
+        return [(self.get_min_objective(), 1)] if getattr(self, "_single_tree_mode_", False) else super().get_root_histogram()
+
+    def count_trees_within_mult(self, mult):
+        if getattr(self, "_single_tree_mode_", False):
+            if not np.isfinite(mult) or mult < 0:
+                raise ValueError("mult must be finite and nonnegative.")
+            return 1
+        return super().count_trees_within_mult(mult)
+
+    def _set_binary_metadata(self, X, names=None):
+        self._binary_input_ = True
+        self.n_features_in_ = X.shape[1]
+        self.root_n_ = X.shape[0]
+        self.feature_names_in_ = list(names) if names is not None else [f"f{j}" for j in range(X.shape[1])]
+        self.binary_feature_specs_ = [{"original_feature": j, "cutpoint": .5} for j in range(X.shape[1])]
+        self.continuous_feature_indices_ = []
+
+    def _record_regression_fit(self, lambda_reg, depth_budget, lookahead_k, eta_defer):
+        self.lambda_reg_ = float(lambda_reg)
+        self.gamma_ = self.lambda_reg_ * self.root_n_
+        self.depth_budget_ = int(depth_budget)
+        self.lookahead_k_ = int(lookahead_k)
+        self.eta_defer_ = float(eta_defer)
+
+    def get_movement_bound_stats(self):
+        return self._model.get_regression_movement_stats()
+
+    def transform(self, X):
+        if getattr(self, "_binary_input_", False) or self.binary_feature_specs_ is None:
+            result = np.asarray(X, dtype=np.uint8)
+            if result.ndim != 2:
+                raise ValueError("X must be a matrix.")
+            return result
+        if any(spec.get("direct", False) for spec in self.binary_feature_specs_):
+            values = _as_2d_numeric_array(X, "X")
+            if values.shape[1] != self.n_features_in_:
+                raise ValueError("X feature count does not match training.")
+            pieces = [values[:, spec["original_feature"]].astype(np.uint8).reshape(-1, 1) for spec in self.binary_feature_specs_]
+            pieces.extend((values[:, original, None] <= self.get_continuous_cutpoints(group)[None, :]).astype(np.uint8)
+                          for group, original in enumerate(self.continuous_feature_indices_))
+            return np.column_stack(pieces) if pieces else np.empty((len(values), 0), dtype=np.uint8)
+        return super().transform(X)
+
+    def get_internal_feature_names(self, feature_names=None):
+        if getattr(self, "_binary_input_", False):
+            names = self.feature_names_in_ if feature_names is None else list(feature_names)
+            if len(names) != self.n_features_in_:
+                raise ValueError("feature_names must match the input feature count.")
+            return list(names)
+        names = super().get_internal_feature_names(feature_names)
+        original = self.feature_names_in_ if feature_names is None else list(feature_names)
+        for i, spec in enumerate(self.binary_feature_specs_):
+            if spec.get("direct", False):
+                names[i] = str(original[spec["original_feature"]])
+        return names
+
+    def _get_builder_feature_metadata(self, feature_names=None):
+        if getattr(self, "_binary_input_", False):
+            names = self.get_internal_feature_names(feature_names)
+            return {"featureRegistry": [{"internalFeature": j, "originalFeature": j,
+                     "originalName": str(name), "threshold": .5, "kind": "binary_threshold",
+                     "continuousGroup": None, "binaryDirect": True} for j, name in enumerate(names)]}
+        metadata = super()._get_builder_feature_metadata(feature_names)
+        for i, spec in enumerate(self.binary_feature_specs_):
+            if spec.get("direct", False):
+                metadata["featureRegistry"][i]["binaryDirect"] = True
+        return metadata
+
+    def get_internal_feature_info(self, internal_feature):
+        if getattr(self, "_binary_input_", False):
+            feature = int(internal_feature)
+            if feature < 0 or feature >= self.n_features_in_:
+                raise IndexError("Internal feature index is out of range.")
+            return {"kind": "binary", "original_feature": feature, "name": self.feature_names_in_[feature]}
+        return super().get_internal_feature_info(internal_feature)
+
+    def _single_tree_importance(self, X_eval, y_eval, budget_override, divisive):
+        internal = self.transform(X_eval)
+        y = np.asarray(y_eval, dtype=float)
+        if y.ndim != 1 or y.size != internal.shape[0] or not y.size or not np.all(np.isfinite(y)):
+            raise ValueError("y_eval must be a finite nonempty vector matching X_eval rows.")
+        if budget_override is not None and budget_override >= 0 and self.get_tree_objective(0)[0] > budget_override:
+            raise ValueError("budget_override excludes the fitted tree.")
+        paths, predictions = self.get_tree_paths(0)
+        if not np.all(np.isfinite(predictions)):
+            raise ValueError("Exact replacement importance requires non-deferred leaves.")
+        owners = {i: int(spec["original_feature"]) for i, spec in enumerate(self.binary_feature_specs_)}
+        for group, original in enumerate(self.continuous_feature_indices_):
+            owners.update((column, original) for column in range(self.get_continuous_starts()[group], self.get_continuous_group_end(group)))
+        original = np.mean((y - self.predict(X_eval)) ** 2)
+        values = np.ones(self.n_features_in_) if divisive else np.zeros(self.n_features_in_)
+        for feature in set(owners[abs(step) - 1] for path in paths for step in path):
+            replacement = 0.
+            for path, prediction in zip(paths, predictions):
+                fixed = np.ones(y.size, dtype=bool)
+                donors = np.ones(y.size, dtype=bool)
+                for step in path:
+                    column = abs(step) - 1
+                    selected = internal[:, column] == (step > 0)
+                    if owners[column] == feature:
+                        donors &= selected
+                    else:
+                        fixed &= selected
+                replacement += donors.mean() * np.sum((y[fixed] - prediction) ** 2) / y.size
+            values[feature] = (replacement / original if original else (1. if replacement == 0 else np.inf)) if divisive else replacement - original
+        return np.column_stack([values, values])
+
+    def get_exact_replacement_importance_intervals(self, X_eval, y_eval, budget_override=None):
+        if budget_override is not None and not np.isfinite(budget_override):
+            raise ValueError("budget_override must be finite.")
+        if np.asarray(y_eval).size == 0:
+            raise ValueError("y_eval must be nonempty.")
+        if self.n_features_in_ is not None and budget_override is not None and budget_override >= 0:
+            if self.get_min_objective() > np.nextafter(float(budget_override), np.inf):
+                raise ValueError("budget_override excludes every represented tree.")
+        return super().get_exact_replacement_importance_intervals(X_eval, y_eval, budget_override)
+
+    def get_exact_replacement_divisive_importance_intervals(self, X_eval, y_eval, budget_override=None):
+        if getattr(self, "_single_tree_mode_", False):
+            return self._single_tree_importance(X_eval, y_eval, budget_override, True)
+        return super().get_exact_replacement_divisive_importance_intervals(X_eval, y_eval, budget_override)
+
+    def reachable_actions_for_training_sample(self, sample_idx):
+        counts = self.prediction_counts(sample_idx)
+        return {"predictions": [value for value in counts if np.isfinite(value)],
+                "can_defer": -np.inf in counts}
+
+    def predict(self, X, tree_index=0, *, bb_pred=None):
+        return self.get_predictions(tree_index, X, bb_pred=bb_pred)
+
+    @staticmethod
+    def _require_binary_predictions(predictions):
+        if not np.all(np.isfinite(predictions)):
+            raise ValueError("Predictions must be finite.")
+
+    def get_p_per_sample(self, X, tree_indices=None):
+        raise NotImplementedError("Binary prediction probabilities are classification-only.")
+
+    def _classification_only(self, *args, **kwargs):
+        raise NotImplementedError("Wald confidence bounds are classification-only.")
+
+    get_wald_divisive_model_reliance_intervals = _classification_only
+    get_divisive_wald_marginal_bounds = _classification_only
+    get_majority_divisive_wald_3state_bounds = _classification_only
+    get_divisive_wald_3state_bounds = _classification_only
+    get_divisive_wald_4state_bounds = _classification_only
+
+    def score(self, X, y, tree_index=0):
+        from sklearn.metrics import r2_score
+        return r2_score(y, self.predict(X, tree_index))
+
 
 def _rid_style_ax(ax):
     ax.spines["top"].set_visible(False)
@@ -4629,6 +5653,12 @@ def _rid_pmf_from_cdf(xs, ps):
     return xs, w
 
 
+def _rid_loss_label(rid_out):
+    if rid_out.get("model_reliance") == "divisive":
+        return "MSE ratio" if rid_out.get("loss") == "squared_error" else "Error ratio"
+    return "MSE increase when scrambled" if rid_out.get("loss") == "squared_error" else "Accuracy drop when scrambled"
+
+
 def rid_plot_mean(
     rid_out,
     feature_names=None,
@@ -4651,7 +5681,7 @@ def rid_plot_mean(
     ax.set_xticks(x)
     ax.set_xticklabels(feature_names, rotation=45, ha="right")
     ax.set_xlabel("feature")
-    ax.set_ylabel("mean reliance\n(average accuracy drop when scrambled)")
+    ax.set_ylabel("mean reliance\n(" + _rid_loss_label(rid_out).lower() + ")")
     ax.set_title(title)
     _rid_style_ax(ax)
 
@@ -4740,7 +5770,7 @@ def rid_plot_violin(
 
     ax.set_yticks(np.arange(V))
     ax.set_yticklabels(names_s)
-    ax.set_xlabel("Accuracy drop when scrambled")
+    ax.set_xlabel(_rid_loss_label(rid_out))
     ax.set_ylabel("feature")
     ax.set_title(title)
     ax.set_xlim(xmin, xmax)
@@ -4795,8 +5825,8 @@ def rid_plot_cdfs(
         ax.plot(xs, ps, linewidth=1.8, alpha=0.9, color=colors[j], label=feature_names[j])
 
     ax.set_title(title)
-    ax.set_xlabel("Accuracy drop when scrambled")
-    ax.set_ylabel("P[Δ accuracy ≤ t]")
+    ax.set_xlabel(_rid_loss_label(rid_out))
+    ax.set_ylabel("P[importance ≤ t]" if rid_out.get("loss") == "squared_error" else "P[Δ accuracy ≤ t]")
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(-0.02, 1.02)
     _rid_style_ax(ax)
@@ -5077,3 +6107,8 @@ def rid_plot_all_pairs(
         plt.show()
 
     return fig, axes
+
+from .single_tree import ArborEnumTree
+__all__.append("ArborEnumTree")
+
+from .single_tree import ArborEnumTreeRegressor
