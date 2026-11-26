@@ -1,3 +1,4 @@
+import { analyzeGraphInWorker } from './analysisClient';
 import { useEffect, useRef, useState, useMemo, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { BarChart3, Download, Maximize2, Minimize2, X } from 'lucide-react';
@@ -13,6 +14,7 @@ const analysisStages = ['Checking feasible completions', 'Counting completions',
 const completedStages = ['', 'Checked feasible completions.', 'Computed completion counts.', 'Computed counts, accuracy ranges, distributions, and disagreement.'];
 type Result = {
   unavailable_reason?: string; accuracy_available?: boolean; abstention_available?: boolean;
+  task?: string; mse?: { min: number; max: number };
   session_id: string; checkpoint: number; tree_count: string; sample_count: number; exact: boolean;
   leaf_distribution: Bin[]; abstention_distribution: Bin[];
   accuracy: { min: number | null; max: number | null; undefined_count: string };
@@ -90,12 +92,14 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
   const request = useRef<AbortController | null>(null), token = useRef(''), modal = useRef<HTMLElement>(null), previousFocus = useRef<HTMLElement | null>(null);
   const cancel = () => {
     request.current?.abort(); request.current = null;
-    if (token.current) { void nativeApi(session ? 'cancel-query' : 'cancel-graph-analysis', session, { token: token.current }).catch(() => {}); token.current = ''; }
+    if (token.current && session) void nativeApi('cancel-query', session, { token: token.current }).catch(() => {}); token.current = '';
     setBusy(false);
   };
   const close = () => { cancel(); setOpen(false); previousFocus.current?.focus(); };
-  useEffect(() => { cancel(); setOpen(false); setResult(null); return cancel; }, [session, tree]);
+  const importedGraph = session ? null : graph;
+  useEffect(() => { cancel(); setOpen(false); setResult(null); return cancel; }, [session, tree, importedGraph]);
   useEffect(() => { onBusyChange(busy); }, [busy, onBusyChange]);
+  useEffect(() => { setDataset(initialDataset); }, [initialDataset]);
   useEffect(() => { if (open) modal.current?.querySelector<HTMLButtonElement>('button')?.focus(); }, [open]);
   const run = async (attachedDataset = dataset) => {
     cancel(); const controller = new AbortController(); request.current = controller; token.current = crypto.randomUUID();
@@ -109,7 +113,7 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
       } catch { /* The analysis request itself reports connection or computation errors. */ }
       if (!controller.signal.aborted) pollTimer = setTimeout(poll, 400);
     };
-    pollTimer = setTimeout(poll, 150);
+    if (session) pollTimer = setTimeout(poll, 150);
     try {
       if (session) {
         await nativeApi('analysis-start', session, { tree, analysis_token: analysisToken }, controller.signal);
@@ -121,7 +125,7 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
           await new Promise(resolve => setTimeout(resolve, 400));
         }
       } else {
-        const response = await nativeApi<Result>('analyze-graph', session, { tree, payload: { graph, meta }, dataset: attachedDataset, token: analysisToken }, controller.signal);
+        const response = await analyzeGraphInWorker(graph, meta, tree, attachedDataset, controller.signal, setProgress);
         if (!controller.signal.aborted) setResult(response);
       }
     } catch (e) {
@@ -132,7 +136,7 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
     }
     finally { controller.abort(); clearTimeout(pollTimer); if (request.current === controller) { setBusy(false); request.current = null; token.current = ''; } }
   };
-  return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Connect the native service to analyze this graph' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); void run(); }}><BarChart3 size={16}/> Analyze</button>
+  return <><button className="ghost-button" disabled={disabled} title={disabled ? 'Wait for the current query to finish' : 'Analyze completions of the whole current partial tree'} onClick={() => { previousFocus.current = document.activeElement as HTMLElement; setOpen(true); void run(); }}><BarChart3 size={16}/> Analyze</button>
     {open && createPortal(<div className="analysis-overlay" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
       <section className="analysis-dialog" ref={modal} role="dialog" aria-modal="true" aria-labelledby="analysis-title" onKeyDown={e => {
         if (e.key === 'Escape') { e.stopPropagation(); if (expandedPanel) setExpandedPanel(null); else close(); }
@@ -152,13 +156,16 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
             try { const rows = parseCsv(await file.text()); setCsvRows(rows); setTarget(rows[0][rows[0].length - 1]); setError(''); }
             catch (e) { setError(e instanceof Error ? e.message : String(e)); }
           }}/>
-          {csvRows && <><label>Classification target <select value={target} onChange={e => setTarget(e.target.value)}>{csvRows[0].map(name => <option key={name}>{name}</option>)}</select></label>
+          {csvRows && <><label>{meta.task === 'regression' ? 'Regression target' : 'Classification target'} <select value={target} onChange={e => setTarget(e.target.value)}>{csvRows[0].map(name => <option key={name}>{name}</option>)}</select></label>
             <button className="primary-button" disabled={busy} onClick={() => {
               try {
-                const next = toDataset(csvRows, target);
+                const next = toDataset(csvRows, target, String(meta.task ?? 'classification'));
+                if (meta.task !== 'regression') {
                 const labels = Array.isArray(meta.classNames) ? meta.classNames.map(String) : [...next.class_names].sort((a,b) => Number(a)-Number(b) || a.localeCompare(b));
-                if (next.class_names.some(name => !labels.includes(name))) throw new Error('Dataset class names do not match graph.');
-                next.y = next.y.map(id => labels.indexOf(next.class_names[id])); next.class_names = labels;
+                const mapping = next.class_names.map(name => labels.includes(name) ? labels.indexOf(name) : /^\d+$/.test(name) && Number(name) < labels.length ? Number(name) : -1);
+                if (mapping.some(id => id < 0)) throw new Error('Dataset class names do not match graph.');
+                next.y = next.y.map(id => mapping[id]); next.class_names = labels;
+                }
                 setDataset(next); setCsvRows(null); void run(next);
               } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
             }}>Use dataset and analyze</button></>}
@@ -175,14 +182,14 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
         </div>}
         {error && <><p role="alert" className="upload-error">{error}</p><button className="primary-button" onClick={() => void run()}>Retry analysis</button></>}
         {result && <>
-          <div className="analysis-metrics"><div><span>{tree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>{result.abstention_enabled ? 'Accuracy on predicted samples' : 'Accuracy'}</span><b>{result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Number of leaves</span><b>{result.leaf_distribution[0]?.value.toLocaleString()} – {result.leaf_distribution[result.leaf_distribution.length - 1]?.value.toLocaleString()}</b></div>{result.disagreement.length > 0 && <><div><span>Samples with disagreement</span><b>{percent(disagreementSummary.any)}</b></div><div><span>Samples with &gt;10% disagreement</span><b>{percent(disagreementSummary.above10)}</b></div><div><span>Samples with &gt;25% disagreement</span><b>{percent(disagreementSummary.above25)}</b></div></>}</div>
+          <div className="analysis-metrics"><div><span>{tree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>{meta.task === 'regression' ? 'Mean squared error (stored leaf values)' : result.abstention_enabled ? 'Accuracy on predicted samples' : 'Accuracy'}</span><b>{meta.task === 'regression' ? result.mse ? `${result.mse.min.toPrecision(6)} – ${result.mse.max.toPrecision(6)}` : '—' : result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Number of leaves</span><b>{result.leaf_distribution[0]?.value.toLocaleString()} – {result.leaf_distribution[result.leaf_distribution.length - 1]?.value.toLocaleString()}</b></div>{result.disagreement.length > 0 && <><div><span>Samples with disagreement</span><b>{percent(disagreementSummary.any)}</b></div><div><span>Samples with &gt;10% disagreement</span><b>{percent(disagreementSummary.above10)}</b></div><div><span>Samples with &gt;25% disagreement</span><b>{percent(disagreementSummary.above25)}</b></div></>}</div>
           {result.accuracy.undefined_count !== '0' && <p className="analysis-note">{countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.</p>}
           {result.unavailable_reason && <p className="analysis-note">{result.unavailable_reason}</p>}
-          {result.accuracy_available === false && <p className="analysis-note">Accuracy requires leaf penalty metadata and matching sample counts. Attach the matching dataset to verify the graph.</p>}
+          {meta.task !== 'regression' && result.accuracy_available === false && <p className="analysis-note">Accuracy requires leaf penalty metadata and matching sample counts. Attach the matching dataset to verify the graph.</p>}
           <div className={`analysis-panels${result.importance.some(f => f.name.length > 24) ? ' analysis-panels-long-labels' : ''}${result.abstention_enabled && result.abstention_distribution.length > 0 ? ' analysis-panels-with-abstention' : ''}${expandedPanel ? ' analysis-panels-focused' : ''}`}>
             {result.importance.length > 0 && <AnalysisPanel id="importance" title="Feature importance ranges" expanded={expandedPanel === 'importance'} onExpand={setExpandedPanel}>
-              <p>Expected increase in loss over all permutations of one dataset feature. Min/max over tree completions in the Rashomon set.</p>
-              <table className="analysis-importance"><thead><tr><th>Feature</th><th>Min (<abbr title="Percentage points">pp</abbr>)</th><th>Max (<abbr title="Percentage points">pp</abbr>)</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{(100 * f.min).toFixed(3)}</td><td>{(100 * f.max).toFixed(3)}</td></tr>)}</tbody></table>
+              <p>Expected increase in {meta.task === 'regression' ? 'MSE' : 'loss'} over all permutations of one dataset feature. Min/max over the stored tree completions in the Rashomon set.{meta.task === 'regression' && ' Exported leaf predictions are held fixed.'}</p>
+              <table className="analysis-importance"><thead><tr><th>Feature</th><th>Min {meta.task !== 'regression' && <abbr title="Percentage points">(pp)</abbr>}</th><th>Max {meta.task !== 'regression' && <abbr title="Percentage points">(pp)</abbr>}</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{((meta.task === 'regression' ? 1 : 100) * f.min).toFixed(3)}</td><td>{((meta.task === 'regression' ? 1 : 100) * f.max).toFixed(3)}</td></tr>)}</tbody></table>
             </AnalysisPanel>}
             <AnalysisPanel id="leaves" title="Leaves" expanded={expandedPanel === 'leaves'} onExpand={setExpandedPanel}>
               <Distribution bins={result.leaf_distribution} sampleCount={result.sample_count}/>

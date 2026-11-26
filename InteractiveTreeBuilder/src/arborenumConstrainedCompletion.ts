@@ -90,7 +90,7 @@ function predictions() {
     new Set(
       (currentPayload()?.graph?.leaf_nodes ?? [])
         .map((leaf) => Number(leaf.prediction))
-        .filter((x) => Number.isFinite(x) && x >= -1),
+        .filter((x) => Number.isFinite(x) && (currentPayload()?.meta?.task === 'regression' || x >= -1)),
     ),
   ).sort((a, b) => a - b);
 }
@@ -219,13 +219,13 @@ function makeSampleControls() {
   select.setAttribute('aria-label', 'Prediction to ensure');
   const blank = document.createElement('option');
   blank.value = '';
-  blank.textContent = 'Choose class';
+  blank.textContent = currentPayload()?.meta?.task === 'regression' ? 'Choose prediction' : 'Choose class';
   select.appendChild(blank);
   for (const prediction of predictions()) {
     const option = document.createElement('option');
     option.value = String(prediction);
     const names = currentPayload()?.meta?.classNames;
-    option.textContent = prediction === -1 ? 'Abstain' : Array.isArray(names) ? String(names[prediction]) : `class ${prediction}`;
+    option.textContent = prediction === -1 && currentPayload()?.meta?.task !== 'regression' ? 'Abstain' : Array.isArray(names) ? String(names[prediction]) : `${currentPayload()?.meta?.task === 'regression' ? 'predict' : 'class'} ${prediction}`;
     select.appendChild(option);
   }
   predictionLabel.append(predictionName, select);

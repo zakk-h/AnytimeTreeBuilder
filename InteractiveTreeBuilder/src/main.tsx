@@ -1,4 +1,5 @@
 import { NativeAnalysis } from './NativeAnalysis';
+import type { Dataset } from './liveDataset';
 import {
   type CSSProperties,
   type Dispatch,
@@ -176,10 +177,10 @@ function makeDefaultUi(): BuilderUi {
   };
 }
 
-function predictionLabel(prediction: number | undefined, ui: BuilderUi): string {
+function predictionLabel(prediction: number | undefined, ui: BuilderUi, meta: FeatureMeta & Record<string, unknown>): string {
   if (prediction === undefined || prediction === null) return 'predict —';
 
-  if (Number(prediction) === -1) return 'Abstain';
+  if ((Number(prediction) === -1 && meta.task !== 'regression')) return 'Abstain';
 
   const custom = ui.labelNames[String(prediction)]?.trim();
   return custom || `predict ${prediction}`;
@@ -316,10 +317,11 @@ function coerceMeta(
   payload: Window['ARBORENUM_BUILDER_PAYLOAD'],
 ): FeatureMeta & Record<string, unknown> {
   const payloadMeta = (payload?.meta ?? {}) as FeatureMeta & Record<string, unknown>;
-  const globalMeta = (window.ARBORENUM_ANDOR_META ?? {}) as FeatureMeta & Record<string, unknown>;
+  const globalMeta = (payload?.graph ? {} : window.ARBORENUM_ANDOR_META ?? {}) as FeatureMeta & Record<string, unknown>;
+  const fallbackMeta = (payload?.graph || window.ARBORENUM_ANDOR_GRAPH ? {} : sampleMeta) as FeatureMeta & Record<string, unknown>;
 
   return {
-    ...sampleMeta,
+    ...fallbackMeta,
     ...globalMeta,
     ...payloadMeta,
 
@@ -328,34 +330,34 @@ function coerceMeta(
       payload?.featureNames ??
       payload?.feature_names ??
       globalMeta.featureNames ??
-      sampleMeta.featureNames,
+      fallbackMeta.featureNames,
 
     continuousGroups:
       payloadMeta.continuousGroups ??
       payload?.continuousGroups ??
       payload?.continuous_groups ??
       globalMeta.continuousGroups ??
-      sampleMeta.continuousGroups,
+      fallbackMeta.continuousGroups,
 
     thresholds:
       payloadMeta.thresholds ??
       payload?.thresholds ??
       globalMeta.thresholds ??
-      sampleMeta.thresholds,
+      fallbackMeta.thresholds,
 
     featureDescriptions:
       payloadMeta.featureDescriptions ??
       payload?.featureDescriptions ??
       payload?.feature_descriptions ??
       globalMeta.featureDescriptions ??
-      sampleMeta.featureDescriptions ??
+      fallbackMeta.featureDescriptions ??
       {},
 
     gamma:
       payloadMeta.gamma ??
       payload?.gamma ??
       globalMeta.gamma ??
-      sampleMeta.gamma,
+      fallbackMeta.gamma,
 
     lambda_reg:
       payloadMeta.lambda_reg ??
@@ -363,8 +365,8 @@ function coerceMeta(
       payload?.lambdaReg ??
       globalMeta.lambda_reg ??
       globalMeta.lambdaReg ??
-      sampleMeta.lambda_reg ??
-      sampleMeta.lambdaReg,
+      fallbackMeta.lambda_reg ??
+      fallbackMeta.lambdaReg,
   } as FeatureMeta & Record<string, unknown>;
 }
 
@@ -489,7 +491,7 @@ function gammaRaw(
   const lambdaNum = Number(lambdaValue);
 
   if (Number.isFinite(lambdaNum)) {
-    return Math.round(lambdaNum * rootSize(graph));
+    return meta.task === 'regression' ? lambdaNum * rootSize(graph) : Math.round(lambdaNum * rootSize(graph));
   }
 
   return undefined;
@@ -567,7 +569,7 @@ function leafMistakesRaw(
     return undefined;
   }
 
-  if (Number(leaf.prediction) === -1) {
+  if ((Number(leaf.prediction) === -1 && meta.task !== 'regression')) {
     const eta = etaDeferRaw(meta);
     return Math.max(0, loss - gamma - llroundNonnegative(eta * n));
   }
@@ -608,14 +610,14 @@ function completedTreeStats(
       if (n !== undefined) {
         leafN += n;
 
-        if (Number(leaf?.prediction) === -1) {
+        if ((Number(leaf?.prediction) === -1 && meta.task !== 'regression')) {
           deferredN += n;
         }
       }
 
       const leafMistakes = leafMistakesRaw(graph, meta, node.leafId);
 
-      if (Number(leaf?.prediction) !== -1 && leafMistakes !== undefined) {
+      if ((Number(leaf?.prediction) !== -1 || meta.task === 'regression') && leafMistakes !== undefined) {
         mistakes += leafMistakes;
       }
 
@@ -661,6 +663,7 @@ function leafMisclassificationRate(
     return gammaRaw(graph, meta) === undefined ? 'err needs γ' : 'err —';
   }
 
+  if (meta.task === 'regression') return `MSE ${stripZeros((mistakes / n).toFixed(6))}`;
   const pct = (100 * mistakes) / n;
 
   return `${stripZeros(pct.toFixed(2))}% err`;
@@ -673,7 +676,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
     b.kind === 'split'
       ? prettySplitLabel(b.feature ?? -1, meta, thresholdDecimals, ui)
       : b.kind === 'leaf'
-        ? predictionLabel(b.prediction, ui)
+        ? predictionLabel(b.prediction, ui, meta)
         : graph.metadata?.native && graph.metadata.active_uid !== b.uid
           ? 'Select to explore'
           : `${feasibleChoices}/${choices} choices`;
@@ -682,7 +685,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
     b.kind === 'split'
       ? ''
       : b.kind === 'leaf'
-        ? `${leafSampleSizeLabel(graph, b.leafId)} · ${Number(b.prediction) === -1 ? 'no prediction' : leafMisclassificationRate(
+        ? `${leafSampleSizeLabel(graph, b.leafId)} · ${(Number(b.prediction) === -1 && meta.task !== 'regression') ? 'no prediction' : leafMisclassificationRate(
             graph,
             meta,
             b.leafId,
@@ -698,7 +701,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
   const nodeStyle = {
     width: label.width,
     ...(b.kind === 'leaf' ? {
-      '--leaf-node-bg': ui.colors.leafNodesByClass[String(b.prediction)] || (Number(b.prediction) === -1 ? '#fff8eb' : ui.colors.leafNode),
+      '--leaf-node-bg': ui.colors.leafNodesByClass[String(b.prediction)] || ((Number(b.prediction) === -1 && meta.task !== 'regression') ? '#fff8eb' : ui.colors.leafNode),
     } : {}),
   } as CSSProperties;
 
@@ -710,7 +713,7 @@ function ArborEnumNode({ data }: { data: NodeData }) {
       <Handle type="target" position={Position.Top} className="handle" />
 
       <div className="node-copy">
-        <div className="node-eyebrow">{b.kind === 'split' ? 'Split rule' : b.kind === 'leaf' ? Number(b.prediction) === -1 ? 'Abstention' : 'Prediction' : 'Decision point'}<span>#{b.uid}</span></div>
+        <div className="node-eyebrow">{b.kind === 'split' ? 'Split rule' : b.kind === 'leaf' ? (Number(b.prediction) === -1 && meta.task !== 'regression') ? 'Abstention' : 'Prediction' : 'Decision point'}<span>#{b.uid}</span></div>
         <div
           className="node-title"
           ref={label.ref}
@@ -818,11 +821,11 @@ function SplitButton({
           </div>
         )}
 
-        <AdaptiveText className="choice-card-main" text={predictionLabel(choice.leaf.prediction, ui)} />
+        <AdaptiveText className="choice-card-main" text={predictionLabel(choice.leaf.prediction, ui, meta)} />
 
         <div className="choice-card-sub">
           {leafSampleSizeLabel(graph, choice.leaf.id)} ·{' '}
-          {choice.leaf.prediction === -1 ? 'no prediction' : leafMisclassificationRate(graph, meta, choice.leaf.id)} · obj{' '}
+          {(choice.leaf.prediction === -1 && meta.task !== 'regression') ? 'no prediction' : leafMisclassificationRate(graph, meta, choice.leaf.id)} · obj{' '}
           {formatObjective(graph, objective)}
           {!feasible ? ` · over by ${formatObjective(graph, excessValue)}` : ''}
         </div>
@@ -936,7 +939,7 @@ function SidePanel({
     if (!q) return true;
 
     if (c.kind === 'leaf') {
-      return `leaf ${predictionLabel(c.leaf.prediction, ui)} ${leafMisclassificationRate(
+      return `leaf ${predictionLabel(c.leaf.prediction, ui, meta)} ${leafMisclassificationRate(
         graph,
         meta,
         c.leaf.id,
@@ -1166,14 +1169,14 @@ function SidePanel({
 
           <div className="budget-box">
             <div>
-              <span>{meta.use_deferral || meta.abstain_uses_labels || completeStats.hasDeferral ? 'accuracy (predicted samples)' : 'accuracy'}</span>
-              <b title={completeStats.accuracy === undefined ? 'No samples were predicted' : undefined}>{completeStats.accuracy === undefined ? '—' : `${stripZeros((100 * completeStats.accuracy).toFixed(2))}%`}</b>
+              <span>{meta.task === 'regression' ? 'mean squared error' : meta.use_deferral || meta.abstain_uses_labels || completeStats.hasDeferral ? 'accuracy (predicted samples)' : 'accuracy'}</span>
+              <b title={completeStats.accuracy === undefined ? 'No samples were predicted' : undefined}>{meta.task === 'regression' ? stripZeros((completeStats.mistakes / completeStats.totalN).toFixed(6)) : completeStats.accuracy === undefined ? '—' : `${stripZeros((100 * completeStats.accuracy).toFixed(2))}%`}</b>
             </div>
 
             <div>
-              <span>mistakes</span>
+              <span>{meta.task === 'regression' ? 'squared error' : 'mistakes'}</span>
               <b>
-                {stripZeros(completeStats.mistakes.toFixed(2))}/{completeStats.predictedN}
+                {meta.task === 'regression' ? stripZeros(completeStats.mistakes.toFixed(6)) : `${stripZeros(completeStats.mistakes.toFixed(2))}/${completeStats.predictedN}`}
               </b>
             </div>
 
@@ -1724,7 +1727,7 @@ function BuilderSettingsMenu({
 
             {labels.map((prediction) => (
               <label className="settings-row color-row" key={`leaf-color-${prediction}`}>
-                <span>{predictionLabel(prediction, ui)} leaf</span>
+                <span>{predictionLabel(prediction, ui, meta)} leaf</span>
                 <input
                   type="color"
                   value={
@@ -1965,7 +1968,7 @@ function App() {
     setSnapshot(autoExpandSingletons(makeRoot(nextGraph), nextGraph));
     setHistory([]);
     setUploadError(null);
-    setUi(makeDefaultUi());
+    setUi({ ...makeDefaultUi(), labelNames: Array.isArray(nextMeta.classNames) ? Object.fromEntries(nextMeta.classNames.map((name, i) => [String(i), String(name)])) : {} });
   };
 
   const prepareNative = () => {
@@ -2144,7 +2147,7 @@ function App() {
           {uploadError && <p className="upload-error workspace-error" role="alert">{uploadError}</p>}
 
           <div className="header-actions">
-            <NativeAnalysis session={liveSession.current} tree={snapshot.root} graph={graph} meta={meta} initialDataset={graph === sampleGraph ? sampleDataset : undefined} disabled={(!nativeReady && !liveAvailable) || datasetPending || nativeBusy} onBusyChange={setAnalysisBusy}/>
+            <NativeAnalysis session={liveSession.current} tree={snapshot.root} graph={graph} meta={meta} initialDataset={(meta.analysisDataset as Dataset | undefined) ?? (graph === sampleGraph ? sampleDataset : undefined)} disabled={datasetPending || nativeBusy} onBusyChange={setAnalysisBusy}/>
             {!datasetPending && <BuilderSettingsMenu
               graph={graph}
               meta={meta}

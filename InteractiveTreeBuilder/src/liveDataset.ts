@@ -35,7 +35,7 @@ export function parseCsv(text: string): string[][] {
 }
 // Text categories are represented as named 0/1 indicators, avoiding an
 // arbitrary numeric ordering between values such as "red", "green", and "blue".
-export function toDataset(rows: string[][], target: string): Dataset {
+export function toDataset(rows: string[][], target: string, task = 'classification'): Dataset {
   const targetIndex = rows[0].indexOf(target);
   if (targetIndex < 0) throw new Error('Select a target column.');
   const features = rows[0].map((_, i) => i).filter(i => i !== targetIndex);
@@ -47,8 +47,9 @@ export function toDataset(rows: string[][], target: string): Dataset {
   data.forEach((row, index) => {
     const label = row[targetIndex].trim();
     if (!label) throw new Error(`Missing target at row ${index + 2}.`);
-    if (!classes.has(label)) classes.set(label, classes.size);
-    y.push(classes.get(label)!);
+    if (task === 'regression') {
+      const value = Number(label); if (!Number.isFinite(value)) throw new Error(`Target at row ${index + 2} must be a finite number.`); y.push(value);
+    } else { if (!classes.has(label)) classes.set(label, classes.size); y.push(classes.get(label)!); }
   });
   for (const f of features) {
     const values = data.map((row, index) => {

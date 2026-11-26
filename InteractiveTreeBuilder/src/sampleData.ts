@@ -1,65 +1,10 @@
-import csv from '../../ArborEnum/examples/bike_processed.csv?raw';
-import { parseCsv, toDataset } from './liveDataset';
-import type { AndOrGraph, FeatureMeta } from './types';
 import payload from './samplePayload.json';
+import { normalizeArborEnumPayload, rememberCurrentPayload, type ArborEnumBuilderPayload } from './arborenumPayload';
+import type { Dataset } from './liveDataset';
 
-type FeatureRegistryEntry = {
-  internalFeature: number;
-  originalFeature: number;
-  originalName: string;
-  threshold: number;
-  kind: 'binary_threshold' | 'continuous_threshold';
-  continuousGroup: number | null;
-};
-
-const registry = payload.meta.featureRegistry as FeatureRegistryEntry[];
-
-export const sampleGraph = payload.graph as AndOrGraph;
-
-const featureNames = registry.map(
-  (entry) => `${entry.originalName} <= ${entry.threshold}`,
-);
-
-const thresholds = Object.fromEntries(
-  registry.map((entry) => [
-    String(entry.internalFeature),
-    entry.threshold,
-  ]),
-);
-
-const continuousGroups: Record<string, number[]> = {};
-
-for (const entry of registry) {
-  if (
-    entry.kind !== 'continuous_threshold' ||
-    entry.continuousGroup === null
-  ) {
-    continue;
-  }
-
-  if (!continuousGroups[entry.originalName]) {
-    continuousGroups[entry.originalName] = [];
-  }
-
-  continuousGroups[entry.originalName].push(entry.internalFeature);
-}
-
-export const sampleMeta: FeatureMeta & Record<string, unknown> = {
-  ...payload.meta,
-
-  featureNames,
-  thresholds,
-  continuousGroups,
-};
-
-// Keep the built-in sample visible to helper UI modules in exactly the same
-// place uploaded ArborEnum payloads are exposed by arborenumPayload.ts.
-const internalWindow = window as unknown as Window & Record<string, unknown>;
-if (!internalWindow.ARBORENUM_CURRENT_BUILDER_PAYLOAD) {
-  internalWindow.ARBORENUM_CURRENT_BUILDER_PAYLOAD = {
-    graph: sampleGraph,
-    meta: sampleMeta,
-  };
-}
-
-export const sampleDataset = toDataset(parseCsv(csv), 'label');
+const sample = normalizeArborEnumPayload(payload as unknown as ArborEnumBuilderPayload);
+export const sampleGraph = sample.graph;
+export const sampleMeta = sample.meta;
+export const sampleDataset = sample.meta.analysisDataset as Dataset | undefined;
+const target = window as unknown as Window & Record<string, unknown>;
+if (!target.ARBORENUM_CURRENT_BUILDER_PAYLOAD) rememberCurrentPayload(sample);

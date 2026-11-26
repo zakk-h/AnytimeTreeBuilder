@@ -1,4 +1,4 @@
-import type { AndOrGraph } from './types';
+import type { AndOrGraph, FeatureMeta } from './types';
 
 export type ArborEnumFeatureRegistryEntry = {
   internalFeature: number;
@@ -91,7 +91,7 @@ function deriveContinuousGroups(
   return out;
 }
 
-export function normalizeArborEnumPayload(payload: ArborEnumBuilderPayload) {
+export function normalizeArborEnumPayload(payload: ArborEnumBuilderPayload): { graph: AndOrGraph; meta: ArborEnumBuilderMeta & FeatureMeta } {
   if (!payload?.graph) {
     throw new Error('ArborEnum builder payload must contain a top-level "graph" field.');
   }
