@@ -4,7 +4,9 @@ async function exerciseDefaultAnalysis(page) {
   const dialog = page.getByRole('dialog', { name: 'Analyze partial tree' });
   await dialog.getByRole('heading', { name: 'Feature importance ranges' }).waitFor();
   await dialog.getByText('Dataset attached · 17,379 samples').waitFor();
-  assert.ok(Number(await dialog.locator('.analysis-metrics b').first().textContent()) > 0);
+  const treeCount = await dialog.locator('.analysis-metrics b').first().getAttribute('title');
+  assert.match(treeCount, /^\d+$/);
+  assert.ok(BigInt(treeCount) > 0n);
   assert.equal(await dialog.locator('.analysis-importance tbody tr').count(), 12);
   await dialog.getByRole('heading', { name: 'Prediction disagreement across samples' }).waitFor();
   const leaves = dialog.locator('.analysis-panel-leaves');
