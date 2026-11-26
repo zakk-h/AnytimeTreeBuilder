@@ -1,4 +1,4 @@
-export type Dataset = { feature_names: string[]; class_names: string[]; X: number[][]; y: number[] };
+export type Dataset = { feature_names: string[]; class_names: string[]; X: number[][]; y: number[]; base_logits?: number[] };
 
 // RFC 4180 fields, including quoted commas/newlines and escaped quotes. Empty
 // cells are rejected rather than silently becoming zero.
@@ -35,11 +35,12 @@ export function parseCsv(text: string): string[][] {
 }
 // Text categories are represented as named 0/1 indicators, avoiding an
 // arbitrary numeric ordering between values such as "red", "green", and "blue".
-export function toDataset(rows: string[][], target: string, task = 'classification'): Dataset {
+export function toDataset(rows: string[][], target: string, task = 'classification', baseLogitColumn = ''): Dataset {
   const targetIndex = rows[0].indexOf(target);
   if (targetIndex < 0) throw new Error('Select a target column.');
-  const features = rows[0].map((_, i) => i).filter(i => i !== targetIndex);
-  const classes = new Map<string, number>();
+  const features = rows[0].map((_, i) => i).filter(i => i !== targetIndex && (!baseLogitColumn || rows[0][i] !== baseLogitColumn));
+  if (baseLogitColumn && (baseLogitColumn === target || !rows[0].includes(baseLogitColumn))) throw new Error('Choose a separate base-logit column.');
+    const classes = new Map<string, number>();
   const data = rows.slice(1);
   const X: number[][] = data.map(() => []), y: number[] = [];
   const feature_names: string[] = [];
@@ -47,8 +48,9 @@ export function toDataset(rows: string[][], target: string, task = 'classificati
   data.forEach((row, index) => {
     const label = row[targetIndex].trim();
     if (!label) throw new Error(`Missing target at row ${index + 2}.`);
-    if (task === 'regression') {
-      const value = Number(label); if (!Number.isFinite(value)) throw new Error(`Target at row ${index + 2} must be a finite number.`); y.push(value);
+    if (task === 'regression' || task === 'logistic') {
+      const value = Number(label); if (!Number.isFinite(value)) throw new Error(`Target at row ${index + 2} must be a finite number.`); if (task === 'logistic' && value !== 0 && value !== 1) throw new Error('Logistic targets must be 0 or 1.');
+            y.push(value);
     } else { if (!classes.has(label)) classes.set(label, classes.size); y.push(classes.get(label)!); }
   });
   for (const f of features) {
@@ -84,5 +86,5 @@ export function toDataset(rows: string[][], target: string, task = 'classificati
       });
     }
   }
-  return { feature_names, class_names: [...classes.keys()], X, y };
+  return { ...(task === 'logistic' ? { base_logits: data.map((row, index) => { const value = baseLogitColumn ? Number(row[rows[0].indexOf(baseLogitColumn)]) : 0; if (baseLogitColumn && !row[rows[0].indexOf(baseLogitColumn)].trim() || !Number.isFinite(value)) throw new Error(`Invalid base logit at row ${index + 2}.`); return value; }) } : {}), feature_names, class_names: task === 'logistic' ? ['0', '1'] : [...classes.keys()], X, y };
 }

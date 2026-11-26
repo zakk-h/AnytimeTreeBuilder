@@ -37,6 +37,7 @@ export type AnalysisResult = {
     };
     importance: {
         name: string;
+        min_ratio?: number | null; max_ratio?: number | null;
         min: number;
         max: number;
     }[];
@@ -49,6 +50,7 @@ export type AnalysisResult = {
     prediction_labels: string[];
     class_count: number;
     abstention_enabled: boolean;
+    log_loss?: { min: number; max: number };
     mse?: {
         min: number;
         max: number;
@@ -246,6 +248,7 @@ class Profiles {
     private ticks = 0;
     private started = performance.now();
     readonly regression: boolean;
+    readonly logistic: boolean;
     readonly n: number;
     readonly gamma: number;
     readonly eta: number;
@@ -253,7 +256,8 @@ class Profiles {
     accuracy = true;
     abstentionAvailable = true;
     constructor(readonly graph: AndOrGraph, readonly meta: Record<string, unknown>, readonly partial: BuildNode, readonly data?: Dataset, readonly constraints: GraphConstraint = {}, readonly progress?: (p: AnalysisProgress) => void) {
-        this.regression = meta.task === 'regression';
+        this.logistic = meta.task === 'logistic';
+        this.regression = this.logistic || meta.task === 'regression';
         this.tries = index(graph.trie_nodes, 'trie_nodes');
         this.splits = index(graph.split_nodes, 'split_nodes');
         this.leaves = index(graph.leaf_nodes, 'leaf_nodes');
@@ -278,6 +282,7 @@ class Profiles {
                     throw new Error('Dataset feature names/order do not match graph featureRegistry.');
                 this.registry.set(raw.internalFeature, raw);
             }
+            if (this.logistic && (data.y.some(y => y !== 0 && y !== 1) || data.base_logits && (data.base_logits.length !== data.y.length || data.base_logits.some(z => !Number.isFinite(z))))) throw new Error('Logistic analysis requires binary targets and one finite base logit per row.');
             this.masks = new Masks(data, this.registry);
         }
         this.report(0);
@@ -306,6 +311,11 @@ class Profiles {
         this.inside(this.root);
         if (!this.root.cells.length)
             throw new Error('No completion satisfies the partial tree, constraints and objective budget.');
+    }
+    private numericLoss(row: number, prediction: number): number {
+        if (!this.logistic) return (this.data!.y[row] - prediction) ** 2;
+        const score = (1 - 2 * this.data!.y[row]) * ((this.data!.base_logits?.[row] ?? 0) + prediction);
+        return Math.max(0, score) + Math.log1p(Math.exp(-Math.abs(score)));
     }
     private report(stage: number, completed_features = 0, feature_count = 0, current_feature = '') { this.progress?.({ stage, completed_features, feature_count, current_feature }); }
     private check() { if ((++this.ticks & 8191) === 0 && performance.now() - this.started > 300000)
@@ -355,7 +365,7 @@ class Profiles {
                 if (!this.regression && leaf.prediction !== -1 && (!Number.isSafeInteger(leaf.prediction) || leaf.prediction < 0 || leaf.prediction >= this.data!.class_names.length))
                     throw new Error('Dataset classes do not match graph predictions.');
                 let error = 0;
-                this.masks.rows(mask, row => { error += leaf.prediction === -1 && !this.regression ? this.eta : this.regression ? (this.data!.y[row] - leaf.prediction) ** 2 : Number(this.data!.y[row] !== leaf.prediction); });
+                this.masks.rows(mask, row => { error += leaf.prediction === -1 && !this.regression ? this.eta : this.regression ? this.numericLoss(row, leaf.prediction) : Number(this.data!.y[row] !== leaf.prediction); });
                 if (Math.abs((leaf.prediction === -1 && !this.regression ? Math.round(error) : error) + this.gamma - loss) > tolerance(loss))
                     throw new Error('Dataset labels or abstention cost do not match graph leaf losses.');
             }
@@ -475,13 +485,13 @@ class Profiles {
             maxMse = Math.max(maxMse, cell.error / this.n);
         }
         const histogram = (hist: Map<number, bigint>) => [...hist].sort((a, b) => a[0] - b[0]).map(([value, count]) => ({ value, count: String(count), probability: countFraction(count, total) }));
-        const result: AnalysisResult = { task: this.regression ? 'regression' : 'classification', session_id: '', checkpoint: 0, tree_count: String(total), sample_count: this.n,
+        const result: AnalysisResult = { task: this.logistic ? 'logistic' : this.regression ? 'regression' : 'classification', session_id: '', checkpoint: 0, tree_count: String(total), sample_count: this.n,
             exact: true, leaf_distribution: histogram(leaves), abstention_distribution: this.abstentionAvailable && this.n ? histogram(abstained) : [], objective_distribution: histogram(objectives),
             abstention_enabled: this.abstention, accuracy_available: this.accuracy && this.abstentionAvailable && !this.regression, abstention_available: this.abstentionAvailable,
             accuracy: { min: this.accuracy && this.abstentionAvailable && !this.regression && low <= high ? low : null, max: this.accuracy && this.abstentionAvailable && !this.regression && low <= high ? high : null, undefined_count: String(undefinedCount) },
             importance: [], disagreement: [], prediction_labels: [], class_count: this.data?.class_names.length ?? 0, timings: { total_seconds: 0 } };
         if (this.regression && this.accuracy)
-            result.mse = { min: minMse, max: maxMse };
+            result[this.logistic ? 'log_loss' : 'mse'] = { min: minMse, max: maxMse };
         if (!this.data)
             result.unavailable_reason = 'Permutation importance and sample disagreement require the original training dataset, which is not included in this graph.';
         else {
@@ -497,16 +507,21 @@ class Profiles {
             for (let feature = 0; feature < this.data.feature_names.length; ++feature) {
                 this.report(3, feature, this.data.feature_names.length, this.data.feature_names[feature]);
                 let min = 0, max = 0;
+                const positiveBaseline = this.root.cells.some(cell => cell.error + this.eta * cell.abstained > 0);
+                let minRatio = positiveBaseline ? 1 : Infinity, maxRatio = positiveBaseline ? 1 : -Infinity;
                 if (used.has(feature)) {
                     const ranges = this.importance(this.root, this.masks!.full, this.masks!.full, feature, new Map());
                     min = Infinity;
                     max = -Infinity;
+                    minRatio = Infinity; maxRatio = -Infinity;
                     for (const range of ranges) {
                         min = Math.min(min, range.min / this.n);
                         max = Math.max(max, range.max / this.n);
+                        const baseline = range.cell.error + this.eta * range.cell.abstained;
+                        if (baseline > 0) { minRatio = Math.min(minRatio, 1 + range.min / baseline); maxRatio = Math.max(maxRatio, 1 + range.max / baseline); }
                     }
                 }
-                result.importance.push({ name: this.data.feature_names[feature], min, max });
+                result.importance.push({ name: this.data.feature_names[feature], min, max, min_ratio: Number.isFinite(minRatio) ? minRatio : null, max_ratio: Number.isFinite(maxRatio) ? maxRatio : null });
             }
         }
         this.report(4);
@@ -575,7 +590,7 @@ class Profiles {
                     continue;
                 let changed = 0;
                 if (this.regression)
-                    this.masks!.rows(recipient, row => { changed += (this.data!.y[row] - alt.leaf.prediction) ** 2; });
+                    this.masks!.rows(recipient, row => { changed += this.numericLoss(row, alt.leaf.prediction); });
                 else
                     changed = alt.leaf.prediction === -1 ? this.eta * recipientN : recipientN - (this.labels(recipient)[alt.leaf.prediction] ?? 0);
                 const delta = changed * donorN / this.n - state.error - this.eta * state.abstained;

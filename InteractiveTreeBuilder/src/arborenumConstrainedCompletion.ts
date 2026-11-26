@@ -85,12 +85,12 @@ function originalFeatures() {
 
 function predictions() {
   const names = currentPayload()?.meta?.classNames;
-  if (currentPayload()?.meta?.task !== 'regression' && Array.isArray(names)) return [...names.map((_, index) => index), ...(currentPayload()?.meta?.use_deferral ? [-1] : [])];
+  if (!['regression', 'logistic'].includes(String(currentPayload()?.meta?.task)) && Array.isArray(names)) return [...names.map((_, index) => index), ...(currentPayload()?.meta?.use_deferral ? [-1] : [])];
   return Array.from(
     new Set(
       (currentPayload()?.graph?.leaf_nodes ?? [])
         .map((leaf) => Number(leaf.prediction))
-        .filter((x) => Number.isFinite(x) && (currentPayload()?.meta?.task === 'regression' || x >= -1)),
+        .filter((x) => Number.isFinite(x) && (['regression', 'logistic'].includes(String(currentPayload()?.meta?.task)) || x >= -1)),
     ),
   ).sort((a, b) => a - b);
 }
@@ -215,20 +215,20 @@ function makeSampleControls() {
   predictionLabel.className = 'constraint-prediction-row';
   const predictionName = document.createElement('span');
   predictionName.textContent = 'Prediction to ensure';
-  const regression = currentPayload()?.meta?.task === 'regression';
+  const regression = ['regression', 'logistic'].includes(String(currentPayload()?.meta?.task));
   const select = regression ? document.createElement('input') : document.createElement('select');
   select.setAttribute('aria-label', 'Prediction to ensure');
   if (select instanceof HTMLInputElement) { select.type = 'number'; select.step = 'any'; select.placeholder = 'Prediction value'; }
   if (!regression) {
   const blank = document.createElement('option');
   blank.value = '';
-  blank.textContent = currentPayload()?.meta?.task === 'regression' ? 'Choose prediction' : 'Choose class';
+  blank.textContent = ['regression', 'logistic'].includes(String(currentPayload()?.meta?.task)) ? 'Choose prediction' : 'Choose class';
   select.appendChild(blank);
   for (const prediction of predictions()) {
     const option = document.createElement('option');
     option.value = String(prediction);
     const names = currentPayload()?.meta?.classNames;
-    option.textContent = prediction === Number(currentPayload()?.meta?.task === 'regression' ? currentPayload()?.meta?.defer_prediction : -1) ? 'Abstain' : Array.isArray(names) ? String(names[prediction]) : `${currentPayload()?.meta?.task === 'regression' ? 'predict' : 'class'} ${prediction}`;
+    option.textContent = prediction === Number(['regression', 'logistic'].includes(String(currentPayload()?.meta?.task)) ? currentPayload()?.meta?.defer_prediction : -1) ? 'Abstain' : !['regression', 'logistic'].includes(String(currentPayload()?.meta?.task)) && Array.isArray(names) ? String(names[prediction]) : `${['regression', 'logistic'].includes(String(currentPayload()?.meta?.task)) ? 'predict' : 'class'} ${prediction}`;
     select.appendChild(option);
   }
   }

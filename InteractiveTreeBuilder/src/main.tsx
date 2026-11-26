@@ -178,7 +178,7 @@ function makeDefaultUi(): BuilderUi {
 }
 
 function isAbstention(prediction: unknown, meta: Record<string, unknown>) {
-  return meta.task === 'regression' ? meta.use_deferral === true && Number(prediction) === Number(meta.defer_prediction) : Number(prediction) === -1;
+  return ['regression', 'logistic'].includes(String(meta.task)) ? meta.use_deferral === true && Number(prediction) === Number(meta.defer_prediction) : Number(prediction) === -1;
 }
 
 function predictionLabel(prediction: number | undefined, ui: BuilderUi, meta: FeatureMeta & Record<string, unknown>): string {
@@ -187,7 +187,7 @@ function predictionLabel(prediction: number | undefined, ui: BuilderUi, meta: Fe
   if (isAbstention(prediction, meta)) return 'Abstain';
 
   const custom = ui.labelNames[String(prediction)]?.trim();
-  return custom || `predict ${prediction}`;
+  return custom || (meta.task === 'logistic' ? `logit correction ${Number(prediction).toPrecision(6)}` : `predict ${prediction}`);
 }
 
 function continuousGroupEntries(meta: FeatureMeta): Array<{ key: string; features: number[] }> {
@@ -495,7 +495,7 @@ function gammaRaw(
   const lambdaNum = Number(lambdaValue);
 
   if (Number.isFinite(lambdaNum)) {
-    return meta.task === 'regression' ? lambdaNum * rootSize(graph) : Math.round(lambdaNum * rootSize(graph));
+    return ['regression', 'logistic'].includes(String(meta.task)) ? lambdaNum * rootSize(graph) : Math.round(lambdaNum * rootSize(graph));
   }
 
   return undefined;
@@ -575,7 +575,7 @@ function leafMistakesRaw(
 
   if (isAbstention(leaf.prediction, meta)) {
     const eta = etaDeferRaw(meta);
-    return Math.max(0, loss - gamma - (meta.task === 'regression' ? eta * n : llroundNonnegative(eta * n)));
+    return Math.max(0, loss - gamma - (['regression', 'logistic'].includes(String(meta.task)) ? eta * n : llroundNonnegative(eta * n)));
   }
 
   return Math.max(0, loss - gamma);
@@ -667,7 +667,7 @@ function leafMisclassificationRate(
     return gammaRaw(graph, meta) === undefined ? 'err needs γ' : 'err —';
   }
 
-  if (meta.task === 'regression') return `MSE ${stripZeros((mistakes / n).toFixed(6))}`;
+  if (['regression', 'logistic'].includes(String(meta.task))) return `${meta.task === 'logistic' ? 'Log loss' : 'MSE'} ${stripZeros((mistakes / n).toFixed(6))}`;
   const pct = (100 * mistakes) / n;
 
   return `${stripZeros(pct.toFixed(2))}% err`;
@@ -1173,14 +1173,14 @@ function SidePanel({
 
           <div className="budget-box">
             <div>
-              <span>{meta.task === 'regression' ? 'mean squared error' : meta.use_deferral || meta.abstain_uses_labels || completeStats.hasDeferral ? 'accuracy (predicted samples)' : 'accuracy'}</span>
-              <b title={completeStats.accuracy === undefined ? 'No samples were predicted' : undefined}>{meta.task === 'regression' ? completeStats.totalN > completeStats.deferredN ? stripZeros((completeStats.mistakes / (completeStats.totalN - completeStats.deferredN)).toFixed(6)) : '—' : completeStats.accuracy === undefined ? '—' : `${stripZeros((100 * completeStats.accuracy).toFixed(2))}%`}</b>
+              <span>{['regression', 'logistic'].includes(String(meta.task)) ? meta.task === 'logistic' ? 'log loss' : 'mean squared error' : meta.use_deferral || meta.abstain_uses_labels || completeStats.hasDeferral ? 'accuracy (predicted samples)' : 'accuracy'}</span>
+              <b title={completeStats.accuracy === undefined ? 'No samples were predicted' : undefined}>{['regression', 'logistic'].includes(String(meta.task)) ? completeStats.totalN > completeStats.deferredN ? stripZeros((completeStats.mistakes / (completeStats.totalN - completeStats.deferredN)).toFixed(6)) : '—' : completeStats.accuracy === undefined ? '—' : `${stripZeros((100 * completeStats.accuracy).toFixed(2))}%`}</b>
             </div>
 
             <div>
-              <span>{meta.task === 'regression' ? 'squared error' : 'mistakes'}</span>
+              <span>{['regression', 'logistic'].includes(String(meta.task)) ? meta.task === 'logistic' ? 'total log loss' : 'squared error' : 'mistakes'}</span>
               <b>
-                {meta.task === 'regression' ? stripZeros(completeStats.mistakes.toFixed(6)) : `${stripZeros(completeStats.mistakes.toFixed(2))}/${completeStats.predictedN}`}
+                {['regression', 'logistic'].includes(String(meta.task)) ? stripZeros(completeStats.mistakes.toFixed(6)) : `${stripZeros(completeStats.mistakes.toFixed(2))}/${completeStats.predictedN}`}
               </b>
             </div>
 
@@ -1972,7 +1972,7 @@ function App() {
     setSnapshot(autoExpandSingletons(makeRoot(nextGraph), nextGraph));
     setHistory([]);
     setUploadError(null);
-    setUi({ ...makeDefaultUi(), labelNames: Array.isArray(nextMeta.classNames) ? Object.fromEntries(nextMeta.classNames.map((name, i) => [String(i), String(name)])) : {} });
+    setUi({ ...makeDefaultUi(), labelNames: !['regression', 'logistic'].includes(String(nextMeta.task)) && Array.isArray(nextMeta.classNames) ? Object.fromEntries(nextMeta.classNames.map((name, i) => [String(i), String(name)])) : {} });
   };
 
   const prepareNative = () => {
@@ -2002,7 +2002,7 @@ function App() {
     setSnapshot(makeRoot(empty)); setHistory([]);
     setGraphGeneration(value => value + 1);
     const classNames = nativeMeta.classNames;
-    setUi({ ...makeDefaultUi(), labelNames: Array.isArray(classNames) ? Object.fromEntries(classNames.map((name, i) => [String(i), String(name)])) : {} });
+    setUi({ ...makeDefaultUi(), labelNames: !['regression', 'logistic'].includes(String(nativeMeta.task)) && Array.isArray(classNames) ? Object.fromEntries(classNames.map((name, i) => [String(i), String(name)])) : {} });
     setNativeReady(true); setUploadError(null);
   };
 

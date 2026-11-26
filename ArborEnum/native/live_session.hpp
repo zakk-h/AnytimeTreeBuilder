@@ -146,6 +146,7 @@ class Session : public arborenum::service::SessionApi {
                     proxy[i].push_back(bit);
                 }
             }
+            if constexpr (logistic_objective) model.set_logistic_options(data.base_logits, settings_.leaf_logit_clip, settings_.newton_max_iter, settings_.newton_tol);
             model.prepare_continuous_data(numeric, bin, data.y, seed, proxy, settings_.max_thresholds, settings_.abstain ? data.y : std::vector<Prediction>{});
             json registry = json::array();
             for (size_t f = 0; f < binary.size(); ++f) registry.push_back({{"internalFeature", f}, {"originalFeature", binary[f]}, {"originalName", data.names[binary[f]]}, {"threshold", binary_cuts[f]}, {"kind", "binary_threshold"}, {"continuousGroup", nullptr}});
@@ -156,8 +157,13 @@ class Session : public arborenum::service::SessionApi {
             }
             for (const auto* ids : {&settings_.proxy_features, &settings_.initial_features})
                 for (int id : *ids) if (static_cast<size_t>(id) >= registry.size()) throw std::invalid_argument("Threshold feature ID is outside the prepared feature registry");
-            meta = {{"task", regression_objective ? "regression" : "classification"}, {"defer_prediction", wire_prediction(DEFER_PREDICTION)}, {"schemaVersion", 2}, {"originalFeatureNames", data.names}, {"proxy_delta", settings_.proxy_delta}, {"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", rounded_objective(settings_.lambda * n)}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
-            // The proxy can use learned thresholds without activating them in enumeration.
+            meta = {{"task", logistic_objective ? "logistic" : regression_objective ? "regression" : "classification"}, {"defer_prediction", wire_prediction(DEFER_PREDICTION)}, {"schemaVersion", 2}, {"originalFeatureNames", data.names}, {"proxy_delta", settings_.proxy_delta}, {"featureRegistry", registry}, {"classNames", data.classes}, {"lambda_reg", settings_.lambda}, {"gamma", rounded_objective(settings_.lambda * n)}, {"root_n", n}, {"depth_budget", settings_.depth}, {"rashomon_mult", settings_.multiplier}, {"use_deferral", settings_.abstain}, {"eta_defer", settings_.abstain_cost}, {"abstain_uses_labels", settings_.abstain}, {"training_settings", settings_.as_json()}};
+            if constexpr (logistic_objective) {
+                meta["loss"] = "log_loss";
+                meta["leaf_values"] = "logit_correction";
+                meta["leaf_logit_clip"] = settings_.leaf_logit_clip;
+                meta["analysisDataset"] = {{"feature_names", data.names}, {"class_names", data.classes}, {"X", data.X}, {"y", data.y}, {"base_logits", data.base_logits}};
+            }
             const auto& initial_features = settings_.initial_features;
             auto proxy_features = settings_.proxy_features;
             if (proxy_features.empty()) {
@@ -333,7 +339,7 @@ public:
     }
     json status() const {
         std::lock_guard lock(mutex_);
-        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"analysis_queries", analysis_queries_}, {"active_budget", active_budget_ < 0 ? graph_budget_.load() : active_budget_}, {"requested_budget", requested_budget_}, {"graph_budget", graph_budget_.load()}, {"root_minimum", root_minimum_.load()}, {"task", regression_objective ? "regression" : "classification"}, {"sample_count", meta_.value("root_n", size_t(0))}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
+        return {{"session_id", id_}, {"phase", phase_}, {"error", error_}, {"ready", ready_}, {"stop_requested", cancel_search_.load()}, {"checkpoint", checkpoint_}, {"query_count", query_count_}, {"node_queries", node_queries_}, {"completion_queries", completion_queries_}, {"analysis_queries", analysis_queries_}, {"active_budget", active_budget_ < 0 ? graph_budget_.load() : active_budget_}, {"requested_budget", requested_budget_}, {"graph_budget", graph_budget_.load()}, {"root_minimum", root_minimum_.load()}, {"task", logistic_objective ? "logistic" : regression_objective ? "regression" : "classification"}, {"sample_count", meta_.value("root_n", size_t(0))}, {"last_visited_nodes", last_visited_}, {"node_query_handler_seconds", node_query_handler_seconds_}, {"full_graph_exports", 0}, {"elapsed_seconds", std::chrono::duration<double>((ended_ == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : ended_) - started_).count()}};
     }
 };
 }

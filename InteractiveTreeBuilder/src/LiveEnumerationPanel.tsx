@@ -9,7 +9,7 @@ import { TrainingFields } from './TrainingFields';
 import { BudgetControl } from './BudgetControl';
 
 export type Status = {
-  task?: 'classification' | 'regression'; session_id: string; phase: string; error: string; stop_requested: boolean;
+  task?: 'classification' | 'regression' | 'logistic'; session_id: string; phase: string; error: string; stop_requested: boolean;
   checkpoint: number; ready: boolean; elapsed_seconds: number;
   active_budget: number; requested_budget: number; graph_budget: number; root_minimum: number; sample_count: number;
 };
@@ -109,7 +109,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
     if (!rows) return;
     setBusy(true); setError('');
     try {
-      const dataset = toDataset(rows, target, settings.task);
+      const dataset = toDataset(rows, target, settings.task, settings.task === 'logistic' ? settings.base_logit_column : '');
       draftRef.current = true;
       onPrepare();
       const current = await api<Status>('/api/session', { ...dataset, task: settings.task, settings: nativeTrainingSettings(settings) });
@@ -145,7 +145,7 @@ export function LiveEnumerationPanel({ onReady, onConnect, onPrepare, onRefresh,
         <button className="ghost-button live-close" aria-label="Close enumeration setup" disabled={busy} onClick={() => onClose()}><X size={18}/></button>
         <div className="dialog-eyebrow"><Table2 size={16} /> DATASET IMPORT</div>
         <h2 id="live-title">Explore the Rashomon set as it grows.</h2>
-        <p>Choose a CSV, target column, and classification or regression task. True/False values become 1/0; other text categories become named binary indicators.</p>
+        <p>Choose a CSV, target column, and classification, regression or logistic loss task. True/False values become 1/0; other text categories become named binary indicators.</p>
         <label className="live-file">Dataset CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={async e => {
           const file = e.target.files?.[0]; if (!file) return;
           const sequence = ++fileRead.current;

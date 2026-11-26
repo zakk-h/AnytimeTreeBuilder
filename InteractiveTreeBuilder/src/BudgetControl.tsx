@@ -24,13 +24,13 @@ export function BudgetControl({ status, onStatus }: { status: Status; onStatus: 
     return () => clearTimeout(timer);
   }, [draft, status.session_id, onStatus]);
   const value = draft ?? Math.max(0, status.requested_budget >= 0 ? status.requested_budget : status.active_budget);
-  const limit = status.task === 'regression' ? Number.MAX_VALUE : 2147483647;
+  const limit = ['regression', 'logistic'].includes(String(status.task)) ? Number.MAX_VALUE : 2147483647;
   const max = Math.min(limit, Math.max(1, status.graph_budget * 2, value));
-  const format = (n: number) => status.task === 'regression' ? Number((n / status.sample_count).toPrecision(12)).toString() : (n / status.sample_count).toFixed(6).replace(/\.?0+$/, '') || '0';
+  const format = (n: number) => ['regression', 'logistic'].includes(String(status.task)) ? Number((n / status.sample_count).toPrecision(12)).toString() : (n / status.sample_count).toFixed(6).replace(/\.?0+$/, '') || '0';
   const edit = (value: string) => {
     setText(value);
     if (!value.trim()) return;
-    const units = status.task === 'regression' ? Number(value) * status.sample_count : Math.round(Number(value) * status.sample_count);
+    const units = ['regression', 'logistic'].includes(String(status.task)) ? Number(value) * status.sample_count : Math.round(Number(value) * status.sample_count);
     if (!Number.isFinite(units) || Number(value) < 0 || units > limit) { setError('Enter a valid nonnegative budget.'); return; }
     setError(''); setDraft(units);
   };
@@ -38,9 +38,9 @@ export function BudgetControl({ status, onStatus }: { status: Status; onStatus: 
     <summary>Objective budget <b>{format(value)}</b><ChevronDown size={13}/></summary>
     <div className="live-budget-popover">
       <div className="live-budget-value"><label htmlFor={`budget-value-${status.session_id}`}>Objective budget</label>
-        <input id={`budget-value-${status.session_id}`} aria-label="Objective budget value" type="number" min="0" max={limit / status.sample_count} step={status.task === 'regression' ? 'any' : 1 / status.sample_count} value={text ?? format(value)} onChange={e => edit(e.target.value)} onFocus={e => e.currentTarget.select()} onBlur={() => { setText(null); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}/>
+        <input id={`budget-value-${status.session_id}`} aria-label="Objective budget value" type="number" min="0" max={limit / status.sample_count} step={['regression', 'logistic'].includes(String(status.task)) ? 'any' : 1 / status.sample_count} value={text ?? format(value)} onChange={e => edit(e.target.value)} onFocus={e => e.currentTarget.select()} onBlur={() => { setText(null); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}/>
       </div>
-      <input aria-label="Objective budget" type="range" min="0" max={max} step={status.task === 'regression' ? 'any' : '1'} value={value} onChange={e => { setText(null); setError(''); setDraft(Number(e.target.value)); }}/>
+      <input aria-label="Objective budget" type="range" min="0" max={max} step={['regression', 'logistic'].includes(String(status.task)) ? 'any' : '1'} value={value} onChange={e => { setText(null); setError(''); setDraft(Number(e.target.value)); }}/>
       {error && <p role="alert">{error}</p>}
     </div>
   </details>;

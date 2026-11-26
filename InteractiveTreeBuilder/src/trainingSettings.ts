@@ -1,5 +1,5 @@
 export const DEFAULT_TRAINING_SETTINGS = {
-  task: 'classification', proxy_delta: 0,
+  task: 'classification', proxy_delta: 0, base_logit_column: '', leaf_logit_clip: 30, newton_max_iter: 50, newton_tol: 1e-10,
   sparsification_probability: '', sparsification_seed: 0, sparsification_cache_proxy_splits: true,
   regression_equivalent_points: false, regression_continuous_kmeans: false, regression_kmeans_min_depth: 2,
   xgboost_max_depth: 2, xgboost_estimators: 125,
@@ -30,8 +30,9 @@ export function thresholdIds(text: string): number[] {
 }
 
 export function trainingSettingsError(s: TrainingSettings): string | undefined {
-  if (!['classification', 'regression'].includes(s.task)) return 'Choose classification or regression.';
+  if (!['classification', 'regression', 'logistic'].includes(s.task)) return 'Choose classification, regression or logistic loss.';
   if (Object.values(s).some(value => typeof value === 'number' && !Number.isFinite(value))) return 'Fill in all numeric settings.';
+  if (s.task === 'logistic' && (s.allow_abstain || s.leaf_logit_clip <= 0 || s.newton_tol <= 0 || !Number.isInteger(s.newton_max_iter) || s.newton_max_iter < 1)) return 'Logistic loss requires positive optimizer settings and no abstention.';
   const integers = ['proxy_delta', 'sparsification_seed', 'regression_kmeans_min_depth', 'xgboost_max_depth', 'xgboost_estimators', 'depth_budget', 'lookahead_k', 'refinement_width', 'max_refinement_rounds', 'max_number_thresholds_per_feature', 'proxy_style', 'greedy_split_mode'] as const;
   if (integers.some(key => !Number.isInteger(s[key]) || s[key] > 2147483647)) return 'Depth, lookahead, widths, rounds and threshold limits must be integers.';
   if (s.xgboost_max_depth < 1 || s.xgboost_max_depth > 32 || s.xgboost_estimators < 1) return 'XGBoost depth must be between 1 and 32, with at least one estimator.';
@@ -51,8 +52,9 @@ export function trainingSettingsError(s: TrainingSettings): string | undefined {
 export function nativeTrainingSettings(s: TrainingSettings) {
   const error = trainingSettingsError(s);
   if (error) throw new Error(error);
-  const { task, ...settings } = s;
-  return { ...settings, sparsification_probability: sparsificationProbabilities(s.sparsification_probability, s.depth_budget), proxy_threshold_features: thresholdIds(s.proxy_threshold_features), initial_active_threshold_features: thresholdIds(s.initial_active_threshold_features) };
+  if (s.task === 'logistic' && (s.allow_abstain || s.leaf_logit_clip <= 0 || s.newton_tol <= 0 || !Number.isInteger(s.newton_max_iter) || s.newton_max_iter < 1)) throw new Error('Logistic loss requires a positive clip, tolerance and iteration limit, without abstention.');
+  const { task, base_logit_column, ...settings } = s;
+  return { ...settings, greedy_continuous_mode: task === 'logistic' ? 'numerical' : settings.greedy_continuous_mode, sparsification_probability: sparsificationProbabilities(s.sparsification_probability, s.depth_budget), proxy_threshold_features: thresholdIds(s.proxy_threshold_features), initial_active_threshold_features: thresholdIds(s.initial_active_threshold_features) };
 }
 
 export function sparsificationProbabilities(text: string, depth: number): number[] {

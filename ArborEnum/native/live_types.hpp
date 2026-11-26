@@ -40,12 +40,14 @@ struct Settings {
     std::string proxy_mode = "binarized", key_mode = "hash", greedy_continuous = "binary";
     std::vector<int> proxy_features, initial_features;
     int proxy_delta = 0, kmeans_min_depth = 2;
+    double leaf_logit_clip = 30, newton_tol = 1e-10;
+    int newton_max_iter = 50;
     uint64_t sparsification_seed = 0;
     bool sparsification_cache = true, equivalent_points = false, continuous_kmeans = false;
     std::vector<double> sparsification;
     json as_json() const {
         const auto automatic = [](int v) -> json { return v < 0 ? json(nullptr) : json(bool(v)); };
-        return {{"proxy_delta", proxy_delta}, {"sparsification_probability", sparsification}, {"sparsification_seed", sparsification_seed},
+        return {{"leaf_logit_clip", leaf_logit_clip}, {"newton_tol", newton_tol}, {"newton_max_iter", newton_max_iter}, {"proxy_delta", proxy_delta}, {"sparsification_probability", sparsification}, {"sparsification_seed", sparsification_seed},
             {"sparsification_cache_proxy_splits", sparsification_cache}, {"regression_equivalent_points", equivalent_points},
             {"regression_continuous_kmeans", continuous_kmeans}, {"regression_kmeans_min_depth", kmeans_min_depth}, {"lambda_reg", lambda}, {"rashomon_mult", multiplier}, {"second_rashomon_mult", second_multiplier},
             {"multiplier_step_size", multiplier_step}, {"runtime_limit_seconds", runtime}, {"memory_limit_mb", memory},
@@ -88,6 +90,10 @@ struct Settings {
             }
             if (expected.is_null() && !value.is_null() && !value.is_boolean()) throw std::invalid_argument(key + " must be automatic (null), true or false");
         }
+        s.leaf_logit_clip = j.value("leaf_logit_clip", 30.0);
+        s.newton_tol = j.value("newton_tol", 1e-10);
+        s.newton_max_iter = j.value("newton_max_iter", 50);
+        if (!std::isfinite(s.leaf_logit_clip) || s.leaf_logit_clip <= 0 || !std::isfinite(s.newton_tol) || s.newton_tol <= 0 || s.newton_max_iter < 1) throw std::invalid_argument("Invalid logistic optimizer settings");
         s.proxy_delta = j.value("proxy_delta", 0);
         s.sparsification = j.value("sparsification_probability", s.sparsification);
         if (j.contains("sparsification_seed") && j.at("sparsification_seed").get<double>() < 0) throw std::invalid_argument("Sparsification seed must be nonnegative");
@@ -133,6 +139,10 @@ struct Settings {
         return s;
     }
     static Settings checked(Settings s, size_t rows) {
+        if constexpr (logistic_objective) {
+            if (s.abstain) throw std::invalid_argument("Logistic deferral is not supported");
+            s.greedy_continuous = "numerical";
+        }
         if constexpr (regression_objective) {
             if (rows == 0 || rows > static_cast<size_t>(INT_MAX)) throw std::invalid_argument("Invalid dataset size");
             return s;
@@ -150,8 +160,10 @@ struct Dataset {
     std::vector<std::string> names, classes;
     std::vector<std::vector<double>> X;
     std::vector<Prediction> y;
+    std::vector<double> base_logits;
     static Dataset parse(const json& j) {
         Dataset d;
+        d.base_logits = j.value("base_logits", std::vector<double>{});
         d.names = j.at("feature_names").get<std::vector<std::string>>();
         d.classes = j.value("class_names", std::vector<std::string>{});
         d.X = j.at("X").get<std::vector<std::vector<double>>>();
@@ -160,6 +172,13 @@ struct Dataset {
         d.y = j.at("y").get<std::vector<Prediction>>();
         if (d.names.empty() || d.X.empty() || d.X.size() != d.y.size() || (!regression_objective && (d.classes.empty() || d.classes.size() > 255)))
             throw std::invalid_argument("Dataset needs features, rows, matching labels and 1–255 classes");
+        if constexpr (logistic_objective) {
+            if (!d.base_logits.empty() && d.base_logits.size() != d.y.size()) throw std::invalid_argument("Base logits must match dataset rows");
+            for (double z : d.base_logits) if (!std::isfinite(z)) throw std::invalid_argument("Base logits must be finite");
+            for (double y : d.y) if (y != 0 && y != 1) throw std::invalid_argument("Logistic labels must be 0 or 1");
+            if (d.classes.empty()) d.classes = {"0", "1"};
+            if (d.classes.size() != 2) throw std::invalid_argument("Logistic training requires two classes");
+        }
         std::set<std::string> unique(d.names.begin(), d.names.end());
         if (unique.size() != d.names.size() || unique.count("")) throw std::invalid_argument("Feature names must be unique and nonempty");
         for (size_t i = 0; i < d.X.size(); ++i) {

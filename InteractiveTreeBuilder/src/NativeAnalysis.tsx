@@ -14,11 +14,12 @@ const analysisStages = ['Checking feasible completions', 'Counting completions',
 const completedStages = ['', 'Checked feasible completions.', 'Computed completion counts.', 'Computed counts, accuracy ranges, distributions, and disagreement.'];
 type Result = {
   unavailable_reason?: string; accuracy_available?: boolean; abstention_available?: boolean;
-  task?: string; mse?: { min: number; max: number };
+  task?: string; log_loss?: { min: number; max: number };
+    mse?: { min: number; max: number };
   session_id: string; checkpoint: number; tree_count: string; sample_count: number; exact: boolean;
   leaf_distribution: Bin[]; abstention_distribution: Bin[];
   accuracy: { min: number | null; max: number | null; undefined_count: string };
-  importance: { name: string; min: number; max: number }[];
+  importance: { name: string; min: number; max: number; min_ratio?: number | null; max_ratio?: number | null }[];
   disagreement: { row: number; counts: string[]; probabilities: number[]; disagreement: number }[];
   prediction_labels: string[]; class_count: number; abstention_enabled: boolean;
 };
@@ -81,8 +82,9 @@ function AnalysisPanel({ id, title, expanded, onExpand, children }: {
   </section>;
 }
 export function NativeAnalysis({ session, tree, graph, meta, initialDataset, disabled, onBusyChange }: { session: string; tree: BuildNode; graph: AndOrGraph; meta: Record<string, unknown>; initialDataset?: Dataset; disabled: boolean; onBusyChange: (busy: boolean) => void }) {
-  const [dataset, setDataset] = useState<Dataset | undefined>(initialDataset);
-  const [csvRows, setCsvRows] = useState<string[][] | null>(null), [target, setTarget] = useState('');
+  const [importanceMode, setImportanceMode] = useState('additive');
+    const [dataset, setDataset] = useState<Dataset | undefined>(initialDataset);
+  const [csvRows, setCsvRows] = useState<string[][] | null>(null), [target, setTarget] = useState(''), [baseLogitColumn, setBaseLogitColumn] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
   useEffect(() => { setDataset(initialDataset); setCsvRows(null); }, [graph, initialDataset]);
   const [open, setOpen] = useState(false), [result, setResult] = useState<Result | null>(null), [busy, setBusy] = useState(false);
@@ -156,11 +158,11 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
             try { const rows = parseCsv(await file.text()); setCsvRows(rows); setTarget(rows[0][rows[0].length - 1]); setError(''); }
             catch (e) { setError(e instanceof Error ? e.message : String(e)); }
           }}/>
-          {csvRows && <><label>{meta.task === 'regression' ? 'Regression target' : 'Classification target'} <select value={target} onChange={e => setTarget(e.target.value)}>{csvRows[0].map(name => <option key={name}>{name}</option>)}</select></label>
+          {csvRows && <>{meta.task === 'logistic' && <label>Base logit column<select value={baseLogitColumn} onChange={e => setBaseLogitColumn(e.target.value)}><option value="">None (zero)</option>{csvRows[0].filter(name => name !== target).map(name => <option key={name}>{name}</option>)}</select></label>}<label>{['regression', 'logistic'].includes(String(meta.task)) ? meta.task === 'logistic' ? 'Binary logistic target' : 'Regression target' : 'Classification target'} <select value={target} onChange={e => setTarget(e.target.value)}>{csvRows[0].map(name => <option key={name}>{name}</option>)}</select></label>
             <button className="primary-button" disabled={busy} onClick={() => {
               try {
-                const next = toDataset(csvRows, target, String(meta.task ?? 'classification'));
-                if (meta.task !== 'regression') {
+                const next = toDataset(csvRows, target, String(meta.task ?? 'classification'), meta.task === 'logistic' ? baseLogitColumn : '');
+                if (!['regression', 'logistic'].includes(String(meta.task))) {
                 const labels = Array.isArray(meta.classNames) ? meta.classNames.map(String) : [...next.class_names].sort((a,b) => Number(a)-Number(b) || a.localeCompare(b));
                 const mapping = next.class_names.map(name => labels.includes(name) ? labels.indexOf(name) : /^\d+$/.test(name) && Number(name) < labels.length ? Number(name) : -1);
                 if (mapping.some(id => id < 0)) throw new Error('Dataset class names do not match graph.');
@@ -182,14 +184,14 @@ export function NativeAnalysis({ session, tree, graph, meta, initialDataset, dis
         </div>}
         {error && <><p role="alert" className="upload-error">{error}</p><button className="primary-button" onClick={() => void run()}>Retry analysis</button></>}
         {result && <>
-          <div className="analysis-metrics"><div><span>{tree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>{meta.task === 'regression' ? 'Mean squared error (stored leaf values)' : result.abstention_enabled ? 'Accuracy on predicted samples' : 'Accuracy'}</span><b>{meta.task === 'regression' ? result.mse ? `${result.mse.min.toPrecision(6)} – ${result.mse.max.toPrecision(6)}` : '—' : result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Number of leaves</span><b>{result.leaf_distribution[0]?.value.toLocaleString()} – {result.leaf_distribution[result.leaf_distribution.length - 1]?.value.toLocaleString()}</b></div>{result.disagreement.length > 0 && <><div><span>Samples with disagreement</span><b>{percent(disagreementSummary.any)}</b></div><div><span>Samples with &gt;10% disagreement</span><b>{percent(disagreementSummary.above10)}</b></div><div><span>Samples with &gt;25% disagreement</span><b>{percent(disagreementSummary.above25)}</b></div></>}</div>
+          <div className="analysis-metrics"><div><span>{tree.kind === 'choice' ? 'Number of trees' : 'Number of possible completions'}</span><b title={result.tree_count}>{countLabel(result.tree_count)}</b></div><div><span>{['regression', 'logistic'].includes(String(meta.task)) ? meta.task === 'logistic' ? 'Log loss (stored corrections)' : 'Mean squared error (stored leaf values)' : result.abstention_enabled ? 'Accuracy on predicted samples' : 'Accuracy'}</span><b>{['regression', 'logistic'].includes(String(meta.task)) ? (meta.task === 'logistic' ? result.log_loss : result.mse) ? `${(meta.task === 'logistic' ? result.log_loss : result.mse)!.min.toPrecision(6)} – ${(meta.task === 'logistic' ? result.log_loss : result.mse)!.max.toPrecision(6)}` : '—' : result.accuracy.min === null ? '—' : `${percent(result.accuracy.min)} – ${percent(result.accuracy.max!)}`}</b></div><div><span>Number of leaves</span><b>{result.leaf_distribution[0]?.value.toLocaleString()} – {result.leaf_distribution[result.leaf_distribution.length - 1]?.value.toLocaleString()}</b></div>{result.disagreement.length > 0 && <><div><span>Samples with disagreement</span><b>{percent(disagreementSummary.any)}</b></div><div><span>Samples with &gt;10% disagreement</span><b>{percent(disagreementSummary.above10)}</b></div><div><span>Samples with &gt;25% disagreement</span><b>{percent(disagreementSummary.above25)}</b></div></>}</div>
           {result.accuracy.undefined_count !== '0' && <p className="analysis-note">{countLabel(result.accuracy.undefined_count)} completions abstain on every sample and have undefined accuracy.</p>}
           {result.unavailable_reason && <p className="analysis-note">{result.unavailable_reason}</p>}
-          {meta.task !== 'regression' && result.accuracy_available === false && <p className="analysis-note">Accuracy requires leaf penalty metadata and matching sample counts. Attach the matching dataset to verify the graph.</p>}
+          {!['regression', 'logistic'].includes(String(meta.task)) && result.accuracy_available === false && <p className="analysis-note">Accuracy requires leaf penalty metadata and matching sample counts. Attach the matching dataset to verify the graph.</p>}
           <div className={`analysis-panels${result.importance.some(f => f.name.length > 24) ? ' analysis-panels-long-labels' : ''}${result.abstention_enabled && result.abstention_distribution.length > 0 ? ' analysis-panels-with-abstention' : ''}${expandedPanel ? ' analysis-panels-focused' : ''}`}>
             {result.importance.length > 0 && <AnalysisPanel id="importance" title="Feature importance ranges" expanded={expandedPanel === 'importance'} onExpand={setExpandedPanel}>
-              <p>Expected increase in {meta.task === 'regression' ? 'MSE' : 'loss'} over all permutations of one dataset feature. Min/max over the stored tree completions in the Rashomon set.{meta.task === 'regression' && ' Exported leaf predictions are held fixed.'}</p>
-              <table className="analysis-importance"><thead><tr><th>Feature</th><th>Min {meta.task !== 'regression' && <abbr title="Percentage points">(pp)</abbr>}</th><th>Max {meta.task !== 'regression' && <abbr title="Percentage points">(pp)</abbr>}</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{((meta.task === 'regression' ? 1 : 100) * f.min).toFixed(3)}</td><td>{((meta.task === 'regression' ? 1 : 100) * f.max).toFixed(3)}</td></tr>)}</tbody></table>
+              <p>Expected increase in {['regression', 'logistic'].includes(String(meta.task)) ? meta.task === 'logistic' ? 'log loss' : 'MSE' : 'loss'} over all permutations of one dataset feature. Min/max over the stored tree completions in the Rashomon set.{['regression', 'logistic'].includes(String(meta.task)) && (meta.task === 'logistic' ? ' Fitted corrections and recipient base logits are held fixed.' : ' Exported leaf predictions are held fixed.')}</p>
+              <label>Importance measure<select aria-label="Importance measure" value={importanceMode} onChange={e => setImportanceMode(e.target.value)}><option value="additive">Additive loss increase</option><option value="divisive">Loss ratio (positive baseline loss)</option></select></label><table className="analysis-importance"><thead><tr><th>Feature</th><th>Min {importanceMode === 'additive' && !['regression', 'logistic'].includes(String(meta.task)) && <abbr title="Percentage points">(pp)</abbr>}</th><th>Max {importanceMode === 'additive' && !['regression', 'logistic'].includes(String(meta.task)) && <abbr title="Percentage points">(pp)</abbr>}</th></tr></thead><tbody>{result.importance.map((f, i) => <tr key={i}><td>{f.name}</td><td>{importanceMode === 'divisive' ? f.min_ratio == null ? '—' : f.min_ratio.toPrecision(6) : ((['regression', 'logistic'].includes(String(meta.task)) ? 1 : 100) * f.min).toFixed(3)}</td><td>{importanceMode === 'divisive' ? f.max_ratio == null ? '—' : f.max_ratio.toPrecision(6) : ((['regression', 'logistic'].includes(String(meta.task)) ? 1 : 100) * f.max).toFixed(3)}</td></tr>)}</tbody></table>
             </AnalysisPanel>}
             <AnalysisPanel id="leaves" title="Leaves" expanded={expandedPanel === 'leaves'} onExpand={setExpandedPanel}>
               <Distribution bins={result.leaf_distribution} sampleCount={result.sample_count}/>

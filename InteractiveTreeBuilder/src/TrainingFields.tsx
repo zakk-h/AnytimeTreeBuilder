@@ -4,6 +4,7 @@ type Key = keyof TrainingSettings;
 export function TrainingFields({ value: s, onChange }: { value: TrainingSettings; onChange: (settings: TrainingSettings) => void }) {
   const change = (key: Key, value: TrainingSettings[Key]) => {
     const next = { ...s, [key]: value };
+    if (key === 'task' && value === 'logistic') next.allow_abstain = false;
     if (key === 'depth_budget') next.lookahead_k = Math.min(Number(value), Number.isFinite(s.lookahead_k) ? s.lookahead_k : 1);
     if (key === 'rashomon_mult') next.second_rashomon_mult = Math.max(s.second_rashomon_mult, Number(value));
     onChange(next);
@@ -15,7 +16,8 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
   const continuous = (key: Key, label: string) => <label key={key}>{label}<select aria-label={label} value={s[key] === null ? 'auto' : String(s[key])} onChange={e => change(key, e.target.value === 'auto' ? null : e.target.value === 'true')}><option value="auto">Follow proxy mode</option><option value="false">Binarized</option><option value="true">Continuous</option></select></label>;
   return <>
     <div className="live-fields">
-      {select('task', 'Task', [['classification', 'Classification'], ['regression', 'Regression']])}
+      {select('task', 'Task', [['classification', 'Classification'], ['regression', 'Regression'], ['logistic', 'Logistic loss']])}
+      {s.task === 'logistic' && <><label>Base logit column<input aria-label="Base logit column" placeholder="None (zero)" value={s.base_logit_column} onChange={e => change('base_logit_column', e.target.value)}/><small>Optional CSV column, excluded from tree features. Target values must be 0 or 1.</small></label>{number('leaf_logit_clip', 'Leaf correction clip', 'Maximum absolute fitted logit correction.', 0.001)}{number('newton_max_iter', 'Newton iterations', 'Maximum leaf optimizer iterations.', 1, undefined, 1)}{number('newton_tol', 'Newton tolerance', 'Leaf optimizer tolerance.', 1e-15)}</>}
       {number('lambda_reg', 'Leaf penalty', 'Penalty per leaf.', 0, undefined, .001)}
       {number('depth_budget', 'Maximum depth', undefined, 0, 127, 1)}
       {number('rashomon_mult', 'Rashomon multiplier')}
@@ -25,8 +27,8 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
       {select('proxy_mode', 'Proxy mode', [['binarized', 'Binarized'], ['hybrid', 'Hybrid'], ['continuous', 'Continuous']])}
     </div>
     <div className="training-abstain">
-      {toggle('allow_abstain', 'Allow Abstain leaves', 'Allow trees to not predict on a training sample if the subregion is impure.')}
-      {s.allow_abstain && number('abstain_cost', 'Abstention cost', 'Cost per abstained sample, in addition to the leaf penalty.')}
+      {s.task !== 'logistic' && toggle('allow_abstain', 'Allow Abstain leaves', 'Allow trees to not predict on a training sample if the subregion is impure.')}
+      {s.task !== 'logistic' && s.allow_abstain && number('abstain_cost', 'Abstention cost', 'Cost per abstained sample, in addition to the leaf penalty.')}
     </div>
     <details className="training-advanced">
       <summary>Advanced training settings</summary>
@@ -40,8 +42,8 @@ export function TrainingFields({ value: s, onChange }: { value: TrainingSettings
         {number('lookahead_k', 'Lookahead depth', 'Higher values improve the initial proxy at greater search cost.', 0, s.depth_budget, 1)}
         {select('key_mode', 'Subproblem identity', [['hash', '64-bit hash'], ['hash128', '128-bit hash'], ['exact', 'Exact bitvectors'], ['lits_exact', 'Exact literal sets']])}
         <label>Proxy search style<select aria-label="Proxy search style" value={s.proxy_style} onChange={e => change('proxy_style', Number(e.target.value))}><option value={0}>Recursive best split</option><option value={1}>Block split</option><option value={3}>Split without postprocessing</option></select></label>
-        {mode('greedy_split_mode', 'Greedy split criterion', s.task === 'regression' ? ['Squared error reduction', 'Squared error with exact depth-one solve', 'Child leaf objective'] : ['Entropy', 'Entropy with exact depth-one solve', 'Child leaf objective'])}
-        {select('greedy_continuous_mode', 'Greedy feature evaluation', [['binary', 'Binarized thresholds'], ['numerical', 'Numerical features']])}
+        {s.task !== 'logistic' && mode('greedy_split_mode', 'Greedy split criterion', s.task === 'regression' ? ['Squared error reduction', 'Squared error with exact depth-one solve', 'Child leaf objective'] : ['Entropy', 'Entropy with exact depth-one solve', 'Child leaf objective'])}
+        {s.task !== 'logistic' && select('greedy_continuous_mode', 'Greedy feature evaluation', [['binary', 'Binarized thresholds'], ['numerical', 'Numerical features']])}
         {number('multiplicative_slack', 'Extra multiplicative slack', 'Additional slack applied to objective bounds.')}
       </div>
       <div className="training-toggles">

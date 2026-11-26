@@ -22,5 +22,6 @@ public:
     virtual json analysis_progress(const std::string&) const = 0;
     virtual json status() const = 0;
 };
+std::shared_ptr<SessionApi> make_logistic_session(std::string id, const json& body);
 std::shared_ptr<SessionApi> make_regression_session(std::string id, const json& body);
 }

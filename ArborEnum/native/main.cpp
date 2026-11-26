@@ -273,7 +273,7 @@ int main(int argc, char** argv) {
             const auto key = ensure_browser(req, res);
             auto body = json::parse(req.body);
             const auto task = body.value("task", std::string("classification"));
-            if (task != "classification" && task != "regression") throw std::invalid_argument("Unknown training task");
+            if (task != "classification" && task != "regression" && task != "logistic") throw std::invalid_argument("Unknown training task");
             std::shared_ptr<arborenum::service::SessionApi> current;
             std::shared_ptr<arborenum::service::SessionApi> previous;
             {
@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
                     respond(res, {{"error", "Server is at its session limit. Try again after an idle session expires."}}, 503);
                     return;
                 }
-                current = task == "regression" ? arborenum::service::make_regression_session(std::to_string(next_id++), body) : std::make_shared<Session>(std::to_string(next_id++), Dataset::parse(body), Settings::parse(body.value("settings", json::object())));
+                current = task == "logistic" ? arborenum::service::make_logistic_session(std::to_string(next_id++), body) : task == "regression" ? arborenum::service::make_regression_session(std::to_string(next_id++), body) : std::make_shared<Session>(std::to_string(next_id++), Dataset::parse(body), Settings::parse(body.value("settings", json::object())));
                 if (it == sessions.end()) {
                     sessions.emplace(key, BrowserSession{current, std::chrono::steady_clock::now()});
                 } else {

@@ -205,7 +205,10 @@ class GraphProfiles {
     }
     Objective squared_error(const Packed& mask, Prediction prediction) const {
         long double loss = 0;
-        rows(mask, [&](size_t row) { const long double delta = static_cast<long double>(data_->y.at(row)) - prediction; loss += delta * delta; });
+        rows(mask, [&](size_t row) { if constexpr (logistic_objective) {
+            const long double score = (1 - 2 * data_->y.at(row)) * ((data_->base_logits.empty() ? 0 : data_->base_logits.at(row)) + prediction);
+            loss += std::max(0.0L, score) + std::log1p(std::exp(-std::abs(score)));
+        } else { const long double delta = static_cast<long double>(data_->y.at(row)) - prediction; loss += delta * delta; } });
         return static_cast<Objective>(loss);
     }
     State leaf_state(const LeafNode& leaf, const Packed& mask) const {
@@ -459,28 +462,32 @@ public:
             if (progress_) progress_(3, f, data_->names.size(), data_->names[f]);
             const auto feature_started = std::chrono::steady_clock::now();
             if (!used_originals.count(int(f))) {
+                const bool positive_baseline = std::any_of(root_table.begin(), root_table.end(), [&](const auto& entry) { return entry.first.mistakes + eta_ * entry.first.abstained > 0; });
                 json by_objective = json::array();
                 for (const auto& [objective, count] : objectives) by_objective.push_back({{"objective", objective}, {"min", 0}, {"max", 0}});
-                importance_ranges.push_back({{"feature", f}, {"name", data_->names[f]}, {"min", 0}, {"max", 0}, {"by_objective", by_objective}});
+                importance_ranges.push_back({{"feature", f}, {"name", data_->names[f]}, {"min", 0}, {"max", 0}, {"min_ratio", positive_baseline ? json(1) : json(nullptr)}, {"max_ratio", positive_baseline ? json(1) : json(nullptr)}, {"by_objective", by_objective}});
                 feature_times.push_back({{"feature", f}, {"name", data_->names[f]}, {"seconds", seconds_since(feature_started)}});
                 continue;
             }
             std::map<EvalKey, Ranges> memo;
             const auto& ranges = importance(root_, full, full, int(f), originals, memo);
             long double low = std::numeric_limits<long double>::infinity(), high = -low;
+            long double min_ratio = low, max_ratio = high;
             json by_objective = json::array(); std::map<Objective, Range> grouped;
             for (const auto& [s, range] : ranges) if (root_table.contains(s)) {
                 low = std::min(low, range.low); high = std::max(high, range.high);
+                const long double baseline = s.mistakes + static_cast<long double>(eta_) * s.abstained;
+                if (baseline > 0) { min_ratio = std::min(min_ratio, 1 + range.low / baseline); max_ratio = std::max(max_ratio, 1 + range.high / baseline); }
                 auto [g, added] = grouped.emplace(s.objective, range);
                 if (!added) { g->second.low = std::min(g->second.low, range.low); g->second.high = std::max(g->second.high, range.high); }
             }
             for (const auto& [objective, range] : grouped) by_objective.push_back({{"objective", objective}, {"min", double(range.low / data_->y.size())}, {"max", double(range.high / data_->y.size())}});
-            importance_ranges.push_back({{"feature", f}, {"name", data_->names[f]}, {"min", double(low / data_->y.size())}, {"max", double(high / data_->y.size())}, {"by_objective", by_objective}});
+            importance_ranges.push_back({{"feature", f}, {"name", data_->names[f]}, {"min", double(low / data_->y.size())}, {"max", double(high / data_->y.size())}, {"min_ratio", std::isfinite(min_ratio) ? json(double(min_ratio)) : json(nullptr)}, {"max_ratio", std::isfinite(max_ratio) ? json(double(max_ratio)) : json(nullptr)}, {"by_objective", by_objective}});
             feature_times.push_back({{"feature", f}, {"name", data_->names[f]}, {"seconds", seconds_since(feature_started)}});
         }
         auto abstention_distribution = histogram(abstentions);
         for (auto& bin : abstention_distribution) bin["proportion_abstained"] = double(bin.at("value").get<int>()) / data_->y.size();
-        return {{"task", regression_objective ? "regression" : "classification"}, {"mse", regression_objective && std::isfinite(min_mse) ? json{{"min", min_mse}, {"max", max_mse}} : json(nullptr)}, {"class_count", data_->classes.size()}, {"abstention_enabled", meta_.value("use_deferral", !ordinary_only_)},
+        return {{"task", logistic_objective ? "logistic" : regression_objective ? "regression" : "classification"}, {logistic_objective ? "log_loss" : "mse", regression_objective && std::isfinite(min_mse) ? json{{"min", min_mse}, {"max", max_mse}} : json(nullptr)}, {"class_count", data_->classes.size()}, {"abstention_enabled", meta_.value("use_deferral", !ordinary_only_)},
             {"disagreement_metric", "variation_ratio"}, {"tree_count", total.str()}, {"sample_count", data_->y.size()}, {"exact", true}, {"permutation", "expectation_over_all_permutations"},
             {"leaf_distribution", histogram(leaves)}, {"abstention_distribution", abstention_distribution}, {"objective_distribution", histogram(objectives)},
             {"accuracy", {{"min", min_accuracy <= max_accuracy ? json(min_accuracy) : json(nullptr)}, {"max", min_accuracy <= max_accuracy ? json(max_accuracy) : json(nullptr)}, {"undefined_count", undefined_accuracy.str()}}},
